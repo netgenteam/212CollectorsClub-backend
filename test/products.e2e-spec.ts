@@ -3,6 +3,7 @@ import { INestApplication, VersioningType } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
+import { PrismaService } from './../src/prisma/prisma.service.js';
 
 type App = Parameters<typeof request>[0];
 
@@ -21,6 +22,26 @@ interface ProductListItem {
 interface PaginatedProducts {
   data: ProductListItem[];
   meta: { page: number; limit: number; total: number; totalPages: number };
+}
+
+interface ProductDetail {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  price: number;
+  inStock: boolean;
+  availableStock: number;
+  franchise: string;
+  productType: string;
+  rarity: string;
+  category: { id: string; name: string; slug: string };
+  images: Array<{
+    id: string;
+    url: string;
+    altText: string | null;
+    sortOrder: number;
+  }>;
 }
 
 // Runs against the shared dev Postgres seeded by Story 1.4 (prisma/seed.ts),
@@ -200,6 +221,156 @@ describe('ProductsController (e2e)', () => {
     return request(app.getHttpServer())
       .get('/api/v1/products?limit=0')
       .expect(400);
+  });
+
+  // Story 2.3 (FR-7): GET /api/v1/products/:id — Product detail.
+  describe('GET /api/v1/products/:id (Story 2.3)', () => {
+    it('returns full detail for the seeded "Charizard VMAX" Product, including both of its seeded ProductImages', async () => {
+      const listRes = await request(app.getHttpServer())
+        .get('/api/v1/products?search=Charizard%20VMAX&limit=1')
+        .expect(200);
+      const [seeded] = (listRes.body as PaginatedProducts).data;
+      if (!seeded) {
+        throw new Error(
+          'Expected the seeded "Charizard VMAX" Product to exist',
+        );
+      }
+
+      return request(app.getHttpServer())
+        .get(`/api/v1/products/${seeded.id}`)
+        .expect(200)
+        .expect((res) => {
+          const body = res.body as ProductDetail;
+          if (body.id !== seeded.id || body.name !== 'Charizard VMAX') {
+            throw new Error(
+              `Unexpected Product detail: ${JSON.stringify(body)}`,
+            );
+          }
+          if (
+            typeof body.description !== 'string' ||
+            body.description.length === 0
+          ) {
+            throw new Error(
+              `Expected a non-empty description, got: ${JSON.stringify(body.description)}`,
+            );
+          }
+          if (typeof body.price !== 'number') {
+            throw new Error(
+              `Expected numeric price, got: ${JSON.stringify(body.price)}`,
+            );
+          }
+          if (
+            !body.category ||
+            typeof body.category.id !== 'string' ||
+            typeof body.category.name !== 'string' ||
+            typeof body.category.slug !== 'string'
+          ) {
+            throw new Error(
+              `Expected a joined Category, got: ${JSON.stringify(body.category)}`,
+            );
+          }
+          if (!Array.isArray(body.images) || body.images.length !== 2) {
+            throw new Error(
+              `Expected both seeded ProductImages for Charizard VMAX, got: ${JSON.stringify(body.images)}`,
+            );
+          }
+          const sortOrders = body.images.map((image) => image.sortOrder).sort();
+          if (sortOrders[0] !== 0 || sortOrders[1] !== 1) {
+            throw new Error(
+              `Expected images ordered by sortOrder 0 then 1, got: ${JSON.stringify(body.images)}`,
+            );
+          }
+        });
+    });
+
+    it('returns 404 (never a 500 or an empty 200) for a well-formed but non-existent Product id', () => {
+      return request(app.getHttpServer())
+        .get('/api/v1/products/00000000-0000-0000-0000-000000000000')
+        .expect(404)
+        .expect((res) => {
+          const body = res.body as { statusCode: number };
+          if (body.statusCode !== 404) {
+            throw new Error(
+              `Expected a 404 body, got: ${JSON.stringify(body)}`,
+            );
+          }
+        });
+    });
+
+    it('returns a stable 400 (never a 500) for a syntactically invalid id', () => {
+      return request(app.getHttpServer())
+        .get('/api/v1/products/not-a-valid-uuid')
+        .expect(400)
+        .expect((res) => {
+          const body = res.body as { statusCode: number; error: string };
+          if (body.statusCode !== 400 || body.error !== 'Bad Request') {
+            throw new Error(
+              `Expected a stable Bad Request shape, got: ${JSON.stringify(body)}`,
+            );
+          }
+        });
+    });
+
+    it('reflects a stock change made directly in Postgres on the very next request, with no caching/staleness (AD-10, NFR-2)', async () => {
+      const prisma = app.get(PrismaService);
+      const listRes = await request(app.getHttpServer())
+        .get('/api/v1/products?search=Charizard%20VMAX&limit=1')
+        .expect(200);
+      const [seeded] = (listRes.body as PaginatedProducts).data;
+      if (!seeded) {
+        throw new Error(
+          'Expected the seeded "Charizard VMAX" Product to exist',
+        );
+      }
+      const original = await prisma.product.findUniqueOrThrow({
+        where: { id: seeded.id },
+        select: { stock: true, heldQty: true },
+      });
+
+      try {
+        const firstRes = await request(app.getHttpServer())
+          .get(`/api/v1/products/${seeded.id}`)
+          .expect(200);
+        const firstAvailable = (firstRes.body as ProductDetail).availableStock;
+
+        // Mutate stock directly at the DB layer (bypassing the app entirely)
+        // to prove there is no cache/staleness window in front of this read
+        // (AD-10) — the very next HTTP request must reflect it immediately.
+        const newStock = original.stock === 0 ? 1 : 0;
+        await prisma.product.update({
+          where: { id: seeded.id },
+          data: { stock: newStock },
+        });
+
+        const secondRes = await request(app.getHttpServer())
+          .get(`/api/v1/products/${seeded.id}`)
+          .expect(200);
+        const secondBody = secondRes.body as ProductDetail;
+        const expectedAvailable = Math.max(newStock - original.heldQty, 0);
+
+        if (secondBody.availableStock === firstAvailable) {
+          throw new Error(
+            `Expected availableStock to change immediately after a direct DB update, stayed at ${firstAvailable}`,
+          );
+        }
+        if (secondBody.availableStock !== expectedAvailable) {
+          throw new Error(
+            `Expected availableStock ${expectedAvailable} after direct DB update, got ${secondBody.availableStock}`,
+          );
+        }
+        if (secondBody.inStock !== expectedAvailable > 0) {
+          throw new Error(
+            `Expected inStock ${expectedAvailable > 0}, got ${secondBody.inStock}`,
+          );
+        }
+      } finally {
+        // Always restore the seeded value, even if an assertion above threw.
+        await prisma.product.update({
+          where: { id: seeded.id },
+          data: { stock: original.stock },
+        });
+      }
+    });
   });
 
   afterEach(async () => {

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import type {
@@ -13,6 +13,7 @@ import {
   PaginationMetaDto,
 } from './dto/paginated-products-response.dto.js';
 import { ProductListItemDto } from './dto/product-list-item.dto.js';
+import { ProductDetailDto } from './dto/product-detail.dto.js';
 
 // Raw shape of one row from the hand-written SQL in `listProducts` below —
 // only the columns that query selects, before mapping to ProductListItemDto.
@@ -172,5 +173,55 @@ export class CatalogService {
     };
 
     return { data, meta };
+  }
+
+  /**
+   * Story 2.3 (FR-7): full detail for a single Product by id — description,
+   * every associated `ProductImage` (not just the primary one, unlike
+   * Story 2.2's list), live `availableStock` (`stock - heldQty`, same
+   * derivation and no-cache guarantee as `listProducts`, per AD-10: direct
+   * Postgres read on every call, no caching layer anywhere in this app),
+   * and the joined `Category`.
+   *
+   * The AC also mentions a "deactivated Product" 404, but `Product` (Story
+   * 1.4) has no `isActive`/soft-delete field yet — the same gap as Story
+   * 2.1's "active Categories" wording, and this story's Technical Notes
+   * explicitly rule out schema changes. Today every existing row is
+   * implicitly "active": only a genuinely missing id 404s. Add an
+   * `isActive` filter here once that field exists on the model (Epic 8,
+   * admin CRUD Products).
+   */
+  async getProductDetail(id: string): Promise<ProductDetailDto> {
+    const product = await this.prisma.product.findUnique({
+      where: { id },
+      include: {
+        category: { select: { id: true, name: true, slug: true } },
+        images: {
+          orderBy: { sortOrder: 'asc' },
+          select: { id: true, url: true, altText: true, sortOrder: true },
+        },
+      },
+    });
+
+    if (!product) {
+      throw new NotFoundException(`Product ${id} not found`);
+    }
+
+    const availableStock = Math.max(product.stock - product.heldQty, 0);
+
+    return {
+      id: product.id,
+      name: product.name,
+      slug: product.slug,
+      description: product.description,
+      price: Number(product.priceUsd),
+      inStock: availableStock > 0,
+      availableStock,
+      franchise: product.franchise,
+      productType: product.productType,
+      rarity: product.rarity,
+      category: product.category,
+      images: product.images,
+    };
   }
 }

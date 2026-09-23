@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { NotFoundException } from '@nestjs/common';
 import { CatalogService } from './catalog.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { ListProductsQueryDto } from './dto/list-products-query.dto.js';
@@ -13,6 +14,7 @@ describe('CatalogService', () => {
   let prisma: {
     category: { findMany: ReturnType<typeof vi.fn> };
     productImage: { findMany: ReturnType<typeof vi.fn> };
+    product: { findUnique: ReturnType<typeof vi.fn> };
     $queryRaw: ReturnType<typeof vi.fn>;
   };
 
@@ -31,6 +33,9 @@ describe('CatalogService', () => {
       },
       productImage: {
         findMany: vi.fn(),
+      },
+      product: {
+        findUnique: vi.fn(),
       },
       $queryRaw: vi.fn(),
     };
@@ -203,6 +208,98 @@ describe('CatalogService', () => {
         total: 45,
         totalPages: 5,
       });
+    });
+  });
+
+  describe('getProductDetail', () => {
+    function buildProduct(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'f65915f5-2931-4e50-af95-630b1fd7b950',
+        name: 'Charizard VMAX',
+        slug: 'charizard-vmax',
+        description:
+          'Carta individual Charizard VMAX, ilustración a página completa.',
+        franchise: 'POKEMON',
+        productType: 'SINGLE_CARD',
+        rarity: 'ULTRA_RARE',
+        priceUsd: '89.99',
+        stock: 12,
+        heldQty: 0,
+        category: {
+          id: 'dd848f24-aac0-4346-ae25-b672bb0d7e14',
+          name: 'Cartas Sueltas',
+          slug: 'cartas-sueltas',
+        },
+        images: [
+          {
+            id: '2eda5451-a7e4-4455-a6e3-98a13eaba941',
+            url: 'https://picsum.photos/seed/charizard-vmax-1/600/800',
+            altText: 'Charizard VMAX - frente',
+            sortOrder: 0,
+          },
+          {
+            id: '3eda5451-a7e4-4455-a6e3-98a13eaba942',
+            url: 'https://picsum.photos/seed/charizard-vmax-2/600/800',
+            altText: 'Charizard VMAX - reverso',
+            sortOrder: 1,
+          },
+        ],
+        ...overrides,
+      };
+    }
+
+    it('returns full detail, including every ProductImage and the joined Category', async () => {
+      const product = buildProduct();
+      prisma.product.findUnique.mockResolvedValue(product);
+
+      const result = await service.getProductDetail(product.id);
+
+      expect(prisma.product.findUnique).toHaveBeenCalledWith({
+        where: { id: product.id },
+        include: {
+          category: { select: { id: true, name: true, slug: true } },
+          images: {
+            orderBy: { sortOrder: 'asc' },
+            select: { id: true, url: true, altText: true, sortOrder: true },
+          },
+        },
+      });
+      expect(result).toEqual({
+        id: product.id,
+        name: 'Charizard VMAX',
+        slug: 'charizard-vmax',
+        description:
+          'Carta individual Charizard VMAX, ilustración a página completa.',
+        price: 89.99,
+        inStock: true,
+        availableStock: 12,
+        franchise: 'POKEMON',
+        productType: 'SINGLE_CARD',
+        rarity: 'ULTRA_RARE',
+        category: product.category,
+        images: product.images,
+      });
+    });
+
+    it('throws NotFoundException (never returns null/undefined) when no Product matches the id', async () => {
+      prisma.product.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.getProductDetail('00000000-0000-0000-0000-000000000000'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('derives availableStock/inStock from stock - heldQty, clamped at 0', async () => {
+      prisma.product.findUnique.mockResolvedValue(
+        buildProduct({ stock: 5, heldQty: 5 }),
+      );
+
+      const result = await service.getProductDetail(
+        'f65915f5-2931-4e50-af95-630b1fd7b950',
+      );
+
+      expect(result.availableStock).toBe(0);
+      expect(result.inStock).toBe(false);
     });
   });
 });
