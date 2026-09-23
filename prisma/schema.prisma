@@ -1,0 +1,15 @@
+// 212CollectorsClub backend — Prisma schema
+// No models yet: this is the Story 1.1 bootstrap scaffold only.
+// Real models (Category, Product, ProductImage, ...) land in Story 1.4.
+// Migrations are applied exclusively via `prisma migrate dev|deploy` (AD-1) — never manual DDL.
+
+generator client {
+  provider = "prisma-client"
+  // Generated inside src/ (not a project-root sibling) so it stays under
+  // tsconfig.build.json's rootDir ("./src") and `nest build` can emit it.
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}

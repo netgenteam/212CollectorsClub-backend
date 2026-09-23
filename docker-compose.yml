@@ -1,0 +1,28 @@
+# Local development Postgres for 212CollectorsClub backend.
+# Dedicated to this project only — do not reuse for other projects on this host.
+# Runs on host port 5433 (not the default 5432) to avoid colliding with
+# Postgres instances other projects on this machine may already have bound.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: 212collectorsclub-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: collectorsclub_dev
+      POSTGRES_USER: collectorsclub
+      # No hardcoded secret here: comes from the shell environment (see .env.example
+      # for the documented placeholder), with a reasonable local-dev-only default.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-collectorsclub_dev_password}
+    ports:
+      - '5433:5432'
+    volumes:
+      - 212collectorsclub_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U collectorsclub -d collectorsclub_dev']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  212collectorsclub_postgres_data:
+    name: 212collectorsclub_postgres_data
