@@ -22,6 +22,7 @@ pnpm install
 cp .env.example .env   # then edit values if needed
 docker compose up -d   # starts a dedicated Postgres on host port 5433
 pnpm prisma:migrate    # applies migrations to your local DB
+pnpm prisma:seed       # populates mock catalog data (Categories/Products/Images)
 pnpm start:dev
 ```
 
@@ -53,6 +54,7 @@ must never contain committed secrets.
 | `pnpm prisma:generate` | Regenerate the Prisma client (also runs on `postinstall`) |
 | `pnpm prisma:migrate` | `prisma migrate dev` (local dev only) |
 | `pnpm prisma:deploy` | `prisma migrate deploy` (CI/CD — never run automatically at app boot) |
+| `pnpm prisma:seed` | Runs `prisma/seed.ts` (mock catalog data), via `tsx` |
 
 ## Project structure
 
@@ -60,6 +62,38 @@ must never contain committed secrets.
 `catalog/`, `cart/`, `checkout/`, `payments-paypal/`, `payments-pago-movil/`, `orders/`,
 `contact/`, `admin-auth/`, `admin-catalog/`, `admin-landing/`, `common/`, `prisma/`.
 Most are still empty scaffolds (`.gitkeep`) — they're filled in by later stories.
+
+## Catalog schema & seed data (Story 1.4)
+
+The Catalog domain (`prisma/schema.prisma`) defines:
+
+- **`Category`** — admin-managed grouping table (`Categories`), independent of the enums
+  below (AD-2). `id`, `name`, `slug` (unique), timestamps.
+- **`Product`** (`Products`) — `franchise`/`productType`/`rarity` are native Postgres enums
+  (`Franchise`, `ProductType`, `Rarity`) defined once in the schema, never per-module string
+  constants (AD-2). `priceUsd` is `Decimal(10,2)` (USD-canonical, per AD-3). `stock Int` and
+  `heldQty Int @default(0)` (placeholder for Epic 4's stock-hold feature, added now so that
+  epic doesn't need to alter `Product` again). Many-to-one to `Category` (deleting a
+  `Category` still referenced by a `Product` is rejected at the DB level — `ON DELETE
+  RESTRICT` — matching the architecture's `409 CATEGORY_IN_USE` policy, enforced at the
+  service layer once Epic 8's admin CRUD lands).
+- **`ProductImage`** (`Product_Images`) — one-to-many from `Product` (`ON DELETE CASCADE`),
+  `url`, optional `altText`, `sortOrder`.
+
+Migrations are applied exclusively via `prisma migrate dev|deploy` (AD-1) — this story's
+migration is `prisma/migrations/20260923034725_add_catalog_schema/`.
+
+**Seed data** (`prisma/seed.ts`, run with `pnpm prisma:seed`) populates 10 mock Products
+across 4 Franchises (Pokémon, One Piece, Magic: The Gathering, Yu-Gi-Oh!), 5 Product Types,
+and 6 Rarities, their 4 Categories, and 13 Product Images (every Product has at least one).
+
+**Idempotency strategy:** every seeded row carries a fixed, hardcoded `id` and is written
+with `upsert` keyed on that `id` — never a bare `create`. Re-running `pnpm prisma:seed`
+against an already-seeded database updates those same rows in place instead of inserting
+duplicates. This was chosen over a "delete catalog tables, then reinsert" reset because it's
+safer to re-run unattended (e.g. from a CI/deploy step) and needs no FK-ordering cleanup on
+the way down. Verified during implementation: running the seed twice in a row left row
+counts unchanged (Categories=4, Products=10, ProductImages=13 both times).
 
 ## Local PostgreSQL (docker-compose)
 

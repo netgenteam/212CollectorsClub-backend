@@ -9,6 +9,10 @@ export default defineConfig({
   schema: 'prisma/schema.prisma',
   migrations: {
     path: 'prisma/migrations',
+    // `tsx` runs the TS/ESM seed script directly (no separate build step),
+    // resolving the generated Prisma client's nodenext ".js" specifiers
+    // against their sibling ".ts" sources the way plain `node` cannot.
+    seed: 'tsx prisma/seed.ts',
   },
   datasource: {
     url: env('DATABASE_URL'),
