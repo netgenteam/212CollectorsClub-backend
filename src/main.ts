@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { VersioningType } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module.js';
+import { createGlobalValidationPipe } from './common/global-validation-pipe.js';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -17,6 +18,10 @@ async function bootstrap() {
     type: VersioningType.URI,
     defaultVersion: '1',
   });
+
+  // NFR-3 (Story 2.2): malformed/invalid request params get a stable 400
+  // error shape everywhere, not a raw 500 from downstream Prisma/Postgres.
+  app.useGlobalPipes(createGlobalValidationPipe());
 
   // FR-2: OpenAPI/Swagger doc generated purely from @nestjs/swagger
   // decorators on controllers/DTOs — never a hand-maintained separate doc.

@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, VersioningType } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from './../src/app.module.js';
+import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 
 type App = Parameters<typeof request>[0];
 
@@ -27,6 +28,7 @@ describe('CatalogController (e2e)', () => {
       type: VersioningType.URI,
       defaultVersion: '1',
     });
+    app.useGlobalPipes(createGlobalValidationPipe());
 
     await app.init();
   });

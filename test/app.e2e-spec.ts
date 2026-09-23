@@ -4,6 +4,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import request from 'supertest';
 import { AppModule } from './../src/app.module.js';
 import { HealthStatus } from './../src/app.service.js';
+import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 
 // `supertest/types` doesn't resolve under TS's `nodenext` module resolution
 // (the `@types/supertest` package has no `exports` map for that subpath), so
@@ -29,6 +30,7 @@ describe('AppController (e2e)', () => {
       type: VersioningType.URI,
       defaultVersion: '1',
     });
+    app.useGlobalPipes(createGlobalValidationPipe());
     const swaggerConfig = new DocumentBuilder()
       .setTitle('212CollectorsClub API')
       .setVersion('1.0')

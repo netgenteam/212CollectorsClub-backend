@@ -8,14 +8,16 @@
 // — never manual DDL.
 
 generator client {
-  provider = "prisma-client"
+  provider        = "prisma-client"
   // Generated inside src/ (not a project-root sibling) so it stays under
   // tsconfig.build.json's rootDir ("./src") and `nest build` can emit it.
-  output   = "../src/generated/prisma"
+  output          = "../src/generated/prisma"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
+  provider   = "postgresql"
+  extensions = [pg_trgm]
 }
 
 /// The TCG universe a Product belongs to (PRD §3 Glossary — e.g. "Pokémon",
@@ -90,6 +92,11 @@ model Product {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// Story 2.2 / AD-10: pg_trgm GIN indexes backing the FR-6 free-text
+  /// `search=` filter, so ILIKE/similarity matching on name and description
+  /// stays within the NFR-1 300ms p95 budget instead of a full table scan.
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([description(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("Products")
 }
 
