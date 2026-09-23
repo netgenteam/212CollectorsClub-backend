@@ -1,0 +1,50 @@
+# 212CollectorsClub backend — Nginx template for STAGING, routed by
+# subdomain per AD-15 (docs/architecture.md).
+#
+# Install on the VPS as /etc/nginx/sites-available/staging-api.<DOMAIN>.conf,
+# replace every <DOMAIN> below with the real domain, then:
+#   sudo ln -s /etc/nginx/sites-available/staging-api.<DOMAIN>.conf \
+#              /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# TLS is deliberately NOT hardcoded here: run `sudo certbot --nginx -d
+# staging-api.<DOMAIN>` after this file is enabled and serving plain HTTP —
+# certbot rewrites this file in place to add the 443/TLS server block and a
+# 80->443 redirect. See docs/deployment.md.
+#
+# NOT verified against a real domain or real traffic in this sandbox — only
+# checked with `nginx -t` inside a throwaway nginx:alpine container (no
+# nginx installed on this dev machine). See docs/deployment.md for what
+# Angel must still confirm on the real VPS.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name staging-api.<DOMAIN>;
+
+    # Matches the staging systemd unit's PORT (see
+    # /opt/212cc/staging/shared/.env and
+    # deploy/systemd/212cc-backend-staging.service) — the app only ever
+    # binds to 127.0.0.1 from Nginx's perspective; the actual process may
+    # listen on all interfaces (Node/Express default), so the VPS firewall
+    # must also block external access to this port directly (see
+    # docs/deployment.md, firewall section).
+    set $backend 127.0.0.1:3001;
+
+    # Product images / Proof-of-Payment uploads (Stories 4.2, 8.2) —
+    # generous but bounded; adjust once real upload limits are confirmed.
+    client_max_body_size 10m;
+
+    location / {
+        proxy_pass http://$backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    access_log /var/log/nginx/212cc-staging.access.log;
+    error_log  /var/log/nginx/212cc-staging.error.log;
+}

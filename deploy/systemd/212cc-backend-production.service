@@ -1,0 +1,65 @@
+# 212CollectorsClub backend — PRODUCTION systemd unit template.
+#
+# Install on the VPS as /etc/systemd/system/212cc-backend-production.service
+# (copy this file there — do not symlink into the git checkout, so a
+# `git checkout`/`git clean` in the app dir can never alter the unit
+# GitHub Actions' deploy-production job restarts by name).
+#
+# Deliberately near-identical to 212cc-backend-staging.service — only
+# User/Group, WorkingDirectory, EnvironmentFile and the sudoers restart
+# rule differ. That symmetry is what makes AD-15's "same codebase,
+# env-swap-only" claim true at the systemd layer too, not just in the app.
+#
+# NOT verified by running it — no VPS/systemd available in this sandbox.
+# See docs/deployment.md for full provisioning steps and the exact
+# `useradd`/`mkdir`/sudoers commands this unit depends on.
+
+[Unit]
+Description=212CollectorsClub backend API (production)
+Documentation=https://github.com/netgenteam/212CollectorsClub-backend
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Does NOT declare Requires=postgresql.service on purpose: this unit and
+# Postgres are independently managed; a Postgres restart should not tear
+# this service down, and this service's own health check already reports
+# 503 if the DB is unreachable (src/app.controller.ts) rather than crash.
+# Give the app time to connect to Postgres/finish boot before systemd
+# considers a restart loop a failure (belongs in [Unit], not [Service]).
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=cc212-production
+Group=cc212-production
+WorkingDirectory=/opt/212cc/production/app
+
+# Confirm the real path with `sudo -u cc212-production which node` on the
+# VPS and edit this line if Node was installed somewhere other than
+# system-wide (e.g. via a per-user nvm install, which systemd cannot see
+# without sourcing shell rc files — install Node system-wide instead, see
+# docs/deployment.md).
+ExecStart=/usr/bin/node dist/main
+
+# Persistent secrets/config for this environment — never inside the git
+# checkout, so `deploy/deploy.sh`'s `git fetch`/`checkout` can never touch
+# it. Angel creates this file once by hand per docs/deployment.md; CI never
+# writes to it.
+EnvironmentFile=/opt/212cc/production/shared/.env
+
+Restart=on-failure
+RestartSec=5
+
+# --- Hardening (least-privilege; loosen only if a later story genuinely
+# needs it, e.g. wider filesystem access for uploads) ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Only the app's own working directory is writable (covers the Story
+# 4.2/8.2 `uploads/public|private` local-disk storage under
+# app/uploads once that feature lands).
+ReadWritePaths=/opt/212cc/production/app
+
+[Install]
+WantedBy=multi-user.target

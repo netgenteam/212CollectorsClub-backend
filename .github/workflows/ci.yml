@@ -1,0 +1,165 @@
+name: CI/CD
+
+# Story 1.3 (docs/stories/1.3-cicd-staging-and-production-deploy.md), AD-15
+# (docs/architecture.md).
+#
+# - `lint-and-test` runs on every push to any branch, and on pull requests
+#   targeting `main`/`develop` (so fork/external PRs also get a check, and so
+#   the "Require status checks to pass" branch-protection rule has something
+#   to attach to). Running on both triggers can produce two runs for the same
+#   commit on a same-repo PR — harmless, and standard practice; GitHub matches
+#   required status checks by commit SHA regardless of which event produced
+#   them.
+# - Branch protection itself (requiring this job before merge) is a GitHub
+#   repo *setting*, not something this YAML can enforce — see
+#   docs/deployment.md, "GitHub repository configuration Angel must do".
+# - `deploy-staging` / `deploy-production` only run on a direct push (not a
+#   pull_request event) to `develop` / `main` respectively, and only after
+#   `lint-and-test` passes.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main, develop]
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a feature
+# branch) to save CI minutes; deploy jobs are unaffected since they only run
+# on push to develop/main, one commit at a time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '24'
+  PNPM_VERSION: '11'
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Given a push to any branch, lint and run the full test suite. A failing
+  # lint or test fails this job, which blocks `deploy-staging`/
+  # `deploy-production` (via `needs:`) and — once Angel enables branch
+  # protection — blocks merging the PR too.
+  # ---------------------------------------------------------------------
+  lint-and-test:
+    name: Lint, build & test
+    runs-on: ubuntu-latest
+    services:
+      # Matches the Postgres major version pinned for staging/production
+      # (17.x, per docs/architecture.md Stack table). This is a throwaway
+      # database that lives only for the duration of the job, on the
+      # runner's private network — its password is not a real secret, never
+      # reused anywhere else, and is not the STAGING_/PRODUCTION_ DB used by
+      # deployed environments.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: collectorsclub_ci
+          POSTGRES_PASSWORD: collectorsclub_ci_password
+          POSTGRES_DB: collectorsclub_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U collectorsclub_ci -d collectorsclub_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://collectorsclub_ci:collectorsclub_ci_password@localhost:5432/collectorsclub_ci?schema=public
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      # Runs `prisma generate` automatically via the `postinstall` script.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint (zero warnings allowed)
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+      # Explicit, separate step — never implicit at app boot (AD-15). Applies
+      # the same migrations that will later run against staging/production to
+      # this job's throwaway CI database, so a broken migration fails CI
+      # before it can ever reach a real deploy.
+      - name: Apply Prisma migrations (CI database)
+        run: pnpm prisma:deploy
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: E2E tests
+        run: pnpm test:e2e
+
+  # ---------------------------------------------------------------------
+  # develop -> staging systemd service + staging Postgres DB.
+  # ---------------------------------------------------------------------
+  deploy-staging:
+    name: Deploy to staging
+    needs: lint-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    # A GitHub "Environment" — lets Angel additionally require manual
+    # approval and/or scope secrets to just this environment in repo
+    # settings, on top of the secrets listed below. See docs/deployment.md.
+    environment: staging
+    permissions:
+      contents: read
+    steps:
+      # SSH into the VPS and run the in-repo deploy script (deploy/deploy.sh,
+      # already present at STAGING_APP_DIR from the initial manual `git
+      # clone` — see docs/deployment.md). The script itself does the
+      # `git fetch`/checkout, `pnpm install`, `pnpm build`,
+      # `prisma migrate deploy` (explicit, separate, before restart per
+      # AD-15) and the systemd restart.
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          port: ${{ secrets.STAGING_SSH_PORT }}
+          script_stop: true
+          script: |
+            "${{ secrets.STAGING_APP_DIR }}/deploy/deploy.sh" staging "${{ github.sha }}"
+
+  # ---------------------------------------------------------------------
+  # main -> production systemd service + production Postgres DB.
+  # Same build, same script, only the branch/environment/secrets differ —
+  # this is what proves FR-3's "same codebase, env-swap-only" requirement.
+  # ---------------------------------------------------------------------
+  deploy-production:
+    name: Deploy to production
+    needs: lint-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.PRODUCTION_HOST }}
+          username: ${{ secrets.PRODUCTION_SSH_USER }}
+          key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          port: ${{ secrets.PRODUCTION_SSH_PORT }}
+          script_stop: true
+          script: |
+            "${{ secrets.PRODUCTION_APP_DIR }}/deploy/deploy.sh" production "${{ github.sha }}"
