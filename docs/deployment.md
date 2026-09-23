@@ -298,9 +298,26 @@ production go-live.
   parse) — clean.
 - Both `deploy/systemd/*.service` files verified with `systemd-analyze
   verify` (systemd is available in this sandbox) against copies with the
-  placeholder VPS paths substituted for real local ones — both pass with no
-  errors or warnings. The real files, as committed, still contain
-  VPS-specific placeholder paths that don't exist on this dev machine.
+  placeholder VPS paths substituted for real local ones — **and** with
+  `ExecStart` repointed from `/usr/bin/node` to a real local Node binary
+  (`/usr/bin/node` does not exist in this dev/CI sandbox; Node here is only
+  installed per-user via nvm, e.g. `~/.nvm/versions/node/*/bin/node`, which
+  `systemd-analyze verify` cannot resolve since it doesn't source shell rc
+  files). With both substitutions, both units pass with no errors or
+  warnings. This confirms the unit *structure* is correct — `Type`,
+  `User`/`Group`, `WorkingDirectory`, `EnvironmentFile`, the hardening
+  directives, and the `[Install]` section all parse and are internally
+  consistent. It does **not** confirm that `/usr/bin/node` (or whichever
+  path Node actually ends up at) is correct on the real VPS — leaving
+  `ExecStart` as `/usr/bin/node` unchanged and only substituting the VPS
+  paths reliably fails verification here with `Command /usr/bin/node is not
+  executable: No such file or directory`, because that binary genuinely
+  doesn't exist on this machine. The `ExecStart` path can only be confirmed
+  once Angel provisions the real VPS, installs Node system-wide there, and
+  runs `sudo -u cc212-staging which node` (per the comment already in each
+  unit file) to verify it matches. The real files, as committed, still
+  contain VPS-specific placeholder paths — and the placeholder
+  `/usr/bin/node` — that don't exist on this dev machine.
 - Both `deploy/nginx/*.conf.template` files checked with `nginx -t` inside a
   throwaway `nginx:alpine` Docker container (no nginx installed on this
   host) — both pass.
