@@ -20,7 +20,7 @@ describe('AppController', () => {
     appController = app.get<AppController>(AppController);
   });
 
-  describe('GET /health', () => {
+  describe('GET /api/v1/health', () => {
     it('returns the health payload when the database is reachable', async () => {
       const payload = {
         status: 'ok',

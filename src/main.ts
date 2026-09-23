@@ -1,11 +1,36 @@
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
+import { VersioningType } from '@nestjs/common';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module.js';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
   const port = configService.get<number>('PORT', 3000);
+
+  // FR-1: every route is reachable only under /api/v1 — a global prefix
+  // ("api") plus URI versioning with default version "1" combine into that
+  // prefix for every controller, with no unversioned route left exposed.
+  app.setGlobalPrefix('api');
+  app.enableVersioning({
+    type: VersioningType.URI,
+    defaultVersion: '1',
+  });
+
+  // FR-2: OpenAPI/Swagger doc generated purely from @nestjs/swagger
+  // decorators on controllers/DTOs — never a hand-maintained separate doc.
+  // Mounted at /api/docs, independent of the API's own /api/v1 prefix.
+  const swaggerConfig = new DocumentBuilder()
+    .setTitle('212CollectorsClub API')
+    .setDescription(
+      'Versioned REST API for the 212CollectorsClub backend (e-commerce TCG platform).',
+    )
+    .setVersion('1.0')
+    .build();
+  const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
+  SwaggerModule.setup('api/docs', app, swaggerDocument);
+
   await app.listen(port);
 }
 await bootstrap();

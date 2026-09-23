@@ -25,8 +25,15 @@ pnpm prisma:migrate    # applies migrations to your local DB
 pnpm start:dev
 ```
 
-`GET /health` returns `200` with `{"status":"ok","database":"up",...}` once the app can
-reach PostgreSQL, and `503` if it cannot — this is a real liveness check, not a static 200.
+Every route is served under a single versioned prefix, `/api/v1` (global prefix `api` +
+URI versioning, default version `1` — no unversioned route is ever exposed). For example,
+`GET /api/v1/health` returns `200` with `{"status":"ok","database":"up",...}` once the app
+can reach PostgreSQL, and `503` if it cannot — this is a real liveness check, not a static 200.
+
+Live, browsable API docs (OpenAPI/Swagger, generated from `@nestjs/swagger` decorators on
+controllers/DTOs — never hand-maintained) are served at `GET /api/docs`, with the raw
+OpenAPI JSON at `GET /api/docs-json`. Any new endpoint or DTO field added with proper
+decorators appears there automatically on next boot.
 
 ## Environment variables
 

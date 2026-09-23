@@ -1,3 +1,6 @@
 allowBuilds:
   '@prisma/engines': true
+  # Telemetry-only postinstall script pulled in transitively by
+  # swagger-ui-dist (via @nestjs/swagger) — denied, not needed to build.
+  '@scarf/scarf': false
   prisma: true
