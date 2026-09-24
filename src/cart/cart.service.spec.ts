@@ -327,6 +327,58 @@ describe('CartService', () => {
     });
   });
 
+  describe('removeItem', () => {
+    const cartId = 'existing-cart-id';
+    const productId = 'f65915f5-2931-4e50-af95-630b1fd7b950';
+
+    it('throws NotFoundException without touching the DB when there is no cartId', async () => {
+      await expect(service.removeItem(null, productId)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the cartId matches no live Cart', async () => {
+      tx.cart.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.removeItem(cartId, productId),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(tx.cartItem.findUnique).not.toHaveBeenCalled();
+      expect(tx.cartItem.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the Product is not a line in that Cart (including a repeated DELETE of an already-removed item)', async () => {
+      tx.cart.findFirst.mockResolvedValue({
+        id: cartId,
+        expiresAt: new Date(Date.now() + 1000),
+      });
+      tx.cartItem.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.removeItem(cartId, productId),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(tx.cartItem.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('deletes the CartItem row via deleteMany — the same lookup + deletion primitive updateItemQuantity(quantity=0) uses', async () => {
+      tx.cart.findFirst.mockResolvedValue({
+        id: cartId,
+        expiresAt: new Date(Date.now() + 1000),
+      });
+      tx.cartItem.findUnique.mockResolvedValue({
+        id: 'existing-item-id',
+        quantity: 4,
+      });
+
+      await service.removeItem(cartId, productId);
+
+      expect(tx.cartItem.deleteMany).toHaveBeenCalledWith({
+        where: { id: 'existing-item-id' },
+      });
+    });
+  });
+
   describe('getCart', () => {
     it('returns an empty cart (never throws) when cartId is null', async () => {
       await expect(service.getCart(null)).resolves.toEqual({

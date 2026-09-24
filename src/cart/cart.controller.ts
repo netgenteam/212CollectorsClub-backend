@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -97,11 +98,11 @@ export class CartController {
   /**
    * Story 3.2 (FR-9, AD-5): updates the quantity of a Product already in
    * the caller's cart. A quantity of 0 removes the line entirely (same
-   * effect Story 3.3's dedicated DELETE endpoint will have — not built
-   * here, see CartService.updateItemQuantity for the full reasoning).
-   * 404s when there's no valid cart cookie, or the productId isn't a line
-   * in that cart — see CartService for why. Rejects with
-   * `409 INSUFFICIENT_STOCK` (current available stock in
+   * effect Story 3.3's dedicated `DELETE` endpoint below has — both share
+   * the same CartService deletion logic, see CartService.removeItem for
+   * the full reasoning). 404s when there's no valid cart cookie, or the
+   * productId isn't a line in that cart — see CartService for why. Rejects
+   * with `409 INSUFFICIENT_STOCK` (current available stock in
    * `details.availableStock`) when the new quantity exceeds live available
    * stock; the cart is left untouched on that rejection. Returns the full
    * updated cart (same shape as `GET /cart`), same pattern as `POST
@@ -137,6 +138,46 @@ export class CartController {
   ): Promise<CartResponseDto> {
     const cartId = this.cartCookie.readCartId(req);
     await this.cartService.updateItemQuantity(cartId, productId, dto.quantity);
+    return this.cartService.getCart(cartId);
+  }
+
+  /**
+   * Story 3.3 (FR-10, AD-5): removes a Product from the caller's cart
+   * entirely. Same 404 semantics as `PATCH` above (no valid cart cookie, or
+   * the productId isn't a line in that cart), and the same underlying
+   * deletion primitive as that endpoint's quantity=0 branch — see
+   * CartService.removeItem for why this reuses rather than duplicates that
+   * logic, and for the idempotency reasoning behind a repeated DELETE on
+   * the same productId (never a 500, 404 the second time since the line is
+   * genuinely gone by then). When the removed item was the only one in the
+   * cart, the response (and any later `GET /cart`) is a valid empty cart —
+   * `{ items: [], total: 0 }` — not an error. Returns the full updated
+   * cart, same pattern as `POST`/`PATCH` above.
+   */
+  @Delete('items/:productId')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Remove a product from the cart',
+    description:
+      "Deletes the CartItem for productId from the caller's cart (identified by the signed cartId cookie) entirely. If it was the only item, the cart becomes a valid empty cart (200, total 0), never an error. 404s when there's no valid cart cookie or the product isn't a line in that cart — including a repeated DELETE of an already-removed item, which is otherwise idempotent (never a 500). Returns the full updated cart.",
+  })
+  @ApiParam({ name: 'productId', format: 'uuid', description: 'Product id.' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'The updated cart, with server-computed line/total prices.',
+    type: CartResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description:
+      'No valid cart cookie, or the given productId is not a line in that cart.',
+  })
+  async removeItem(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Req() req: Request,
+  ): Promise<CartResponseDto> {
+    const cartId = this.cartCookie.readCartId(req);
+    await this.cartService.removeItem(cartId, productId);
     return this.cartService.getCart(cartId);
   }
 }

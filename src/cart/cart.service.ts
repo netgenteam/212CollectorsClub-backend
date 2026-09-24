@@ -118,21 +118,94 @@ export class CartService {
   }
 
   /**
-   * Story 3.2 (FR-9, AD-5). Updates the quantity of a Product already in
-   * the caller's Cart, or removes it entirely when `quantity` is 0.
+   * Shared by `removeItem` (Story 3.3) and `updateItemQuantity`'s
+   * quantity=0 branch (Story 3.2): resolves the caller's live Cart and the
+   * CartItem for `productId` within it, inside the given transaction.
    *
    * **404 decision** (not spelled out by the story/AD-5, decided here same
-   * as Story 3.1 decided its own gaps): a missing/unverifiable cart cookie,
-   * a cookie pointing at an expired/nonexistent Cart, or a `productId` that
-   * isn't a line in that specific Cart are all treated as the same thing —
-   * "there is nothing at that address to update" — and all 404 via
+   * as Story 3.1 decided its own gaps, and kept identical for both
+   * `PATCH`/quantity=0 and the dedicated `DELETE`): a missing/unverifiable
+   * cart cookie, a cookie pointing at an expired/nonexistent Cart, or a
+   * `productId` that isn't a line in that specific Cart are all treated as
+   * the same thing — "there is nothing at that address" — and all 404 via
    * `NotFoundException`. This mirrors how Story 2.3 already uses a plain
-   * 404 for "no such resource" without needing a stable `errorCode` (a 404
-   * needs no reason code to disambiguate, unlike the 409 below). We
-   * deliberately do NOT fall back to "create a cart/line" the way `addItem`
-   * creates a Cart on demand — updating a quantity presupposes the line
-   * already exists; conjuring one here would silently do something the
-   * caller didn't ask for.
+   * 404 for "no such resource" without needing a stable `errorCode`.
+   */
+  private async findCartItemOrThrow(
+    tx: Prisma.TransactionClient,
+    cartId: string,
+    productId: string,
+  ): Promise<{ id: string }> {
+    const cart = await tx.cart.findFirst({
+      where: { id: cartId, expiresAt: { gt: new Date() } },
+    });
+    if (!cart) {
+      throw new NotFoundException('No cart found for this request');
+    }
+
+    const cartItem = await tx.cartItem.findUnique({
+      where: { cartId_productId: { cartId: cart.id, productId } },
+    });
+    if (!cartItem) {
+      throw new NotFoundException(`Product ${productId} is not in this cart`);
+    }
+
+    return cartItem;
+  }
+
+  /**
+   * Story 3.3 (FR-10, AD-5). Deletes the CartItem for `productId` from the
+   * caller's cart entirely — the dedicated-endpoint counterpart of
+   * `updateItemQuantity`'s quantity=0 branch (Story 3.2), and deliberately
+   * built to reuse that exact same logic rather than duplicate it: both
+   * resolve the Cart/CartItem via `findCartItemOrThrow` (same 404
+   * semantics) and both delete via `deleteMany` (see that method's own
+   * idempotency note below, which applies here unchanged).
+   *
+   * If the removed item was the only one in the Cart, this leaves the Cart
+   * row itself in place but with zero CartItems — `getCart` already
+   * returns a valid `{ items: [], total: 0 }` for that shape (same code
+   * path as "no cart at all"), never an error, satisfying this story's own
+   * AC.
+   *
+   * **Idempotency of a repeated/sequential DELETE on the same productId**:
+   * once the first call commits, the CartItem row is gone. A second,
+   * *sequential* DELETE for that same productId finds no CartItem in
+   * `findCartItemOrThrow` and 404s — consistent with (not a new rule vs.)
+   * the 404 Story 3.2 already gives `PATCH` for "productId not in this
+   * cart", since after the first DELETE that is literally true. This is
+   * still "idempotent" in the sense that matters operationally: the
+   * server-side effect (no CartItem for that productId) is identical after
+   * 1 or N calls, and no call ever 500s — a 404 is not a crash. A
+   * *concurrent* double DELETE (both transactions started before either
+   * committed) is additionally safe at the SQL level because the delete
+   * itself uses `deleteMany`, not `delete`: Postgres row-locks the target
+   * row on the first `DELETE`, the second blocks until the first commits,
+   * then re-evaluates its own `WHERE id = ...` against the now-deleted row
+   * and simply affects 0 rows — a silent no-op, not Prisma's P2025 "record
+   * to delete does not exist" throw that `delete` would raise instead.
+   */
+  async removeItem(cartId: string | null, productId: string): Promise<void> {
+    if (!cartId) {
+      throw new NotFoundException('No cart found for this request');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const cartItem = await this.findCartItemOrThrow(tx, cartId, productId);
+      await tx.cartItem.deleteMany({ where: { id: cartItem.id } });
+    });
+  }
+
+  /**
+   * Story 3.2 (FR-9, AD-5). Updates the quantity of a Product already in
+   * the caller's Cart, or removes it entirely when `quantity` is 0 (same
+   * deletion primitive `removeItem`/Story 3.3 uses, via
+   * `findCartItemOrThrow` + `deleteMany` — see that method's own
+   * idempotency note, which applies here too). We deliberately do NOT fall
+   * back to "create a cart/line" the way `addItem` creates a Cart on
+   * demand — updating a quantity presupposes the line already exists;
+   * conjuring one here would silently do something the caller didn't ask
+   * for.
    *
    * **Concurrency guard — improves on the Story 3.1 pattern.** QA flagged
    * (non-blocking) that `addItem`'s stock-race protection today relies on
@@ -151,9 +224,10 @@ export class CartService {
    * quantity that stock no longer supports. If the guard's affected-row
    * count is 0, we re-check whether the `CartItem` still exists at all
    * (another concurrent request could have raced it away, e.g. a parallel
-   * quantity=0 removal) to report 404 instead of a misleading 409 in that
-   * narrow case; otherwise it's a genuine `INSUFFICIENT_STOCK`, and nothing
-   * was written (the whole request rolls back with the transaction).
+   * quantity=0 removal, or a parallel `DELETE`) to report 404 instead of a
+   * misleading 409 in that narrow case; otherwise it's a genuine
+   * `INSUFFICIENT_STOCK`, and nothing was written (the whole request rolls
+   * back with the transaction).
    *
    * This is still a *soft*, informational stock check, same class of
    * guarantee `addItem` already gives — carts don't reserve/hold stock
@@ -175,19 +249,7 @@ export class CartService {
     }
 
     await this.prisma.$transaction(async (tx) => {
-      const cart = await tx.cart.findFirst({
-        where: { id: cartId, expiresAt: { gt: new Date() } },
-      });
-      if (!cart) {
-        throw new NotFoundException('No cart found for this request');
-      }
-
-      const cartItem = await tx.cartItem.findUnique({
-        where: { cartId_productId: { cartId: cart.id, productId } },
-      });
-      if (!cartItem) {
-        throw new NotFoundException(`Product ${productId} is not in this cart`);
-      }
+      const cartItem = await this.findCartItemOrThrow(tx, cartId, productId);
 
       if (quantity === 0) {
         // `deleteMany` (not `delete`) so a concurrent duplicate

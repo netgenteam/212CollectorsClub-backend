@@ -33,6 +33,11 @@ const CHARIZARD_VMAX_ID = 'f65915f5-2931-4e50-af95-630b1fd7b950'; // stock 12
 // this file's own tests can't flake against those in a parallel run.
 const BLUE_EYES_ID = '0992a698-3b4f-446e-9fc0-22fb4fe8847a'; // stock 25
 const YUGIOH_BOX_ID = 'f45cfd6e-43b0-40f3-93e1-49d4d60741ba'; // stock 10
+// Story 3.3: distinct Products again, same reasoning as the Story 3.2 pair
+// above — this file's own tests must not fight over the same rows in a
+// parallel run.
+const POKEMON_SOBRE_ID = '6519e34c-3c48-4b5b-9f79-53e7293513ba'; // stock 200
+const ONE_PIECE_DECK_ID = '8bae3dd3-da83-4509-9ee6-07ee83fb5954'; // stock 60
 
 // Pulls the raw `cartId=...` Set-Cookie header string out of a response so
 // it can be replayed on a follow-up request via `.set('Cookie', ...)` —
@@ -446,6 +451,143 @@ describe('CartController (e2e)', () => {
       return request(app.getHttpServer())
         .patch('/api/v1/cart/items/not-a-valid-uuid')
         .send({ quantity: 2 })
+        .expect(400);
+    });
+  });
+
+  describe('DELETE /api/v1/cart/items/:productId (Story 3.3)', () => {
+    it('removes one of two items — the DELETE response and a follow-up GET both show only the remaining item, with the recalculated total', async () => {
+      const addFirst = await request(app.getHttpServer())
+        .post('/api/v1/cart/items')
+        .send({ productId: POKEMON_SOBRE_ID, quantity: 2 })
+        .expect(201);
+      const cartCookie = extractCartCookie(addFirst);
+
+      const addSecond = await request(app.getHttpServer())
+        .post('/api/v1/cart/items')
+        .set('Cookie', cartCookie)
+        .send({ productId: ONE_PIECE_DECK_ID, quantity: 1 })
+        .expect(201);
+      const remainingPrice = (addSecond.body as CartResponse).items.find(
+        (i) => i.productId === ONE_PIECE_DECK_ID,
+      )?.price;
+
+      const deleteRes = await request(app.getHttpServer())
+        .delete(`/api/v1/cart/items/${POKEMON_SOBRE_ID}`)
+        .set('Cookie', cartCookie)
+        .expect(200);
+      const deleteBody = deleteRes.body as CartResponse;
+      if (deleteBody.items.some((i) => i.productId === POKEMON_SOBRE_ID)) {
+        throw new Error(
+          `Expected the deleted item gone from the DELETE response, got: ${JSON.stringify(deleteBody)}`,
+        );
+      }
+      if (
+        deleteBody.items.length !== 1 ||
+        deleteBody.items[0].productId !== ONE_PIECE_DECK_ID
+      ) {
+        throw new Error(
+          `Expected only the remaining item in the DELETE response, got: ${JSON.stringify(deleteBody)}`,
+        );
+      }
+      const expectedTotal = Math.round((remainingPrice ?? 0) * 1 * 100) / 100;
+      if (deleteBody.total !== expectedTotal) {
+        throw new Error(
+          `Expected total ${expectedTotal}, got ${deleteBody.total}`,
+        );
+      }
+
+      const getRes = await request(app.getHttpServer())
+        .get('/api/v1/cart')
+        .set('Cookie', cartCookie)
+        .expect(200);
+      const getBody = getRes.body as CartResponse;
+      if (
+        getBody.items.length !== 1 ||
+        getBody.items[0].productId !== ONE_PIECE_DECK_ID
+      ) {
+        throw new Error(
+          `Expected GET /cart to show only the remaining item, got: ${JSON.stringify(getBody)}`,
+        );
+      }
+      if (getBody.total !== deleteBody.total) {
+        throw new Error(
+          `Expected GET /cart total (${getBody.total}) to match the DELETE response total (${deleteBody.total})`,
+        );
+      }
+    });
+
+    it('removing the only item in the cart leaves a valid empty cart (200, total 0), not an error', async () => {
+      const addRes = await request(app.getHttpServer())
+        .post('/api/v1/cart/items')
+        .send({ productId: POKEMON_SOBRE_ID, quantity: 1 })
+        .expect(201);
+      const cartCookie = extractCartCookie(addRes);
+
+      const deleteRes = await request(app.getHttpServer())
+        .delete(`/api/v1/cart/items/${POKEMON_SOBRE_ID}`)
+        .set('Cookie', cartCookie)
+        .expect(200);
+      const deleteBody = deleteRes.body as CartResponse;
+      if (deleteBody.items.length !== 0 || deleteBody.total !== 0) {
+        throw new Error(
+          `Expected a valid empty cart (200, total 0), got: ${JSON.stringify(deleteBody)}`,
+        );
+      }
+
+      const getRes = await request(app.getHttpServer())
+        .get('/api/v1/cart')
+        .set('Cookie', cartCookie)
+        .expect(200);
+      const getBody = getRes.body as CartResponse;
+      if (getBody.items.length !== 0 || getBody.total !== 0) {
+        throw new Error(
+          `Expected GET /cart to also show an empty cart, got: ${JSON.stringify(getBody)}`,
+        );
+      }
+    });
+
+    it('returns 404 when there is no cart cookie at all', () => {
+      return request(app.getHttpServer())
+        .delete(`/api/v1/cart/items/${PIKACHU_PROMO_ID}`)
+        .expect(404);
+    });
+
+    it('returns 404 when the cart cookie is valid but the given productId is not a line in that cart', async () => {
+      const addRes = await request(app.getHttpServer())
+        .post('/api/v1/cart/items')
+        .send({ productId: PIKACHU_PROMO_ID, quantity: 1 })
+        .expect(201);
+      const cartCookie = extractCartCookie(addRes);
+
+      return request(app.getHttpServer())
+        .delete(`/api/v1/cart/items/${BLUE_EYES_ID}`) // never added to this cart
+        .set('Cookie', cartCookie)
+        .expect(404);
+    });
+
+    it('a second, sequential DELETE of the same already-removed productId is idempotent — 404, never a 500', async () => {
+      const addRes = await request(app.getHttpServer())
+        .post('/api/v1/cart/items')
+        .send({ productId: ONE_PIECE_DECK_ID, quantity: 1 })
+        .expect(201);
+      const cartCookie = extractCartCookie(addRes);
+
+      await request(app.getHttpServer())
+        .delete(`/api/v1/cart/items/${ONE_PIECE_DECK_ID}`)
+        .set('Cookie', cartCookie)
+        .expect(200);
+
+      // Same productId, same cart, already gone — must 404, not 500.
+      await request(app.getHttpServer())
+        .delete(`/api/v1/cart/items/${ONE_PIECE_DECK_ID}`)
+        .set('Cookie', cartCookie)
+        .expect(404);
+    });
+
+    it('returns a stable 400 (never a 500) for a syntactically invalid productId', () => {
+      return request(app.getHttpServer())
+        .delete('/api/v1/cart/items/not-a-valid-uuid')
         .expect(400);
     });
   });
