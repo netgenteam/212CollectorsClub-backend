@@ -23,6 +23,12 @@ import {
   Rarity,
 } from '../src/generated/prisma/client.js';
 import { SINGLETON_FX_RATE_ID } from '../src/checkout/fx-rate.constants.js';
+import {
+  LANDING_SECTION_BANNERS,
+  LANDING_SECTION_TEXTS,
+  type LandingBannerKey,
+  type LandingTextKey,
+} from '../src/admin-landing/landing-content.constants.js';
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -419,6 +425,82 @@ async function seedAdminUser(): Promise<void> {
   });
 }
 
+/**
+ * Story 10.1 (AD-9): seeds one placeholder row per fixed editable key in
+ * `landing-content.constants.ts` — so `GET /api/v1/landing-content` has
+ * real values to return from day one, before any admin has ever logged in
+ * and edited anything (an explicit item in this story's verification
+ * checklist: "public GET without prior data -> valid structure, never an
+ * error").
+ *
+ * **Idempotency, never clobbers an admin's real edit on re-seed**: both
+ * loops below `upsert` keyed on the fixed `(section, key)` unique
+ * constraint, but — unlike the catalog rows earlier in this file, which
+ * `update` their seed value unconditionally on every run — the `update`
+ * branch here is `{}` (a no-op), matching `FxRateSetting`'s own seed
+ * pattern just above. Once an admin has edited a field through the real
+ * `PUT` endpoints, re-running this seed (e.g. on every fresh deploy) must
+ * never silently revert that edit back to the placeholder.
+ */
+async function seedLandingContent(): Promise<void> {
+  console.log('Seeding landing content placeholders (texts + banners)...');
+
+  const textDefaults: Record<LandingTextKey, string> = {
+    heroTitle: '212 Collectors Club',
+    heroSubtitle:
+      'Tu tienda de TCG premium: cartas sueltas, sobres y cajas selladas.',
+    heroCtaText: 'Comprar ahora',
+    heroCtaUrl: '/productos',
+    announcementBarText:
+      'Envíos a todo Venezuela — pago móvil y PayPal disponibles.',
+  };
+  for (const [key, value] of Object.entries(textDefaults)) {
+    await prisma.landingConfigEntry.upsert({
+      where: { section_key: { section: LANDING_SECTION_TEXTS, key } },
+      create: {
+        section: LANDING_SECTION_TEXTS,
+        key,
+        valueType: 'text',
+        value,
+      },
+      update: {},
+    });
+  }
+
+  const bannerDefaults: Record<
+    LandingBannerKey,
+    { imageUrl: string; title: string; linkUrl: string }
+  > = {
+    banner1: {
+      imageUrl: '/uploads/public/landing/banner-placeholder-1.jpg',
+      title: 'Nuevo Drop 212 cada mes',
+      linkUrl: '/productos?tag=nuevo',
+    },
+    banner2: {
+      imageUrl: '/uploads/public/landing/banner-placeholder-2.jpg',
+      title: 'Sobres sellados, garantía de autenticidad',
+      linkUrl: '/productos?tipo=booster',
+    },
+    banner3: {
+      imageUrl: '/uploads/public/landing/banner-placeholder-3.jpg',
+      title: 'Únete al club de coleccionistas 212',
+      linkUrl: '/contacto',
+    },
+  };
+  for (const [key, value] of Object.entries(bannerDefaults)) {
+    await prisma.landingConfigEntry.upsert({
+      where: { section_key: { section: LANDING_SECTION_BANNERS, key } },
+      create: {
+        section: LANDING_SECTION_BANNERS,
+        key,
+        valueType: 'json',
+        value,
+      },
+      update: {},
+    });
+  }
+}
+
 async function main(): Promise<void> {
   console.log('Seeding FX rate setting...');
   await prisma.fxRateSetting.upsert({
@@ -497,6 +579,7 @@ async function main(): Promise<void> {
   );
 
   await seedAdminUser();
+  await seedLandingContent();
 }
 
 main()

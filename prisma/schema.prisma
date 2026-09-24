@@ -483,6 +483,10 @@ model AdminUser {
   /// writer of an `actorType = ADMIN` history row.
   orderStatusHistoryRows OrderStatusHistory[]
 
+  /// Story 10.1: back-reference for `LandingConfigEntry.updatedById`, same
+  /// nullable-FK pattern as `orderStatusHistoryRows` above.
+  landingConfigEntries LandingConfigEntry[]
+
   @@map("Admin_Users")
 }
 
@@ -567,4 +571,70 @@ model ProofOfPayment {
   createdAt DateTime @default(now())
 
   @@map("Proof_Of_Payments")
+}
+
+// ---------------------------------------------------------------------------
+// Story 10.1 — Admin Edit & Public Read of Landing Texts and Banners
+// (Epic 10, AD-9/AD-10). Introduces the ONE generic table the whole
+// AdminLanding epic reuses.
+// ---------------------------------------------------------------------------
+
+/// AD-9: a single generic JSONB-backed config row, unique on
+/// `(section, key)`. Story 10.1 only ever writes `section` = "texts" |
+/// "banners", restricted to the fixed key set application code enforces
+/// (`src/admin-landing/landing-content.constants.ts`) — but nothing about
+/// this model itself is specific to those two sections. Stories 10.2 (Drop
+/// 212 countdown, `section` = "drop212") and 10.3 (Pack-Opening Simulator,
+/// `section` = "pack_simulator") are expected to add their own fixed key
+/// sets in application code and reuse this exact table — **no new
+/// migration expected for either**. `value` is always JSONB regardless of
+/// `valueType`, so a future section can hold an arbitrary nested structure
+/// (e.g. a per-rarity odds table) with no schema change.
+///
+/// Public read (`GET /api/v1/landing-content`, unauthenticated, Story
+/// 10.1) groups every row by `section`. AD-10: no caching layer anywhere in
+/// this app — a public read always queries this table directly, so an
+/// admin's write is visible on the very next public read with ~0s
+/// propagation delay, nothing to invalidate.
+model LandingConfigEntry {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// Top-level grouping the public GET groups its response by (e.g.
+  /// "texts", "banners", future "drop212"/"pack_simulator"). A free-form
+  /// string, not an enum, on purpose — each section's fixed, editable key
+  /// set is enforced in application code, not at the DB level, precisely so
+  /// 10.2/10.3 can introduce new sections without touching this migration.
+  section String
+
+  /// The field name within `section` (e.g. "heroTitle", "banner1"). Unique
+  /// together with `section` below — this is the whole row's identity.
+  key String
+
+  /// Admin-UI rendering hint only ("text" | "json" as of this story) —
+  /// never branched on by this backend's own validation logic; the fixed
+  /// key set per section (application code) already pins each key's real
+  /// expected shape. Free-form string (not an enum) for the same
+  /// no-migration-for-10.2/10.3 reason as `section` above.
+  valueType String
+
+  /// Always JSONB regardless of `valueType`. A plain edited text (Story
+  /// 10.1 "texts" section) is stored as a JSON string; a banner (Story
+  /// 10.1 "banners" section) is stored as a JSON object
+  /// (`{ imageUrl, title, linkUrl }`). A future section (10.2/10.3) can
+  /// store any nested JSON shape its variables need with no schema change.
+  value Json
+
+  updatedAt DateTime @updatedAt
+
+  /// Same nullable-FK-to-AdminUser pattern as
+  /// `OrderStatusHistory.adminUserId` (Story 7.1): nullable because the
+  /// initial placeholder rows this story's seed creates have no admin
+  /// author, and `onDelete: SetNull` so a later AdminUser deletion can never
+  /// cascade away or block-delete a LandingConfigEntry's value — the
+  /// content itself always outlives whichever admin last touched it.
+  updatedById String?    @db.Uuid
+  updatedBy   AdminUser? @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@unique([section, key])
+  @@map("Landing_Config_Entries")
 }

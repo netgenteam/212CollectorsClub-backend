@@ -12,6 +12,7 @@ import { OrdersModule } from './orders/orders.module.js';
 import { PaymentsPaypalModule } from './payments-paypal/payments-paypal.module.js';
 import { AdminAuthModule } from './admin-auth/admin-auth.module.js';
 import { AdminCatalogModule } from './admin-catalog/admin-catalog.module.js';
+import { AdminLandingModule } from './admin-landing/admin-landing.module.js';
 
 @Module({
   imports: [
@@ -43,6 +44,10 @@ import { AdminCatalogModule } from './admin-catalog/admin-catalog.module.js';
     // controller from common/, so this module (like CatalogModule) never
     // needs to import AdminAuthModule itself.
     AdminCatalogModule,
+    // Story 10.1 (Epic 10, AD-9, AD-10): the public landing-content GET
+    // plus the guarded admin texts/banners PUTs. Same AdminAuthGuard
+    // pattern as AdminCatalogModule — never imports AdminAuthModule itself.
+    AdminLandingModule,
   ],
   controllers: [AppController],
   providers: [AppService],
