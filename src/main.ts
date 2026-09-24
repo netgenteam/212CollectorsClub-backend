@@ -66,6 +66,22 @@ async function bootstrap() {
       description:
         'The one-time orderAccessToken from the checkout response (Story 4.1) — an opaque token, not a JWT.',
     })
+    // Story 7.1 (AD-11): a second, separately-named bearer scheme for the
+    // Admin JWT (`POST /api/v1/admin/auth/login`'s `accessToken`) — kept
+    // distinct from the unnamed scheme above since the two are different
+    // trust boundaries with different formats (this one really is a JWT).
+    // Referenced by `@ApiBearerAuth('admin-jwt')` on every
+    // AdminAuthGuard-gated route.
+    .addBearerAuth(
+      {
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT',
+        description:
+          'The Admin JWT from POST /api/v1/admin/auth/login (8h max-age, AD-11).',
+      },
+      'admin-jwt',
+    )
     .build();
   const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('api/docs', app, swaggerDocument);

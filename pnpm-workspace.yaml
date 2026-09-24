@@ -3,6 +3,7 @@ allowBuilds:
   # Telemetry-only postinstall script pulled in transitively by
   # swagger-ui-dist (via @nestjs/swagger) — denied, not needed to build.
   '@scarf/scarf': false
+  argon2: true
   # Downloads esbuild's platform-specific native binary — needed by `tsx`
   # (used only to run the Prisma seed script in TS/ESM, Story 1.4).
   esbuild: true

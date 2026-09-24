@@ -14,6 +14,7 @@
 // and never has to worry about FK ordering on the way down — only the
 // deterministic ids need to stay stable across edits to this file.
 import 'dotenv/config';
+import * as argon2 from 'argon2';
 import { PrismaPg } from '@prisma/adapter-pg';
 import {
   PrismaClient,
@@ -373,6 +374,51 @@ const products: SeedProduct[] = [
  */
 const FX_RATE_VES_PER_USD_SEED_VALUE = '200.0000';
 
+/**
+ * Story 7.1 (FR-3, AD-11): seeds exactly one initial `AdminUser` so Epic
+ * 7-10 stories are testable end-to-end without a separate manual bootstrap
+ * step — credentials come exclusively from `ADMIN_SEED_USERNAME`/
+ * `ADMIN_SEED_EMAIL`/`ADMIN_SEED_PASSWORD` env vars, never hardcoded here.
+ *
+ * **Requires all three vars.** If any is missing, this step is skipped
+ * with a warning (not a thrown error) — running `pnpm prisma:seed` must
+ * stay safe for anyone who only needs the catalog seed and hasn't set up
+ * Epic 7 env vars yet; the rest of `main()` (FX rate, catalog) still runs.
+ *
+ * **Idempotency**: `upsert`ed keyed on `username` (unique), matching the
+ * rest of this file's "re-running never duplicates" rule — but unlike the
+ * catalog rows above (keyed on a fixed literal `id`), the key here has to
+ * be the env-derived `username` since there is no meaningful fixed id for
+ * a credential that is, by design, environment-specific. On every re-run
+ * the password hash is refreshed to match the CURRENT `ADMIN_SEED_PASSWORD`
+ * — convenient in development (edit `.env`, re-run the seed, done) but see
+ * `.env.example`'s own note: this makes the seed unsafe to re-run against a
+ * production AdminUser whose password has since been rotated through a
+ * real channel, since it would silently reset it back to this placeholder.
+ */
+async function seedAdminUser(): Promise<void> {
+  const username = process.env.ADMIN_SEED_USERNAME;
+  const email = process.env.ADMIN_SEED_EMAIL;
+  const password = process.env.ADMIN_SEED_PASSWORD;
+
+  if (!username || !email || !password) {
+    console.warn(
+      'Skipping AdminUser seed: ADMIN_SEED_USERNAME/ADMIN_SEED_EMAIL/ADMIN_SEED_PASSWORD ' +
+        'are not all set (see .env.example). Story 7.1+ admin routes will have no ' +
+        'AdminUser to authenticate against until these are set and the seed is re-run.',
+    );
+    return;
+  }
+
+  console.log(`Seeding initial AdminUser (username="${username}")...`);
+  const passwordHash = await argon2.hash(password, { type: argon2.argon2id });
+  await prisma.adminUser.upsert({
+    where: { username },
+    create: { username, email, passwordHash },
+    update: { email, passwordHash },
+  });
+}
+
 async function main(): Promise<void> {
   console.log('Seeding FX rate setting...');
   await prisma.fxRateSetting.upsert({
@@ -449,6 +495,8 @@ async function main(): Promise<void> {
   console.log(
     `Seed complete. Categories=${categoryCount} Products=${productCount} ProductImages=${imageCount}`,
   );
+
+  await seedAdminUser();
 }
 
 main()

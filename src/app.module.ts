@@ -10,6 +10,7 @@ import { ContactModule } from './contact/contact.module.js';
 import { CheckoutModule } from './checkout/checkout.module.js';
 import { OrdersModule } from './orders/orders.module.js';
 import { PaymentsPaypalModule } from './payments-paypal/payments-paypal.module.js';
+import { AdminAuthModule } from './admin-auth/admin-auth.module.js';
 
 @Module({
   imports: [
@@ -30,6 +31,12 @@ import { PaymentsPaypalModule } from './payments-paypal/payments-paypal.module.j
     PaymentsPaypalModule,
     CheckoutModule,
     OrdersModule,
+    // Story 7.1: registered once, here — instantiates AdminJwtStrategy
+    // exactly once, which is all `AdminAuthGuard` (src/common/, imported
+    // directly by every later Epic 8/9/10 module) needs to work anywhere
+    // in the app. See AdminAuthGuard's own doc comment for the full
+    // reasoning.
+    AdminAuthModule,
   ],
   controllers: [AppController],
   providers: [AppService],

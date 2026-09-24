@@ -286,12 +286,9 @@ enum OrderStatus {
   CANCELLED
 }
 
-/// AD-7's typed actor on every OrderStatusHistory row. `ADMIN` rows should
-/// eventually carry a real `adminUserId` FK once Story 7.1 introduces the
-/// `AdminUser` model — `OrderStatusHistory.adminUserId` below is already a
-/// plain nullable UUID column in anticipation of that (no FK yet, since the
-/// referenced table doesn't exist yet; Story 7.1 can add the FK constraint
-/// via a follow-up migration without touching this column's data).
+/// AD-7's typed actor on every OrderStatusHistory row. `ADMIN` rows carry a
+/// real `adminUserId` FK to `AdminUser` (added by Story 7.1, which
+/// introduced that model — see `OrderStatusHistory.adminUserId` below).
 enum OrderActorType {
   SYSTEM
   PAYPAL_WEBHOOK
@@ -416,13 +413,64 @@ model OrderStatusHistory {
   fromStatus  OrderStatus?
   toStatus    OrderStatus
   actorType   OrderActorType
-  /// Set only when actorType = ADMIN. No FK yet — see OrderActorType's doc
-  /// comment above for why.
+  /// Set only when actorType = ADMIN. Story 7.1 adds the FK constraint to
+  /// `AdminUser` anticipated by OrderActorType's doc comment above — every
+  /// row written so far has `actorType` in {SYSTEM, PAYPAL_WEBHOOK, CRON}
+  /// with `adminUserId = null`, so this FK is safe to add without a data
+  /// backfill. `onDelete: SetNull` (not Cascade, not Restrict): an
+  /// AdminUser row is never expected to be deleted by anything in this
+  /// codebase today, but if it ever is, the audit trail row itself must
+  /// survive — only the actor reference is cleared, never the history.
   adminUserId String?        @db.Uuid
+  adminUser   AdminUser?     @relation(fields: [adminUserId], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
 
   @@map("Order_Status_History")
+}
+
+// ---------------------------------------------------------------------------
+// Story 7.1 — Admin Auth (AD-11, AD-14).
+// ---------------------------------------------------------------------------
+
+/// A store Admin account (AD-11, FR-20/FR-21). Single flat role for the
+/// MVP — see `roleTier` below. Seeded from environment variables only
+/// (`prisma/seed.ts`), never hardcoded (FR-3); `POST /api/v1/admin/auth/login`
+/// is the only way this table is ever read by the running app.
+model AdminUser {
+  id       String @id @default(uuid()) @db.Uuid
+  username String @unique
+  email    String @unique
+
+  /// Argon2id digest (OWASP-2026-preferred over bcrypt, per AD-11) of the
+  /// Admin's password — produced by the `argon2` package
+  /// (`argon2.hash(..., { type: argon2.argon2id })`), never a plaintext or
+  /// reversibly-encrypted value. Deliberately absent from every DTO/response
+  /// type in this codebase (`AdminUserResponseDto` etc.) — every read of
+  /// this model that can reach an HTTP response uses an explicit Prisma
+  /// `select` that omits this column entirely, so there is no field to
+  /// accidentally forget to strip.
+  passwordHash String
+
+  /// Nullable, unused hook for a future staff-role split (PRD OQ10,
+  /// AD-11) — no code anywhere reads this column yet, and this story adds
+  /// no permission logic gated on it. Left as a free-form nullable string
+  /// (not an enum) since OQ10 itself — what the tiers even are — is still
+  /// unanswered by the client; committing to an enum now would risk a
+  /// second migration once that answer arrives, which is exactly what this
+  /// hook exists to avoid.
+  roleTier String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Story 7.1: back-reference for the `OrderStatusHistory.adminUserId` FK
+  /// above. Read-only from AdminUser's side — nothing in this story
+  /// traverses it; Story 9.x (admin order actions) is the first real
+  /// writer of an `actorType = ADMIN` history row.
+  orderStatusHistoryRows OrderStatusHistory[]
+
+  @@map("Admin_Users")
 }
 
 /// AD-6: a soft stock reservation created atomically alongside the guarded
