@@ -6,6 +6,7 @@ import { PrismaModule } from './prisma/prisma.module.js';
 import { CatalogModule } from './catalog/catalog.module.js';
 import { CartModule } from './cart/cart.module.js';
 import { ContactModule } from './contact/contact.module.js';
+import { CheckoutModule } from './checkout/checkout.module.js';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { ContactModule } from './contact/contact.module.js';
     CatalogModule,
     CartModule,
     ContactModule,
+    CheckoutModule,
   ],
   controllers: [AppController],
   providers: [AppService],

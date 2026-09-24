@@ -21,6 +21,7 @@ import {
   ProductType,
   Rarity,
 } from '../src/generated/prisma/client.js';
+import { SINGLETON_FX_RATE_ID } from '../src/checkout/fx-rate.constants.js';
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -312,7 +313,33 @@ const products: SeedProduct[] = [
   },
 ];
 
+/**
+ * Story 4.1 (AD-4): seeds the single `FxRateSetting` row checkout reads at
+ * order-creation time. `200.0000` is an illustrative placeholder value
+ * only, not a real-world-accurate VES/USD figure — there is still no admin
+ * endpoint to edit it (a known, documented gap; see the model's doc
+ * comment in schema.prisma), so whoever runs this seed against a fresh
+ * environment should update this literal, or update the row directly in
+ * Postgres, to something reasonably current before relying on real
+ * checkout totals.
+ */
+const FX_RATE_VES_PER_USD_SEED_VALUE = '200.0000';
+
 async function main(): Promise<void> {
+  console.log('Seeding FX rate setting...');
+  await prisma.fxRateSetting.upsert({
+    where: { id: SINGLETON_FX_RATE_ID },
+    create: {
+      id: SINGLETON_FX_RATE_ID,
+      vesPerUsd: FX_RATE_VES_PER_USD_SEED_VALUE,
+    },
+    // Never overwritten on re-seed once it exists — an already-seeded
+    // environment may have had this rate legitimately edited directly in
+    // Postgres (the only way to edit it until a future admin story adds a
+    // real endpoint), and re-running the seed must not clobber that.
+    update: {},
+  });
+
   console.log(`Seeding ${categories.length} categories...`);
   const categoryIdBySlug = new Map<string, string>();
   for (const category of categories) {

@@ -87,15 +87,24 @@ model Product {
   categoryId String   @db.Uuid
   category   Category @relation(fields: [categoryId], references: [id])
 
-  images ProductImage[]
+  images           ProductImage[]
   /// Story 3.1: every CartItem row referencing this Product, across every
   /// guest Cart. Read-only back-reference — CartService never traverses it,
   /// but Prisma requires the relation declared on both sides.
-  cartItems CartItem[]
+  cartItems        CartItem[]
   /// Story 6.1: every ContactInquiry that optionally referenced this
   /// Product. Read-only back-reference, same reasoning as `cartItems`
   /// above.
   contactInquiries ContactInquiry[]
+  /// Story 4.1: every OrderLine snapshot that referenced this Product at
+  /// purchase time. Read-only back-reference — OrderLine itself carries its
+  /// own name/price snapshot and never re-reads this relation for display,
+  /// same "never a live reference" reasoning documented on OrderLine below.
+  orderLines       OrderLine[]
+  /// Story 4.1 (AD-6): every StockHold ever created against this Product's
+  /// `heldQty`. Read-only back-reference — StockHoldService (Story 5.2)
+  /// queries StockHold directly by `expiresAt`, never through this list.
+  stockHolds       StockHold[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -136,11 +145,11 @@ model Cart {
 /// increments `quantity` on this same row rather than inserting a second
 /// row for the same Product (see CartService.addItem for the reasoning).
 model CartItem {
-  id        String   @id @default(uuid()) @db.Uuid
-  cartId    String   @db.Uuid
-  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
-  productId String   @db.Uuid
-  product   Product  @relation(fields: [productId], references: [id])
+  id        String  @id @default(uuid()) @db.Uuid
+  cartId    String  @db.Uuid
+  cart      Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId String  @db.Uuid
+  product   Product @relation(fields: [productId], references: [id])
   quantity  Int
 
   createdAt DateTime @default(now())
@@ -204,4 +213,220 @@ model ProductImage {
   createdAt DateTime @default(now())
 
   @@map("Product_Images")
+}
+
+// ---------------------------------------------------------------------------
+// Story 4.1 — Checkout, Orders, Stock Holds, admin-maintained FX rate.
+// ---------------------------------------------------------------------------
+
+/// **Known design gap, resolved pragmatically for this story (see the
+/// Story 4.1 Dev report for the full writeup).** AD-4 requires "a single
+/// storewide exchange-rate value the Admin edits", but no Sprint 3 story in
+/// the backlog (7.1/7.2 = admin auth, 8.x = catalog CRUD, 9.x = order/
+/// payment management) actually owns "Admin edits the FX rate" — it's a
+/// gap between the PRD and the epics list, not something this story can
+/// leave unresolved (checkout cannot snapshot a VES total without reading
+/// a rate from *somewhere*). This table is the simplest mechanism that
+/// satisfies AD-4 today: a single mutable row, its `id` always the fixed
+/// literal `SINGLETON_FX_RATE_ID` (see `src/checkout/fx-rate.constants.ts`),
+/// seeded once by `prisma/seed.ts` alongside the catalog. There is
+/// deliberately **no** admin endpoint to edit this row yet — that is
+/// explicitly out of scope for Story 4.1 per the Dev brief. A future story
+/// (not yet in the Sprint 3 backlog — flag this for PM/Architect) should
+/// add a `PATCH` admin route that updates this same row's `vesPerUsd`; no
+/// schema change is expected when that lands, since this table already
+/// models "the current rate" as a single row, the same shape AD-4 itself
+/// describes.
+model FxRateSetting {
+  id        String   @id @db.VarChar(32)
+  /// VES per 1 USD, e.g. 40.5000 means 1 USD = 40.50 VES. AD-3's
+  /// `Decimal(18,4)` precision, snapshotted verbatim onto
+  /// `Order.fxRateVesPerUsd` at checkout time — never recomputed after.
+  vesPerUsd Decimal  @db.Decimal(18, 4)
+  updatedAt DateTime @updatedAt
+
+  @@map("Fx_Rate_Settings")
+}
+
+/// The payment method a checkout was submitted with. Only `PAGO_MOVIL` is
+/// accepted by `POST /api/v1/checkout` as of Story 4.1 — `PAYPAL` exists in
+/// this enum now so Story 4.3 doesn't need a migration to add it, but the
+/// DTO-level `CheckoutPaymentRail` (src/checkout/dto) only allows
+/// `pago_movil` until 4.3 lands.
+enum PaymentRail {
+  PAGO_MOVIL
+  PAYPAL
+}
+
+/// AD-8 `[ASSUMPTION — pending Nabil confirmation, PRD OQ6]`. Both
+/// delivery-only and pickup-only future business answers fit this schema
+/// unchanged — only the frontend's exposed UI paths would need to change.
+enum FulfillmentType {
+  DELIVERY
+  PICKUP
+}
+
+/// AD-7's 8-state Order lifecycle. Story 4.1 only ever writes
+/// `PENDING_VERIFICATION` directly (Pago Móvil never passes through
+/// `PAYMENT_PROCESSING` — that transient state is PayPal-only, Story 4.3).
+/// The full enum is modeled now (not grown incrementally per story) since
+/// this schema is the shared source of truth every future order-transition
+/// story (4.3, 5.2, 9.2, 9.3) reads from — see AD-7 for the full legal-
+/// transition table.
+enum OrderStatus {
+  PAYMENT_PROCESSING
+  PENDING_VERIFICATION
+  PAID
+  PAYMENT_FAILED
+  PAYMENT_REJECTED
+  EXPIRED
+  FULFILLED
+  CANCELLED
+}
+
+/// AD-7's typed actor on every OrderStatusHistory row. `ADMIN` rows should
+/// eventually carry a real `adminUserId` FK once Story 7.1 introduces the
+/// `AdminUser` model — `OrderStatusHistory.adminUserId` below is already a
+/// plain nullable UUID column in anticipation of that (no FK yet, since the
+/// referenced table doesn't exist yet; Story 7.1 can add the FK constraint
+/// via a follow-up migration without touching this column's data).
+enum OrderActorType {
+  SYSTEM
+  PAYPAL_WEBHOOK
+  ADMIN
+  CRON
+}
+
+/// A buyer's order (PRD §3 Glossary). AD-3/AD-4: `totalUsd` is always set;
+/// `fxRateVesPerUsd`/`totalVes` are set once at creation for Pago Móvil
+/// orders only (both stay null for PayPal orders, which never touch VES)
+/// and are never recomputed afterward — the buyer's payment instructions
+/// and the admin's reconciliation view must always agree on the same VES
+/// figure for the life of the order. AD-8: `recipientName`/`recipientPhone`
+/// are always required; the address fields are populated only when
+/// `fulfillmentType = DELIVERY` (enforced by CheckoutDto's conditional
+/// validation, not by a DB constraint — Postgres has no easy portable way
+/// to express "these columns are NOT NULL only when this other column has
+/// this value", and a rejected-at-the-door DTO is the simpler, equally
+/// correct place to enforce it). AD-17: `accessTokenHash` stores only the
+/// SHA-256 hash of the one-time `orderAccessToken` handed to the buyer in
+/// the checkout response — the raw token itself is never persisted
+/// anywhere (see CheckoutService for the hashing rationale).
+model Order {
+  id     String      @id @default(uuid()) @db.Uuid
+  status OrderStatus
+
+  paymentRail     PaymentRail
+  fulfillmentType FulfillmentType
+  recipientName   String
+  recipientPhone  String
+  /// Populated only when fulfillmentType = DELIVERY; null for PICKUP.
+  addressLine1    String?
+  addressLine2    String?
+  city            String?
+  state           String?
+  /// AD-8: constrained to Venezuela for MVP — CheckoutService sets this to
+  /// the literal "Venezuela" server-side for DELIVERY orders rather than
+  /// accepting it as buyer input, since there is currently only one valid
+  /// value (see CheckoutDto's doc comment for the full reasoning).
+  country         String?
+
+  totalUsd        Decimal  @db.Decimal(10, 2)
+  /// Null for PayPal orders (AD-3) — only ever set, once, for Pago Móvil.
+  fxRateVesPerUsd Decimal? @db.Decimal(18, 4)
+  totalVes        Decimal? @db.Decimal(14, 2)
+
+  /// AD-17: SHA-256 hash of the one-time orderAccessToken. The raw token
+  /// is returned to the buyer exactly once, in the checkout response, and
+  /// never stored.
+  accessTokenHash String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines         OrderLine[]
+  statusHistory OrderStatusHistory[]
+  stockHolds    StockHold[]
+
+  @@map("Orders")
+}
+
+/// One Product line within an Order — a **snapshot**, never a live
+/// reference. `productName`/`unitPriceUsd` are copied from Product at the
+/// moment of purchase and never re-read from it afterward, so a later
+/// rename or price change on the Product can never retroactively alter a
+/// historical Order's line items (AD-3's snapshot principle, applied to
+/// line items the same way it's applied to the order-level FX rate).
+/// `productId` itself is kept (not nulled/removed) purely as a traceability
+/// reference for admin tooling — display logic must never read
+/// `product.name`/`product.priceUsd` through it.
+model OrderLine {
+  id        String  @id @default(uuid()) @db.Uuid
+  orderId   String  @db.Uuid
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String  @db.Uuid
+  product   Product @relation(fields: [productId], references: [id])
+
+  productName  String
+  unitPriceUsd Decimal @db.Decimal(10, 2)
+  quantity     Int
+  lineTotalUsd Decimal @db.Decimal(10, 2)
+
+  createdAt DateTime @default(now())
+
+  @@map("Order_Lines")
+}
+
+/// AD-7/AD-16: an immutable audit trail row for every Order status
+/// transition, including the very first `[]->pending_verification`/
+/// `[]->payment_processing` write at Order creation (`fromStatus = null`
+/// represents "no prior state" for that first row). Written by
+/// `src/common/order-status-transition.ts` — see that module for the
+/// guarded-update helper this story introduces for AD-16, reused by every
+/// later order-transition story (4.3, 5.2, 9.2, 9.3).
+model OrderStatusHistory {
+  id      String @id @default(uuid()) @db.Uuid
+  orderId String @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// Null only for the very first history row on a given Order (the
+  /// `[]->X` creation transition) — every later row has a real prior
+  /// status.
+  fromStatus  OrderStatus?
+  toStatus    OrderStatus
+  actorType   OrderActorType
+  /// Set only when actorType = ADMIN. No FK yet — see OrderActorType's doc
+  /// comment above for why.
+  adminUserId String?        @db.Uuid
+
+  createdAt DateTime @default(now())
+
+  @@map("Order_Status_History")
+}
+
+/// AD-6: a soft stock reservation created atomically alongside the guarded
+/// `UPDATE "Products" SET "heldQty" = "heldQty" + qty WHERE stock -
+/// "heldQty" >= qty` (see CheckoutService — zero affected rows aborts the
+/// whole checkout transaction, so a StockHold row is only ever inserted
+/// once that guard has already succeeded, never speculatively). `quantity`
+/// mirrors the corresponding OrderLine's quantity for the same Product.
+/// `releasedAt` stays null for the lifetime of an active hold; Story 5.2's
+/// expiry cron (and Story 9.2's admin-confirm, which converts a hold into a
+/// real stock decrement) are the only writers expected to ever set it —
+/// out of scope for this story, which only creates rows here with
+/// `releasedAt = null`.
+model StockHold {
+  id        String  @id @default(uuid()) @db.Uuid
+  orderId   String  @db.Uuid
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String  @db.Uuid
+  product   Product @relation(fields: [productId], references: [id])
+
+  quantity   Int
+  expiresAt  DateTime
+  releasedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@map("Stock_Holds")
 }

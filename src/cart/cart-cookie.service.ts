@@ -69,4 +69,21 @@ export class CartCookieService {
       maxAge: CART_COOKIE_TTL_MS,
     });
   }
+
+  /**
+   * Story 4.1: called after a successful checkout, whose Cart row (and
+   * every CartItem in it) `CheckoutService` just deleted — the cookie
+   * would otherwise keep pointing at a cartId that no longer resolves to
+   * anything. Not strictly required by the AD-5/AD-17 rules (a stale
+   * cartId cookie is already harmless: `CartService`/`CheckoutService`
+   * both treat a cartId matching no live Cart exactly like "no cart" —
+   * same as an expired one), but clearing it here avoids the client
+   * holding on to a known-dead reference and is the same hygiene a normal
+   * checkout flow elsewhere would do. `path` must match `writeCartId`'s —
+   * Express's `clearCookie` only clears a cookie whose attributes match
+   * the one that was set.
+   */
+  clearCartId(res: Response): void {
+    res.clearCookie(CART_COOKIE_NAME, { path: '/' });
+  }
 }
