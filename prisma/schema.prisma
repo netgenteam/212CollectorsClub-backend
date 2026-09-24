@@ -473,6 +473,30 @@ model AdminUser {
   @@map("Admin_Users")
 }
 
+/// Story 7.2 (AD-11, FR-21): persisted denylist of revoked Admin JWTs,
+/// checked by `AdminJwtStrategy.validate` on every Admin-gated request in
+/// addition to `passport-jwt`'s own signature/expiry check. Deliberately a
+/// plain Postgres table (not an in-memory Set/cache) — an in-memory
+/// denylist would silently reset on every deploy restart (Story 1.3's
+/// CI/CD pipeline), defeating FR-21's "logout invalidates" guarantee the
+/// moment the app redeploys. `jti` is the JWT's own unique-per-token claim
+/// (a random UUID minted once per `AdminAuthService.login` call — see
+/// `AdminJwtPayload`) — using it as this table's primary key gives the
+/// per-request revocation lookup a free unique index, no separate
+/// `@@index` needed. `expiresAt` mirrors the JWT's own `exp` claim
+/// (converted to a `DateTime`) purely so a future cleanup job could safely
+/// prune rows past their natural expiry — not implemented by this story,
+/// since a revoked-but-unpruned row is harmless (the JWT itself would
+/// already be rejected as expired by then regardless of this table) and no
+/// story requires the cleanup job yet.
+model RevokedToken {
+  jti       String   @id @db.Uuid
+  expiresAt DateTime
+  revokedAt DateTime @default(now())
+
+  @@map("Revoked_Tokens")
+}
+
 /// AD-6: a soft stock reservation created atomically alongside the guarded
 /// `UPDATE "Products" SET "heldQty" = "heldQty" + qty WHERE stock -
 /// "heldQty" >= qty` (see CheckoutService — zero affected rows aborts the

@@ -11,9 +11,16 @@ import type { AuthenticatedAdminUser } from '../common/admin-auth.guard.js';
  * (`username`/`email`/`roleTier`) is re-read from Postgres on every request
  * below, not trusted from the token payload, so a later username/email
  * change on the AdminUser row is reflected immediately instead of staying
- * stale until the token's 8h expiry. */
+ * stale until the token's 8h expiry.
+ *
+ * Story 7.2 (AD-11): `jti` is a random UUID minted once per `login` call
+ * (never reused across tokens, even for the same AdminUser/concurrent
+ * sessions) — it is this token's own identity, independent of `sub`, which
+ * is what lets `POST /admin/auth/logout` revoke exactly ONE token (this
+ * one) rather than every session belonging to that Admin. */
 export interface AdminJwtPayload {
   sub: string;
+  jti: string;
 }
 
 /**
@@ -35,6 +42,16 @@ export interface AdminJwtPayload {
  * token was issued — no admin-deletion feature exists yet, but nothing
  * stops a direct DB edit) and is what `AuthGuard`'s `handleRequest` sees as
  * the `err` it turns into `AdminAuthGuard`'s own 401 `ApiException`.
+ *
+ * Story 7.2 (AD-11, FR-21): also rejects a token whose `jti` was revoked
+ * via `POST /admin/auth/logout`, checked here (not a separate guard/
+ * middleware) so EVERY consumer of `AdminAuthGuard` — present and future,
+ * across Epic 8/9/10 — gets revocation checking for free, the same as they
+ * already get signature/expiry/deleted-user checking, with no extra
+ * wiring. This runs on every single Admin-gated request, so it stays to
+ * exactly one indexed Postgres lookup by primary key (`RevokedToken.jti`)
+ * run IN PARALLEL with the existing AdminUser lookup (`Promise.all`, not
+ * sequential) rather than adding a second round-trip's worth of latency.
  */
 @Injectable()
 export class AdminJwtStrategy extends PassportStrategy(Strategy, 'admin-jwt') {
@@ -51,18 +68,29 @@ export class AdminJwtStrategy extends PassportStrategy(Strategy, 'admin-jwt') {
   }
 
   async validate(payload: AdminJwtPayload): Promise<AuthenticatedAdminUser> {
-    const admin = await this.prisma.adminUser.findUnique({
-      where: { id: payload.sub },
-      select: {
-        id: true,
-        username: true,
-        email: true,
-        roleTier: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
-    if (!admin) {
+    // Every token minted by AdminAuthService.login (Story 7.2 onward)
+    // always carries a jti. A well-signed, non-expired token missing one
+    // can only be a hand-crafted or pre-Story-7.2 token — fail closed
+    // instead of running a revocation lookup that can never match one.
+    if (typeof payload.jti !== 'string' || payload.jti.length === 0) {
+      throw new UnauthorizedException();
+    }
+
+    const [admin, revoked] = await Promise.all([
+      this.prisma.adminUser.findUnique({
+        where: { id: payload.sub },
+        select: {
+          id: true,
+          username: true,
+          email: true,
+          roleTier: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      }),
+      this.prisma.revokedToken.findUnique({ where: { jti: payload.jti } }),
+    ]);
+    if (!admin || revoked) {
       throw new UnauthorizedException();
     }
     return admin;

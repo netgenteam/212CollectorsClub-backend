@@ -14,8 +14,14 @@ const REAL_PASSWORD = 'a-real-strong-admin-password';
  * side-channel documented on `AdminAuthService` itself.
  */
 describe('AdminAuthService', () => {
-  let prisma: { adminUser: { findFirst: ReturnType<typeof vi.fn> } };
-  let jwtService: { signAsync: ReturnType<typeof vi.fn> };
+  let prisma: {
+    adminUser: { findFirst: ReturnType<typeof vi.fn> };
+    revokedToken: { upsert: ReturnType<typeof vi.fn> };
+  };
+  let jwtService: {
+    signAsync: ReturnType<typeof vi.fn>;
+    decode: ReturnType<typeof vi.fn>;
+  };
   let configService: { getOrThrow: ReturnType<typeof vi.fn> };
   let service: AdminAuthService;
   let realPasswordHash: string;
@@ -27,8 +33,14 @@ describe('AdminAuthService', () => {
   });
 
   beforeEach(() => {
-    prisma = { adminUser: { findFirst: vi.fn() } };
-    jwtService = { signAsync: vi.fn().mockResolvedValue('signed.jwt.token') };
+    prisma = {
+      adminUser: { findFirst: vi.fn() },
+      revokedToken: { upsert: vi.fn().mockResolvedValue(undefined) },
+    };
+    jwtService = {
+      signAsync: vi.fn().mockResolvedValue('signed.jwt.token'),
+      decode: vi.fn(),
+    };
     configService = { getOrThrow: vi.fn().mockReturnValue('test-secret') };
     service = new AdminAuthService(
       prisma as never,
@@ -103,11 +115,93 @@ describe('AdminAuthService', () => {
       expiresIn: 28800,
     });
     expect(jwtService.signAsync).toHaveBeenCalledWith(
-      { sub: ADMIN_ID },
+      { sub: ADMIN_ID, jti: expect.any(String) as string },
       expect.objectContaining({ expiresIn: 28800 }),
     );
     // The response body never carries passwordHash, username, email or
     // anything else about the AdminUser beyond the opaque access token.
     expect(result).not.toHaveProperty('passwordHash');
+  });
+
+  it('mints a different jti on every login (each token is independently revocable)', async () => {
+    prisma.adminUser.findFirst.mockResolvedValue({
+      id: ADMIN_ID,
+      passwordHash: realPasswordHash,
+    });
+
+    await service.login('admin', REAL_PASSWORD);
+    await service.login('admin', REAL_PASSWORD);
+
+    const [firstCallPayload] = jwtService.signAsync.mock.calls[0] as [
+      { jti: string },
+    ];
+    const [secondCallPayload] = jwtService.signAsync.mock.calls[1] as [
+      { jti: string },
+    ];
+    expect(firstCallPayload.jti).not.toBe(secondCallPayload.jti);
+  });
+});
+
+/**
+ * Story 7.2 (AD-11, FR-21). `logout` only ever decodes the already-guard-
+ * verified token (never re-verifies against the secret) and persists its
+ * `jti`/`exp` into RevokedToken.
+ */
+describe('AdminAuthService.logout', () => {
+  let prisma: { revokedToken: { upsert: ReturnType<typeof vi.fn> } };
+  let jwtService: { decode: ReturnType<typeof vi.fn> };
+  let configService: { getOrThrow: ReturnType<typeof vi.fn> };
+  let service: AdminAuthService;
+
+  beforeEach(() => {
+    prisma = { revokedToken: { upsert: vi.fn().mockResolvedValue(undefined) } };
+    jwtService = { decode: vi.fn() };
+    configService = { getOrThrow: vi.fn().mockReturnValue('test-secret') };
+    service = new AdminAuthService(
+      prisma as never,
+      jwtService as never,
+      configService as never,
+    );
+  });
+
+  it('inserts the decoded jti/exp into RevokedToken', async () => {
+    const expSeconds = Math.floor(Date.now() / 1000) + 28800;
+    jwtService.decode.mockReturnValue({
+      sub: ADMIN_ID,
+      jti: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      iat: expSeconds - 28800,
+      exp: expSeconds,
+    });
+
+    await service.logout('some.raw.jwt');
+
+    expect(prisma.revokedToken.upsert).toHaveBeenCalledWith({
+      where: { jti: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' },
+      create: {
+        jti: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        expiresAt: new Date(expSeconds * 1000),
+      },
+      update: {},
+    });
+  });
+
+  it('rejects with INVALID_ADMIN_TOKEN when the token cannot be decoded (defense in depth — unreachable via the real guarded route)', async () => {
+    jwtService.decode.mockReturnValue(null);
+
+    await expect(service.logout('garbage')).rejects.toMatchObject({
+      status: 401,
+      response: { errorCode: 'INVALID_ADMIN_TOKEN' },
+    });
+    expect(prisma.revokedToken.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects with INVALID_ADMIN_TOKEN when the decoded payload has no jti', async () => {
+    jwtService.decode.mockReturnValue({ sub: ADMIN_ID, exp: 9999999999 });
+
+    await expect(service.logout('garbage')).rejects.toMatchObject({
+      status: 401,
+      response: { errorCode: 'INVALID_ADMIN_TOKEN' },
+    });
+    expect(prisma.revokedToken.upsert).not.toHaveBeenCalled();
   });
 });

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -261,6 +262,10 @@ describe('AdminAuthController (e2e)', () => {
     it('a token for an AdminUser id that no longer exists: 401 INVALID_ADMIN_TOKEN', async () => {
       const orphanToken = jwtService.sign({
         sub: '99999999-9999-4999-8999-999999999999',
+        // Story 7.2: every real token carries a jti from this point on —
+        // included here so this test genuinely exercises the "admin not
+        // found" 401 path, not the separate "missing jti" 401 path.
+        jti: randomUUID(),
       });
       await request(app.getHttpServer())
         .get('/api/v1/admin/auth/me')
@@ -302,6 +307,147 @@ describe('AdminAuthController (e2e)', () => {
           `GET /admin/auth/me must NEVER include passwordHash: ${JSON.stringify(body)}`,
         );
       }
+    });
+  });
+
+  /**
+   * Story 7.2 (AD-11, FR-21). Builds its own throwaway INestApplication the
+   * same way `beforeEach` above does — used only by the "survives an app
+   * restart" test below, which needs a SECOND, independently-constructed
+   * app instance (never sharing the first instance's in-process state) to
+   * prove the revocation denylist is real Postgres state, not an
+   * in-memory Set that would trivially "work" within a single process.
+   */
+  async function buildFreshApp(): Promise<INestApplication<App>> {
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    }).compile();
+    const freshApp =
+      moduleFixture.createNestApplication<INestApplication<App>>();
+    const freshConfigService = freshApp.get(ConfigService);
+    freshApp.use(
+      cookieParser(freshConfigService.getOrThrow<string>('COOKIE_SECRET')),
+    );
+    freshApp.setGlobalPrefix('api');
+    freshApp.enableVersioning({
+      type: VersioningType.URI,
+      defaultVersion: '1',
+    });
+    freshApp.useGlobalPipes(createGlobalValidationPipe());
+    await freshApp.init();
+    return freshApp;
+  }
+
+  describe('POST /api/v1/admin/auth/logout', () => {
+    it('no Authorization header at all: 401 INVALID_ADMIN_TOKEN — cannot log out without being logged in', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/admin/auth/logout')
+        .expect(401);
+      const body = res.body as ApiErrorBody;
+      if (body.errorCode !== 'INVALID_ADMIN_TOKEN') {
+        throw new Error(`Unexpected body: ${JSON.stringify(body)}`);
+      }
+    });
+
+    it('a valid token: 204, and that SAME token is rejected on any subsequent request (here, GET /me)', async () => {
+      const loginRes = await request(app.getHttpServer())
+        .post('/api/v1/admin/auth/login')
+        .send({ usernameOrEmail: TEST_USERNAME, password: TEST_PASSWORD })
+        .expect(200);
+      const { accessToken } = loginRes.body as AdminLoginResponse;
+
+      // Token works before logout.
+      await request(app.getHttpServer())
+        .get('/api/v1/admin/auth/me')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .expect(200);
+
+      await request(app.getHttpServer())
+        .post('/api/v1/admin/auth/logout')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .expect(204);
+
+      // Same token, same still-unexpired JWT — now rejected everywhere.
+      const rejectedRes = await request(app.getHttpServer())
+        .get('/api/v1/admin/auth/me')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .expect(401);
+      const body = rejectedRes.body as ApiErrorBody;
+      if (body.errorCode !== 'INVALID_ADMIN_TOKEN') {
+        throw new Error(`Unexpected body: ${JSON.stringify(body)}`);
+      }
+
+      // Confirm the row really landed in Postgres (not just "the request
+      // got rejected for some other reason").
+      const decoded = jwtService.decode<{ jti: string }>(accessToken);
+      const revokedRow = await prisma.revokedToken.findUnique({
+        where: { jti: decoded.jti },
+      });
+      if (!revokedRow) {
+        throw new Error('Expected a RevokedToken row for the logged-out jti');
+      }
+      await prisma.revokedToken.delete({ where: { jti: decoded.jti } });
+    });
+
+    it('double logout of the same token: the second call also gets 401 INVALID_ADMIN_TOKEN (it never reaches the logout handler a second time — same guard, same revocation check as any other route)', async () => {
+      const loginRes = await request(app.getHttpServer())
+        .post('/api/v1/admin/auth/login')
+        .send({ usernameOrEmail: TEST_USERNAME, password: TEST_PASSWORD })
+        .expect(200);
+      const { accessToken } = loginRes.body as AdminLoginResponse;
+
+      await request(app.getHttpServer())
+        .post('/api/v1/admin/auth/logout')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .expect(204);
+
+      const secondRes = await request(app.getHttpServer())
+        .post('/api/v1/admin/auth/logout')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .expect(401);
+      const body = secondRes.body as ApiErrorBody;
+      if (body.errorCode !== 'INVALID_ADMIN_TOKEN') {
+        throw new Error(`Unexpected body: ${JSON.stringify(body)}`);
+      }
+
+      const decoded = jwtService.decode<{ jti: string }>(accessToken);
+      await prisma.revokedToken
+        .delete({ where: { jti: decoded.jti } })
+        .catch(() => undefined);
+    });
+
+    it('a revoked token is STILL rejected against a brand-new app instance (simulates surviving a real process restart — the denylist is Postgres, never in-memory)', async () => {
+      const loginRes = await request(app.getHttpServer())
+        .post('/api/v1/admin/auth/login')
+        .send({ usernameOrEmail: TEST_USERNAME, password: TEST_PASSWORD })
+        .expect(200);
+      const { accessToken } = loginRes.body as AdminLoginResponse;
+
+      await request(app.getHttpServer())
+        .post('/api/v1/admin/auth/logout')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .expect(204);
+
+      // A fresh app instance, from a fresh TestingModule — no state carried
+      // over from `app` above except whatever is in the shared Postgres DB.
+      const restartedApp = await buildFreshApp();
+      try {
+        const res = await request(restartedApp.getHttpServer())
+          .get('/api/v1/admin/auth/me')
+          .set('Authorization', `Bearer ${accessToken}`)
+          .expect(401);
+        const body = res.body as ApiErrorBody;
+        if (body.errorCode !== 'INVALID_ADMIN_TOKEN') {
+          throw new Error(`Unexpected body: ${JSON.stringify(body)}`);
+        }
+      } finally {
+        await restartedApp.close();
+      }
+
+      const decoded = jwtService.decode<{ jti: string }>(accessToken);
+      await prisma.revokedToken
+        .delete({ where: { jti: decoded.jti } })
+        .catch(() => undefined);
     });
   });
 });

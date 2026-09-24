@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -6,6 +7,14 @@ import { ApiException } from '../common/api-exception.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AdminJwtPayload } from './admin-jwt.strategy.js';
 import type { AdminLoginResponseDto } from './dto/admin-login-response.dto.js';
+
+function invalidAdminTokenException(): ApiException {
+  return new ApiException(
+    HttpStatus.UNAUTHORIZED,
+    'INVALID_ADMIN_TOKEN',
+    'This route requires a valid Admin session, sent as "Authorization: Bearer <token>" from POST /api/v1/admin/auth/login.',
+  );
+}
 
 /** 8h, matching AD-11's JWT max-age exactly — expressed once here (both as
  * the `@nestjs/jwt` sign option and the `expiresIn` echoed in the login
@@ -77,7 +86,10 @@ export class AdminAuthService {
       throw invalidCredentialsException();
     }
 
-    const payload: AdminJwtPayload = { sub: admin.id };
+    // Story 7.2 (AD-11): a fresh, random jti per issued token — this
+    // token's own revocable identity, independent of `sub` (see
+    // `AdminJwtPayload`'s own doc comment for why).
+    const payload: AdminJwtPayload = { sub: admin.id, jti: randomUUID() };
     const accessToken = await this.jwtService.signAsync(payload, {
       secret: this.configService.getOrThrow<string>('ADMIN_JWT_SECRET'),
       expiresIn: ADMIN_JWT_EXPIRES_IN_SECONDS,
@@ -88,5 +100,51 @@ export class AdminAuthService {
       tokenType: 'Bearer',
       expiresIn: ADMIN_JWT_EXPIRES_IN_SECONDS,
     };
+  }
+
+  /**
+   * Story 7.2 (AD-11, FR-21). `rawToken` is the exact Bearer token string
+   * `POST /admin/auth/logout` was called with — by the time this runs,
+   * `AdminAuthGuard` has already verified its signature and expiry (this
+   * route is itself guard-gated, see `AdminAuthController`), so this only
+   * needs to `decode` it (no secret, no re-verification) to recover the
+   * `jti`/`exp` claims to persist.
+   *
+   * **Double-logout decision**: a second logout call for the SAME token,
+   * in the normal sequential case, never reaches this method at all — once
+   * the first call's `RevokedToken` row exists, `AdminJwtStrategy`
+   * rejects the token at the guard with the same 401 `INVALID_ADMIN_TOKEN`
+   * every other revoked/expired/malformed token gets (no special
+   * "already logged out" status — consistent with this module's existing
+   * non-enumeration posture: the caller never learns *why* their token
+   * was rejected). `upsert` (not `create`) exists only for the genuine
+   * race — two requests for the same still-valid token landing concurrently
+   * before either write commits, both passing the guard's revocation check
+   * — so that race resolves as a harmless no-op instead of a Prisma unique-
+   * constraint error surfacing as an unhandled 500.
+   */
+  async logout(rawToken: string): Promise<void> {
+    const decoded = this.jwtService.decode<
+      (AdminJwtPayload & { exp?: number }) | null
+    >(rawToken);
+
+    // Unreachable in practice — AdminAuthGuard already verified this exact
+    // token before this method is ever called — but guarded anyway so a
+    // future refactor that loosens that guarantee fails closed instead of
+    // writing a garbage RevokedToken row.
+    if (
+      !decoded ||
+      typeof decoded.jti !== 'string' ||
+      decoded.jti.length === 0 ||
+      typeof decoded.exp !== 'number'
+    ) {
+      throw invalidAdminTokenException();
+    }
+
+    await this.prisma.revokedToken.upsert({
+      where: { jti: decoded.jti },
+      create: { jti: decoded.jti, expiresAt: new Date(decoded.exp * 1000) },
+      update: {},
+    });
   }
 }
