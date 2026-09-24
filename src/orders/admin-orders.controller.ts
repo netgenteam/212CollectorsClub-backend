@@ -25,9 +25,11 @@ import { AdminAuthGuard } from '../common/admin-auth.guard.js';
 import type { RequestWithAdminUser } from '../common/admin-auth.guard.js';
 import { AdminOrdersService } from './admin-orders.service.js';
 import { AdminOrderPaymentService } from './admin-order-payment.service.js';
+import { AdminOrderFulfillmentService } from './admin-order-fulfillment.service.js';
 import { ListAdminOrdersQueryDto } from './dto/list-admin-orders-query.dto.js';
 import { PaginatedAdminOrdersResponseDto } from './dto/paginated-admin-orders-response.dto.js';
 import { AdminPaymentDecisionResponseDto } from './dto/admin-payment-decision-response.dto.js';
+import { AdminFulfillmentDecisionResponseDto } from './dto/admin-fulfillment-decision-response.dto.js';
 
 /**
  * Story 9.1 (FR-26, NFR-4; AD-11, AD-14). The first §4.9 "Admin Order &
@@ -56,6 +58,13 @@ import { AdminPaymentDecisionResponseDto } from './dto/admin-payment-decision-re
  * to avoid enumeration; that concern does not apply here, since every
  * caller of THESE routes is already a fully-authenticated Admin who can
  * see the full Order list anyway (Story 9.1).
+ *
+ * **Story 9.3 additions** (FR-27, NFR-4, NFR-6; AD-7, AD-16): two more
+ * routes nested under `admin/orders/:orderId`, delegating to the new
+ * `AdminOrderFulfillmentService` (kept separate from `AdminOrderPaymentService`
+ * — same one-concern-per-service split this controller already follows for
+ * 9.1/9.2). Same `ParseUUIDPipe` treatment as the 9.2 routes: a malformed
+ * `orderId` is a plain 400 before ever reaching the service/Prisma.
  */
 @ApiTags('orders')
 @ApiBearerAuth('admin-jwt')
@@ -65,6 +74,7 @@ export class AdminOrdersController {
   constructor(
     private readonly adminOrdersService: AdminOrdersService,
     private readonly adminOrderPaymentService: AdminOrderPaymentService,
+    private readonly adminOrderFulfillmentService: AdminOrderFulfillmentService,
   ) {}
 
   @Get()
@@ -196,5 +206,74 @@ export class AdminOrdersController {
     @Req() request: RequestWithAdminUser,
   ): Promise<AdminPaymentDecisionResponseDto> {
     return this.adminOrderPaymentService.rejectPayment(orderId, request.user);
+  }
+
+  @Post(':orderId/fulfill')
+  @HttpCode(HttpStatus.OK)
+  @ApiParam({ name: 'orderId', format: 'uuid' })
+  @ApiOperation({
+    summary: 'Mark a paid Order as fulfilled (paid -> fulfilled, terminal)',
+    description:
+      'Guarded `paid->fulfilled` transition (actorType=admin, adminUserId from the JWT — AD-7: fulfilled is TERMINAL). No stock is touched — it was already decremented once, permanently, when the Order was confirmed paid (4.3/9.2).',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'The Order is now fulfilled.',
+    type: AdminFulfillmentDecisionResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'errorCode ORDER_NOT_FOUND.',
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description:
+      'errorCode ORDER_NOT_PAID (this Order is not currently paid — still pending verification, or already fulfilled/cancelled/etc.; includes the current status in `details`. A duplicate/double-click fulfill is ALWAYS an explicit conflict here, never a silent no-op).',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'errorCode INVALID_ADMIN_TOKEN.',
+  })
+  fulfillOrder(
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Req() request: RequestWithAdminUser,
+  ): Promise<AdminFulfillmentDecisionResponseDto> {
+    return this.adminOrderFulfillmentService.fulfillOrder(
+      orderId,
+      request.user,
+    );
+  }
+
+  @Post(':orderId/cancel')
+  @HttpCode(HttpStatus.OK)
+  @ApiParam({ name: 'orderId', format: 'uuid' })
+  @ApiOperation({
+    summary: 'Cancel a paid Order (paid -> cancelled, terminal)',
+    description:
+      'Inside one DB transaction (AD-16): guarded `paid->cancelled` transition (actorType=admin, adminUserId from the JWT — AD-7: cancelled is TERMINAL), then a compensating stock re-increment for every OrderLine on this Order — `UPDATE "Products" SET stock = stock + qty WHERE id = ?` using each line\'s snapshotted purchased quantity. Zero rows affected on EITHER the transition or ANY line\'s re-increment rolls back everything (never a partial re-increment across a multi-line Order).',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'The Order is now cancelled; stock already reflects it.',
+    type: AdminFulfillmentDecisionResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'errorCode ORDER_NOT_FOUND.',
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description:
+      'errorCode ORDER_NOT_PAID (this Order is not currently paid — includes the current status in `details`; a duplicate/double-click cancel is ALWAYS an explicit conflict here, never a silent no-op) or STOCK_REINCREMENT_CONFLICT (should never happen in normal operation — see AdminOrderFulfillmentService).',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'errorCode INVALID_ADMIN_TOKEN.',
+  })
+  cancelOrder(
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Req() request: RequestWithAdminUser,
+  ): Promise<AdminFulfillmentDecisionResponseDto> {
+    return this.adminOrderFulfillmentService.cancelOrder(orderId, request.user);
   }
 }

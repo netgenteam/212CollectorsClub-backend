@@ -10,6 +10,7 @@ import { PaymentProcessingTimeoutCronService } from './cron/payment-processing-t
 import { AdminOrdersController } from './admin-orders.controller.js';
 import { AdminOrdersService } from './admin-orders.service.js';
 import { AdminOrderPaymentService } from './admin-order-payment.service.js';
+import { AdminOrderFulfillmentService } from './admin-order-fulfillment.service.js';
 
 // PrismaService is provided by the global PrismaModule — no need to
 // re-import it here (same pattern CheckoutModule already uses).
@@ -49,6 +50,10 @@ import { AdminOrderPaymentService } from './admin-order-payment.service.js';
 // consumed by the SAME `AdminOrdersController` — no new controller, no new
 // module (same AD-14 reasoning Story 9.1 already established for this
 // module as a whole).
+//
+// Story 9.3: `AdminOrderFulfillmentService` (fulfill/cancel a paid Order)
+// is another sibling provider, same AD-14 reasoning — still no new
+// controller, no new module.
 @Module({
   imports: [PassportModule.register({ defaultStrategy: 'admin-jwt' })],
   controllers: [
@@ -64,6 +69,7 @@ import { AdminOrderPaymentService } from './admin-order-payment.service.js';
     PaymentProcessingTimeoutCronService,
     AdminOrdersService,
     AdminOrderPaymentService,
+    AdminOrderFulfillmentService,
   ],
   exports: [StockHoldExpiryCronService, PaymentProcessingTimeoutCronService],
 })
