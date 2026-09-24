@@ -311,6 +311,54 @@ const products: SeedProduct[] = [
       },
     ],
   },
+  // Story 4.3: two Products dedicated exclusively to the PayPal checkout/
+  // webhook e2e suite (test/payments-paypal.e2e-spec.ts) — every other
+  // seeded Product above is already claimed by an existing *.e2e-spec.ts
+  // file's own Product.stock mutations (see checkout.e2e-spec.ts's and
+  // proof-of-payment.e2e-spec.ts's own comments on cross-file flakiness
+  // under Vitest's parallel file execution).
+  {
+    id: '769f36ae-c8ea-4535-97df-11872d7915cc',
+    name: 'Dragon Ball Super - Union Force Sobre',
+    slug: 'dbs-union-force-booster-pack',
+    description:
+      'Sobre de 12 cartas de la serie Union Force de Dragon Ball Super Card Game.',
+    franchise: Franchise.DRAGON_BALL_SUPER,
+    productType: ProductType.BOOSTER_PACK,
+    rarity: Rarity.RARE,
+    priceUsd: '4.99',
+    stock: 50,
+    categorySlug: 'sobres-y-cajas',
+    images: [
+      {
+        id: '7baec38e-00b0-4efd-8888-fd234a4205b4',
+        url: 'https://picsum.photos/seed/dbs-union-force-booster-pack-1/600/800',
+        altText: 'Sobre Dragon Ball Super Union Force',
+        sortOrder: 0,
+      },
+    ],
+  },
+  {
+    id: '79daad73-ebc4-4157-af82-2c9714e31668',
+    name: 'Magic: The Gathering - Mazo Planeswalker Inicial',
+    slug: 'mtg-planeswalker-starter-deck',
+    description:
+      'Mazo preconstruido de 60 cartas listo para jugar, ideal para nuevos jugadores de Magic: The Gathering.',
+    franchise: Franchise.MAGIC_THE_GATHERING,
+    productType: ProductType.STARTER_DECK,
+    rarity: Rarity.UNCOMMON,
+    priceUsd: '19.99',
+    stock: 30,
+    categorySlug: 'mazos-preconstruidos',
+    images: [
+      {
+        id: 'e223e205-1d6a-4c82-9285-7d2d915b258f',
+        url: 'https://picsum.photos/seed/mtg-planeswalker-starter-deck-1/600/800',
+        altText: 'Mazo inicial Magic: The Gathering Planeswalker',
+        sortOrder: 0,
+      },
+    ],
+  },
 ];
 
 /**

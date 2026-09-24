@@ -248,11 +248,10 @@ model FxRateSetting {
   @@map("Fx_Rate_Settings")
 }
 
-/// The payment method a checkout was submitted with. Only `PAGO_MOVIL` is
-/// accepted by `POST /api/v1/checkout` as of Story 4.1 — `PAYPAL` exists in
-/// this enum now so Story 4.3 doesn't need a migration to add it, but the
-/// DTO-level `CheckoutPaymentRail` (src/checkout/dto) only allows
-/// `pago_movil` until 4.3 lands.
+/// The payment method a checkout was submitted with. Story 4.1 only wrote
+/// `PAGO_MOVIL`; Story 4.3 wires up `PAYPAL` at the DTO level too
+/// (`CheckoutPaymentRail` in src/checkout/dto), so both are now legal
+/// `POST /api/v1/checkout` inputs.
 enum PaymentRail {
   PAGO_MOVIL
   PAYPAL
@@ -268,11 +267,14 @@ enum FulfillmentType {
 
 /// AD-7's 8-state Order lifecycle. Story 4.1 only ever writes
 /// `PENDING_VERIFICATION` directly (Pago Móvil never passes through
-/// `PAYMENT_PROCESSING` — that transient state is PayPal-only, Story 4.3).
-/// The full enum is modeled now (not grown incrementally per story) since
-/// this schema is the shared source of truth every future order-transition
-/// story (4.3, 5.2, 9.2, 9.3) reads from — see AD-7 for the full legal-
-/// transition table.
+/// `PAYMENT_PROCESSING` — that transient state is PayPal-only). Story 4.3
+/// is the first to write `PAYMENT_PROCESSING` (PayPal checkout) and to
+/// transition out of it (`PAYMENT_PROCESSING`->`PAID`/`PAYMENT_FAILED`, via
+/// `PaypalPaymentsService`, reusing `guardedOrderStatusTransition` from
+/// Story 4.1). The full enum is modeled now (not grown incrementally per
+/// story) since this schema is the shared source of truth every future
+/// order-transition story (5.2, 9.2, 9.3) reads from — see AD-7 for the
+/// full legal-transition table.
 enum OrderStatus {
   PAYMENT_PROCESSING
   PENDING_VERIFICATION
@@ -340,6 +342,17 @@ model Order {
   /// is returned to the buyer exactly once, in the checkout response, and
   /// never stored.
   accessTokenHash String
+
+  /// Story 4.3: the PayPal Order id returned by `PaypalClient.createOrder`
+  /// (real SDK response, or the fake test double's own generated id) —
+  /// null for every Pago Móvil order, and briefly null for a PayPal order
+  /// too, between the DB transaction that creates this row (status already
+  /// `payment_processing`) and the follow-up (necessarily out-of-
+  /// transaction, see CheckoutService) call to PayPal that fills it in.
+  /// `@unique` so `PaypalPaymentsService`'s webhook handler can map an
+  /// incoming PayPal event straight back to exactly one Order with a plain
+  /// indexed lookup, never a scan.
+  paypalOrderId String? @unique
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

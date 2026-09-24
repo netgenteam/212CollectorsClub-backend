@@ -174,10 +174,10 @@ describe('CheckoutController (e2e)', () => {
         .expect(400);
     });
 
-    it('400s on a paymentRail other than pago_movil (e.g. paypal — not wired up until Story 4.3)', () => {
+    it('400s on an unrecognized paymentRail (pago_movil and, as of Story 4.3, paypal are the only legal values)', () => {
       return request(app.getHttpServer())
         .post('/api/v1/checkout')
-        .send(pickupBody({ paymentRail: 'paypal' }))
+        .send(pickupBody({ paymentRail: 'bogus_rail' }))
         .expect(400);
     });
   });
@@ -451,8 +451,6 @@ describe('CheckoutController (e2e)', () => {
         data: { stock: 2 },
       });
 
-      const ordersBefore = await prisma.order.count();
-
       await request(app.getHttpServer())
         .post('/api/v1/checkout')
         .set('Cookie', cartCookie)
@@ -476,12 +474,32 @@ describe('CheckoutController (e2e)', () => {
           }
         });
 
-      const ordersAfter = await prisma.order.count();
-      if (ordersAfter !== ordersBefore) {
+      // Scoped to THIS test's own cart, deliberately NOT a global
+      // `prisma.order.count()` before/after comparison — under Vitest's
+      // parallel file execution, other e2e suites (e.g.
+      // payments-paypal.e2e-spec.ts) legitimately create real Orders at
+      // the same wall-clock moment, which would make a global count
+      // racy/flaky here. A rejected checkout's transaction rolls back in
+      // full (CheckoutService's own guarantee), so the cart this specific
+      // request targeted must still exist with its original item — that
+      // is what actually proves no Order was created FOR THIS ATTEMPT,
+      // without depending on the rest of the database's Order table.
+      const getCartRes = await request(app.getHttpServer())
+        .get('/api/v1/cart')
+        .set('Cookie', cartCookie)
+        .expect(200);
+      const cartBody = getCartRes.body as {
+        items: Array<{ productId: string; quantity: number }>;
+      };
+      const stillCartedItem = cartBody.items.find(
+        (i) => i.productId === MTG_TIN_ID,
+      );
+      if (!stillCartedItem || stillCartedItem.quantity !== 5) {
         throw new Error(
-          `Expected no Order to be created on a rejected checkout, before=${ordersBefore} after=${ordersAfter}`,
+          `Expected the cart to still hold 5x ${MTG_TIN_ID} after a rejected checkout (proving no Order was created and the cart was never cleared), got: ${JSON.stringify(cartBody)}`,
         );
       }
+
       const reloaded = await prisma.product.findUniqueOrThrow({
         where: { id: MTG_TIN_ID },
       });

@@ -8,6 +8,7 @@ import { CartModule } from './cart/cart.module.js';
 import { ContactModule } from './contact/contact.module.js';
 import { CheckoutModule } from './checkout/checkout.module.js';
 import { OrdersModule } from './orders/orders.module.js';
+import { PaymentsPaypalModule } from './payments-paypal/payments-paypal.module.js';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { OrdersModule } from './orders/orders.module.js';
     CatalogModule,
     CartModule,
     ContactModule,
+    PaymentsPaypalModule,
     CheckoutModule,
     OrdersModule,
   ],

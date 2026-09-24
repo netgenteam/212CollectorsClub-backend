@@ -9,21 +9,23 @@ import {
 } from 'class-validator';
 
 /**
- * Story 4.1 (FR-12): only Pago Móvil is a legal `paymentRail` as of this
- * story. Story 4.3 (PayPal) will add a `PAYPAL = 'paypal'` member here —
- * `@IsEnum` on `CheckoutDto.paymentRail` will then just start accepting it
- * too, no other change needed.
+ * Story 4.1 (FR-12) introduced `pago_movil`; Story 4.3 adds `paypal` —
+ * both are now legal `paymentRail` values, and `CheckoutService` branches
+ * on which one was sent (stock-hold-then-pending_verification for
+ * pago_movil, no-hold-then-payment_processing-plus-a-PayPal-order for
+ * paypal — see that service's own doc comment).
  *
- * Deliberately lowercase-snake wire values (`pago_movil`), NOT the internal
- * Prisma `PaymentRail` enum's UPPER_SNAKE keys (`PAGO_MOVIL`) — the story's
- * own Acceptance Criteria spell the wire value as `paymentRail=pago_movil`
- * verbatim (unlike Story 2.2's catalog filters, which exposed the Prisma
- * enum's own UPPER_SNAKE values directly on the wire). This DTO enum is
- * the wire contract; `CheckoutService` maps it onto the Prisma enum when
- * persisting.
+ * Deliberately lowercase-snake wire values (`pago_movil`, `paypal`), NOT
+ * the internal Prisma `PaymentRail` enum's UPPER_SNAKE keys (`PAGO_MOVIL`,
+ * `PAYPAL`) — the story's own Acceptance Criteria spell the wire value as
+ * `paymentRail=pago_movil`/`paymentRail=paypal` verbatim (unlike Story
+ * 2.2's catalog filters, which exposed the Prisma enum's own UPPER_SNAKE
+ * values directly on the wire). This DTO enum is the wire contract;
+ * `CheckoutService` maps it onto the Prisma enum when persisting.
  */
 export enum CheckoutPaymentRail {
   PAGO_MOVIL = 'pago_movil',
+  PAYPAL = 'paypal',
 }
 
 /**
@@ -68,7 +70,7 @@ export class CheckoutDto {
     enum: CheckoutPaymentRail,
     example: CheckoutPaymentRail.PAGO_MOVIL,
     description:
-      'Payment rail for this checkout. Only "pago_movil" is accepted as of Story 4.1 — PayPal (Story 4.3) is not wired up yet.',
+      'Payment rail for this checkout. "pago_movil" (Story 4.1) creates a stock hold and enters pending_verification. "paypal" (Story 4.3) never holds stock, enters payment_processing, and the response includes a paypal.approveUrl to redirect the buyer to.',
   })
   @IsEnum(CheckoutPaymentRail)
   paymentRail: CheckoutPaymentRail;
