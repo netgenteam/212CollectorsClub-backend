@@ -27,6 +27,7 @@ import { AdminAuthGuard } from '../common/admin-auth.guard.js';
 import { AdminProductsService } from './admin-products.service.js';
 import { CreateProductDto } from './dto/create-product.dto.js';
 import { UpdateProductDto } from './dto/update-product.dto.js';
+import { AdjustProductStockDto } from './dto/adjust-product-stock.dto.js';
 import { AdminProductResponseDto } from './dto/admin-product-response.dto.js';
 import { createProductImageMulterOptions } from './product-image-multer.config.js';
 import { MAX_PRODUCT_IMAGES_PER_REQUEST } from './product-image-upload-paths.constants.js';
@@ -190,6 +191,30 @@ export class AdminProductsController {
     @Body() dto: UpdateProductDto,
   ): Promise<AdminProductResponseDto> {
     return this.adminProductsService.update(id, dto);
+  }
+
+  @Patch(':id/stock')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Directly set a Product's stock count (inventory correction)",
+    description:
+      'Sets Product.stock to the given absolute value, independent of any Order — never touches heldQty and never creates/resolves a StockHold or OrderStatusHistory row. Reflected immediately in the public GET /api/v1/products and /products/:id (no cache, AD-10). Negative values are rejected (400), same criterion as Story 8.2.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiResponse({ status: HttpStatus.OK, type: AdminProductResponseDto })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'No Product exists with the given id.',
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'A negative stock value.',
+  })
+  adjustStock(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AdjustProductStockDto,
+  ): Promise<AdminProductResponseDto> {
+    return this.adminProductsService.adjustStock(id, dto);
   }
 
   @Delete(':id')

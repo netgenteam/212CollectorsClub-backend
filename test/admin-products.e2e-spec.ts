@@ -525,4 +525,110 @@ describe('AdminProductsController (e2e)', () => {
         .expect(404);
     });
   });
+
+  describe('PATCH /api/v1/admin/products/:id/stock', () => {
+    it('401 INVALID_ADMIN_TOKEN with no token', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`/api/v1/admin/products/${SEEDED_CATEGORY_ID}/stock`)
+        .send({ stock: 5 })
+        .expect(401);
+      expect((res.body as ApiErrorBody).errorCode).toBe('INVALID_ADMIN_TOKEN');
+    });
+
+    it('a valid adjustment: updates Product.stock directly, reflected IMMEDIATELY in the public catalog list/detail (no cache, AD-10), and never touches heldQty/StockHold/OrderStatusHistory', async () => {
+      const slug = uniqueSlug('e2e-stock-adjust');
+      const createRes = await createProductRequest({
+        slug,
+        stock: '10',
+      }).expect(201);
+      const created = createRes.body as AdminProduct;
+
+      try {
+        const beforeRow = await prisma.product.findUniqueOrThrow({
+          where: { id: created.id },
+          select: { heldQty: true },
+        });
+        const beforeHoldCount = await prisma.stockHold.count({
+          where: { productId: created.id },
+        });
+        const beforeHistoryCount = await prisma.orderStatusHistory.count();
+
+        const patchRes = await authed(
+          'patch',
+          `/api/v1/admin/products/${created.id}/stock`,
+        )
+          .send({ stock: 42 })
+          .expect(200);
+        expect((patchRes.body as AdminProduct).stock).toBe(42);
+
+        // Immediately, no delay: public detail AND public list both show
+        // the corrected availableStock straight away.
+        const detailRes = await request(app.getHttpServer())
+          .get(`/api/v1/products/${created.id}`)
+          .expect(200);
+        expect(
+          (detailRes.body as { availableStock: number }).availableStock,
+        ).toBe(42);
+
+        const listRes = await request(app.getHttpServer())
+          .get('/api/v1/products?limit=100')
+          .expect(200);
+        const listedRow = (
+          listRes.body as {
+            data: Array<{ id: string; availableStock: number }>;
+          }
+        ).data.find((p) => p.id === created.id);
+        expect(listedRow?.availableStock).toBe(42);
+
+        // Real Postgres check: heldQty untouched, no StockHold/
+        // OrderStatusHistory row was created by this adjustment.
+        const afterRow = await prisma.product.findUniqueOrThrow({
+          where: { id: created.id },
+          select: { heldQty: true, stock: true },
+        });
+        expect(afterRow.stock).toBe(42);
+        expect(afterRow.heldQty).toBe(beforeRow.heldQty);
+        const afterHoldCount = await prisma.stockHold.count({
+          where: { productId: created.id },
+        });
+        expect(afterHoldCount).toBe(beforeHoldCount);
+        const afterHistoryCount = await prisma.orderStatusHistory.count();
+        expect(afterHistoryCount).toBe(beforeHistoryCount);
+      } finally {
+        await authed('delete', `/api/v1/admin/products/${created.id}`);
+      }
+    });
+
+    it('a negative stock value: 400, never persisted', async () => {
+      const slug = uniqueSlug('e2e-stock-negative');
+      const createRes = await createProductRequest({
+        slug,
+        stock: '7',
+      }).expect(201);
+      const created = createRes.body as AdminProduct;
+
+      try {
+        await authed('patch', `/api/v1/admin/products/${created.id}/stock`)
+          .send({ stock: -1 })
+          .expect(400);
+
+        const unchanged = await prisma.product.findUniqueOrThrow({
+          where: { id: created.id },
+          select: { stock: true },
+        });
+        expect(unchanged.stock).toBe(7);
+      } finally {
+        await authed('delete', `/api/v1/admin/products/${created.id}`);
+      }
+    });
+
+    it('an unknown Product id: 404', async () => {
+      await authed(
+        'patch',
+        '/api/v1/admin/products/00000000-0000-0000-0000-000000000000/stock',
+      )
+        .send({ stock: 5 })
+        .expect(404);
+    });
+  });
 });

@@ -11,6 +11,7 @@ import type {
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateProductDto } from './dto/create-product.dto.js';
 import { UpdateProductDto } from './dto/update-product.dto.js';
+import { AdjustProductStockDto } from './dto/adjust-product-stock.dto.js';
 import {
   AdminProductResponseDto,
   AdminProductImageDto,
@@ -219,6 +220,62 @@ export class AdminProductsService {
       }
       if (isPrismaKnownError(err, 'P2003')) {
         throw categoryNotFoundForProductException(dto.categoryId ?? '');
+      }
+      throw err;
+    }
+    return this.findOne(id);
+  }
+
+  /**
+   * Story 8.3 (FR-24, NFR-2, NFR-4; AD-10). `PATCH /admin/products/:id/
+   * stock` — sets `Product.stock` directly to the given absolute value,
+   * completely independent of any Order: unlike the checkout/hold flow
+   * (Epic 4, AD-6), this never touches `Product.heldQty` and never
+   * creates/resolves a `StockHold` or `OrderStatusHistory` row. It exists
+   * as its own narrow endpoint (rather than requiring admins to go through
+   * the general `update()` above, which also technically accepts `stock`)
+   * so a physical-inventory-count correction reads as its own intent in
+   * the API surface, matching the story's framing.
+   *
+   * No cache layer sits in front of the public catalog reads (AD-10,
+   * already the case since Epic 2) — this write is a plain, synchronous
+   * `UPDATE` against the same table `CatalogService.listProducts`/
+   * `getProductDetail` read from on every request, so the new value is
+   * visible on the very next public read with no invalidation step needed
+   * (~0s staleness, per this story's AC2).
+   *
+   * **Design decision — `stock` set below the current `heldQty`**: not
+   * explicit in the AC, so documented here rather than silently picked.
+   * `heldQty` counts Pago Móvil checkouts currently sitting in
+   * `pending_verification` (Epic 4, AD-6) — a physical inventory count is
+   * authoritative and can legitimately land below that number (e.g. an
+   * admin finds fewer physical units than the DB believes are even
+   * "available"). This method allows the write unconditionally: it does
+   * NOT block, warn, or auto-adjust `heldQty` to compensate. Two reasons:
+   * (1) the public reads that matter (`listProducts`/`getProductDetail`)
+   * already clamp `availableStock = max(stock - heldQty, 0)` to zero, so a
+   * `stock < heldQty` state never surfaces a negative number to a buyer —
+   * it just means the Product correctly shows as out of stock; (2) the
+   * in-flight Pago Móvil Orders that hold that `heldQty` are still
+   * pending admin verification (Story 9.2, not yet implemented) — that is
+   * the right place to decide whether each specific held Order can still
+   * be honored against the corrected physical count, not this blunt
+   * stock-setter. Silently "fixing" `heldQty` here would be worse: it
+   * would make a stock correction invisibly cancel a buyer's pending
+   * reservation with no record of why.
+   */
+  async adjustStock(
+    id: string,
+    dto: AdjustProductStockDto,
+  ): Promise<AdminProductResponseDto> {
+    try {
+      await this.prisma.product.update({
+        where: { id },
+        data: { stock: dto.stock },
+      });
+    } catch (err) {
+      if (isPrismaKnownError(err, 'P2025')) {
+        throw productNotFoundException(id);
       }
       throw err;
     }

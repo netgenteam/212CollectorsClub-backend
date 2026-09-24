@@ -320,6 +320,44 @@ describe('AdminProductsService', () => {
     });
   });
 
+  describe('adjustStock', () => {
+    it('writes ONLY stock to Prisma — never touches heldQty', async () => {
+      prisma.product.update.mockResolvedValue(buildProductRow());
+      prisma.product.findUnique.mockResolvedValue(
+        buildProductRow({ stock: 40 }),
+      );
+
+      const result = await service.adjustStock(buildProductRow().id, {
+        stock: 40,
+      });
+
+      expect(prisma.product.update).toHaveBeenCalledWith({
+        where: { id: buildProductRow().id },
+        data: { stock: 40 },
+      });
+      expect(result.stock).toBe(40);
+    });
+
+    it('throws NotFoundException on P2025 (no such Product)', async () => {
+      prisma.product.update.mockRejectedValue(knownRequestError('P2025'));
+
+      await expect(
+        service.adjustStock('00000000-0000-0000-0000-000000000000', {
+          stock: 5,
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('rethrows any other error untouched', async () => {
+      const dbDown = new Error('connection refused');
+      prisma.product.update.mockRejectedValue(dbDown);
+
+      await expect(
+        service.adjustStock(buildProductRow().id, { stock: 5 }),
+      ).rejects.toBe(dbDown);
+    });
+  });
+
   describe('remove — delete-vs-deactivate policy', () => {
     it('throws NotFoundException when no Product matches the id, never attempting the delete', async () => {
       prisma.product.findUnique.mockResolvedValue(null);
