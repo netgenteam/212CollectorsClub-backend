@@ -1,5 +1,6 @@
 import { HttpStatus, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { Prisma } from '../generated/prisma/client.js';
 import { ApiException } from '../common/api-exception.js';
 import { AddCartItemDto } from './dto/add-cart-item.dto.js';
 import {
@@ -113,6 +114,122 @@ export class CartService {
       }
 
       return { cartId: cart.id };
+    });
+  }
+
+  /**
+   * Story 3.2 (FR-9, AD-5). Updates the quantity of a Product already in
+   * the caller's Cart, or removes it entirely when `quantity` is 0.
+   *
+   * **404 decision** (not spelled out by the story/AD-5, decided here same
+   * as Story 3.1 decided its own gaps): a missing/unverifiable cart cookie,
+   * a cookie pointing at an expired/nonexistent Cart, or a `productId` that
+   * isn't a line in that specific Cart are all treated as the same thing —
+   * "there is nothing at that address to update" — and all 404 via
+   * `NotFoundException`. This mirrors how Story 2.3 already uses a plain
+   * 404 for "no such resource" without needing a stable `errorCode` (a 404
+   * needs no reason code to disambiguate, unlike the 409 below). We
+   * deliberately do NOT fall back to "create a cart/line" the way `addItem`
+   * creates a Cart on demand — updating a quantity presupposes the line
+   * already exists; conjuring one here would silently do something the
+   * caller didn't ask for.
+   *
+   * **Concurrency guard — improves on the Story 3.1 pattern.** QA flagged
+   * (non-blocking) that `addItem`'s stock-race protection today relies on
+   * the *side effect* of `Cart.update({ expiresAt })` taking a row lock
+   * that happens to serialize concurrent requests against the same Cart,
+   * not on an explicit guarded update like AD-16 requires elsewhere. This
+   * method does NOT touch `Cart.expiresAt` at all (out of this story's
+   * scope, and reusing that incidental lock would just inherit the same
+   * fragility) — instead the quantity write itself is a single guarded SQL
+   * `UPDATE ... WHERE ... stock - "heldQty" >= quantity`, executed inside
+   * the transaction. Two concurrent requests targeting the *same*
+   * `CartItem` row are already serialized by Postgres's own row-level
+   * locking on that `UPDATE` (no incidental lock elsewhere needed): the
+   * second one blocks until the first commits, then re-evaluates the WHERE
+   * guard against the post-commit state, so it can never overwrite with a
+   * quantity that stock no longer supports. If the guard's affected-row
+   * count is 0, we re-check whether the `CartItem` still exists at all
+   * (another concurrent request could have raced it away, e.g. a parallel
+   * quantity=0 removal) to report 404 instead of a misleading 409 in that
+   * narrow case; otherwise it's a genuine `INSUFFICIENT_STOCK`, and nothing
+   * was written (the whole request rolls back with the transaction).
+   *
+   * This is still a *soft*, informational stock check, same class of
+   * guarantee `addItem` already gives — carts don't reserve/hold stock
+   * (that's AD-6, Epic 4 checkout scope). A different guest's cart bumping
+   * the *same* Product at the exact same instant isn't serialized by this
+   * guard either (each targets a different `CartItem` row) — closing that
+   * gap for real requires AD-6's `heldQty` reservation at checkout, not
+   * here. What this method does close, without depending on any incidental
+   * side effect, is the same-Cart/same-line race this story's own AC
+   * cares about.
+   */
+  async updateItemQuantity(
+    cartId: string | null,
+    productId: string,
+    quantity: number,
+  ): Promise<void> {
+    if (!cartId) {
+      throw new NotFoundException('No cart found for this request');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const cart = await tx.cart.findFirst({
+        where: { id: cartId, expiresAt: { gt: new Date() } },
+      });
+      if (!cart) {
+        throw new NotFoundException('No cart found for this request');
+      }
+
+      const cartItem = await tx.cartItem.findUnique({
+        where: { cartId_productId: { cartId: cart.id, productId } },
+      });
+      if (!cartItem) {
+        throw new NotFoundException(`Product ${productId} is not in this cart`);
+      }
+
+      if (quantity === 0) {
+        // `deleteMany` (not `delete`) so a concurrent duplicate
+        // quantity=0 request racing this one is a no-op, not a P2025
+        // crash — idempotent removal, no explicit "already gone" error.
+        await tx.cartItem.deleteMany({ where: { id: cartItem.id } });
+        return;
+      }
+
+      const affected = await tx.$executeRaw(Prisma.sql`
+        UPDATE "Cart_Items"
+        SET quantity = ${quantity}, "updatedAt" = now()
+        FROM "Products"
+        WHERE "Cart_Items".id = ${cartItem.id}::uuid
+          AND "Cart_Items"."productId" = "Products".id
+          AND "Products".stock - "Products"."heldQty" >= ${quantity}
+      `);
+
+      if (affected === 0) {
+        const stillExists = await tx.cartItem.findUnique({
+          where: { id: cartItem.id },
+          select: { id: true },
+        });
+        if (!stillExists) {
+          throw new NotFoundException(
+            `Product ${productId} is not in this cart`,
+          );
+        }
+
+        const product = await tx.product.findUniqueOrThrow({
+          where: { id: productId },
+          select: { stock: true, heldQty: true },
+        });
+        const availableStock = Math.max(product.stock - product.heldQty, 0);
+
+        throw new ApiException(
+          HttpStatus.CONFLICT,
+          'INSUFFICIENT_STOCK',
+          `Only ${availableStock} unit(s) of product ${productId} are currently available.`,
+          { availableStock },
+        );
+      }
     });
   }
 

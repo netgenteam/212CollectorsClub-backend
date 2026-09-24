@@ -28,6 +28,11 @@ interface CartResponse {
 const PIKACHU_PROMO_ID = '343c080e-6b92-48d0-9369-6cee233cf673'; // stock 40
 const LUFFY_LEADER_ID = '76f4d753-8142-417e-ba0f-f0c426369a8d'; // stock 8
 const CHARIZARD_VMAX_ID = 'f65915f5-2931-4e50-af95-630b1fd7b950'; // stock 12
+// Story 3.2: distinct Products from the ones Story 3.1's tests above
+// already mutate/read (Charizard VMAX's price, Luffy's stock boundary) so
+// this file's own tests can't flake against those in a parallel run.
+const BLUE_EYES_ID = '0992a698-3b4f-446e-9fc0-22fb4fe8847a'; // stock 25
+const YUGIOH_BOX_ID = 'f45cfd6e-43b0-40f3-93e1-49d4d60741ba'; // stock 10
 
 // Pulls the raw `cartId=...` Set-Cookie header string out of a response so
 // it can be replayed on a follow-up request via `.set('Cookie', ...)` —
@@ -284,6 +289,165 @@ describe('CartController (e2e)', () => {
         data: { priceUsd: original.priceUsd },
       });
     }
+  });
+
+  describe('PATCH /api/v1/cart/items/:productId (Story 3.2)', () => {
+    it('updates the quantity, and the response (and a follow-up GET) reflect the new quantity and recalculated total', async () => {
+      const addRes = await request(app.getHttpServer())
+        .post('/api/v1/cart/items')
+        .send({ productId: BLUE_EYES_ID, quantity: 2 })
+        .expect(201);
+      const cartCookie = extractCartCookie(addRes);
+      const price = (addRes.body as CartResponse).items[0].price;
+
+      const patchRes = await request(app.getHttpServer())
+        .patch(`/api/v1/cart/items/${BLUE_EYES_ID}`)
+        .set('Cookie', cartCookie)
+        .send({ quantity: 5 })
+        .expect(200);
+      const patchBody = patchRes.body as CartResponse;
+      const patchedItem = patchBody.items.find(
+        (i) => i.productId === BLUE_EYES_ID,
+      );
+      if (!patchedItem || patchedItem.quantity !== 5) {
+        throw new Error(
+          `Expected quantity 5 after PATCH, got: ${JSON.stringify(patchBody)}`,
+        );
+      }
+      const expectedLineTotal = Math.round(price * 5 * 100) / 100;
+      if (patchedItem.lineTotal !== expectedLineTotal) {
+        throw new Error(
+          `Expected lineTotal ${expectedLineTotal}, got ${patchedItem.lineTotal}`,
+        );
+      }
+
+      const getRes = await request(app.getHttpServer())
+        .get('/api/v1/cart')
+        .set('Cookie', cartCookie)
+        .expect(200);
+      const getBody = getRes.body as CartResponse;
+      const getItem = getBody.items.find((i) => i.productId === BLUE_EYES_ID);
+      if (!getItem || getItem.quantity !== 5) {
+        throw new Error(
+          `Expected GET /cart to reflect quantity 5, got: ${JSON.stringify(getBody)}`,
+        );
+      }
+      if (getBody.total !== patchBody.total) {
+        throw new Error(
+          `Expected GET /cart total (${getBody.total}) to match the PATCH response total (${patchBody.total})`,
+        );
+      }
+    });
+
+    it('quantity=0 removes the CartItem entirely — the PATCH response and a follow-up GET both stop showing it', async () => {
+      const addRes = await request(app.getHttpServer())
+        .post('/api/v1/cart/items')
+        .send({ productId: YUGIOH_BOX_ID, quantity: 3 })
+        .expect(201);
+      const cartCookie = extractCartCookie(addRes);
+
+      const patchRes = await request(app.getHttpServer())
+        .patch(`/api/v1/cart/items/${YUGIOH_BOX_ID}`)
+        .set('Cookie', cartCookie)
+        .send({ quantity: 0 })
+        .expect(200);
+      const patchBody = patchRes.body as CartResponse;
+      if (patchBody.items.some((i) => i.productId === YUGIOH_BOX_ID)) {
+        throw new Error(
+          `Expected the item to be gone from the PATCH response, got: ${JSON.stringify(patchBody)}`,
+        );
+      }
+
+      const getRes = await request(app.getHttpServer())
+        .get('/api/v1/cart')
+        .set('Cookie', cartCookie)
+        .expect(200);
+      const getBody = getRes.body as CartResponse;
+      if (getBody.items.some((i) => i.productId === YUGIOH_BOX_ID)) {
+        throw new Error(
+          `Expected GET /cart to no longer show the item, got: ${JSON.stringify(getBody)}`,
+        );
+      }
+    });
+
+    it('rejects with 409 INSUFFICIENT_STOCK and the real current available stock when the new quantity exceeds it, leaving the cart unmodified', async () => {
+      const prisma = app.get(PrismaService);
+      const product = await prisma.product.findUniqueOrThrow({
+        where: { id: YUGIOH_BOX_ID },
+        select: { stock: true, heldQty: true },
+      });
+      const availableStock = product.stock - product.heldQty;
+
+      const addRes = await request(app.getHttpServer())
+        .post('/api/v1/cart/items')
+        .send({ productId: YUGIOH_BOX_ID, quantity: 3 })
+        .expect(201);
+      const cartCookie = extractCartCookie(addRes);
+
+      await request(app.getHttpServer())
+        .patch(`/api/v1/cart/items/${YUGIOH_BOX_ID}`)
+        .set('Cookie', cartCookie)
+        .send({ quantity: availableStock + 1000 })
+        .expect(409)
+        .expect((res) => {
+          const body = res.body as {
+            errorCode: string;
+            details: { availableStock: number };
+          };
+          if (body.errorCode !== 'INSUFFICIENT_STOCK') {
+            throw new Error(
+              `Expected errorCode INSUFFICIENT_STOCK, got: ${JSON.stringify(body)}`,
+            );
+          }
+          if (body.details.availableStock !== availableStock) {
+            throw new Error(
+              `Expected details.availableStock ${availableStock}, got: ${JSON.stringify(body)}`,
+            );
+          }
+        });
+
+      // The cart must be left exactly as it was before the rejected PATCH —
+      // still quantity 3, not the rejected value and not removed.
+      const getRes = await request(app.getHttpServer())
+        .get('/api/v1/cart')
+        .set('Cookie', cartCookie)
+        .expect(200);
+      const getBody = getRes.body as CartResponse;
+      const item = getBody.items.find((i) => i.productId === YUGIOH_BOX_ID);
+      if (!item || item.quantity !== 3) {
+        throw new Error(
+          `Expected the cart to be unmodified (quantity still 3), got: ${JSON.stringify(getBody)}`,
+        );
+      }
+    });
+
+    it('returns 404 when there is no cart cookie at all', () => {
+      return request(app.getHttpServer())
+        .patch(`/api/v1/cart/items/${PIKACHU_PROMO_ID}`)
+        .send({ quantity: 2 })
+        .expect(404);
+    });
+
+    it('returns 404 when the cart cookie is valid but the given productId is not a line in that cart', async () => {
+      const addRes = await request(app.getHttpServer())
+        .post('/api/v1/cart/items')
+        .send({ productId: PIKACHU_PROMO_ID, quantity: 1 })
+        .expect(201);
+      const cartCookie = extractCartCookie(addRes);
+
+      return request(app.getHttpServer())
+        .patch(`/api/v1/cart/items/${BLUE_EYES_ID}`) // never added to this cart
+        .set('Cookie', cartCookie)
+        .send({ quantity: 2 })
+        .expect(404);
+    });
+
+    it('returns a stable 400 (never a 500) for a syntactically invalid productId', () => {
+      return request(app.getHttpServer())
+        .patch('/api/v1/cart/items/not-a-valid-uuid')
+        .send({ quantity: 2 })
+        .expect(400);
+    });
   });
 
   afterEach(async () => {

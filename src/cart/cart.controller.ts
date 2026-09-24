@@ -4,16 +4,20 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Param,
+  ParseUUIDPipe,
+  Patch,
   Post,
   Req,
   Res,
 } from '@nestjs/common';
-import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { CartCookieService } from './cart-cookie.service.js';
 import { CartService } from './cart.service.js';
 import { AddCartItemDto } from './dto/add-cart-item.dto.js';
 import { CartResponseDto } from './dto/cart-response.dto.js';
+import { UpdateCartItemDto } from './dto/update-cart-item.dto.js';
 
 @ApiTags('cart')
 @Controller('cart')
@@ -87,6 +91,52 @@ export class CartController {
   })
   getCart(@Req() req: Request): Promise<CartResponseDto> {
     const cartId = this.cartCookie.readCartId(req);
+    return this.cartService.getCart(cartId);
+  }
+
+  /**
+   * Story 3.2 (FR-9, AD-5): updates the quantity of a Product already in
+   * the caller's cart. A quantity of 0 removes the line entirely (same
+   * effect Story 3.3's dedicated DELETE endpoint will have — not built
+   * here, see CartService.updateItemQuantity for the full reasoning).
+   * 404s when there's no valid cart cookie, or the productId isn't a line
+   * in that cart — see CartService for why. Rejects with
+   * `409 INSUFFICIENT_STOCK` (current available stock in
+   * `details.availableStock`) when the new quantity exceeds live available
+   * stock; the cart is left untouched on that rejection. Returns the full
+   * updated cart (same shape as `GET /cart`), same pattern as `POST
+   * /cart/items`.
+   */
+  @Patch('items/:productId')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Update a cart item quantity',
+    description:
+      "Sets a new quantity for a Product already in the caller's cart (identified by the signed cartId cookie). quantity=0 removes the line entirely. Rejects with 409 INSUFFICIENT_STOCK when the new quantity exceeds current available stock (stock - heldQty) — the cart is left unmodified. 404s when there's no valid cart cookie or the product isn't a line in that cart. Returns the full updated cart.",
+  })
+  @ApiParam({ name: 'productId', format: 'uuid', description: 'Product id.' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'The updated cart, with server-computed line/total prices.',
+    type: CartResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description:
+      'No valid cart cookie, or the given productId is not a line in that cart.',
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description:
+      'errorCode INSUFFICIENT_STOCK — the requested quantity exceeds current available stock. details.availableStock carries the real current value. The cart is left unmodified.',
+  })
+  async updateItem(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Body() dto: UpdateCartItemDto,
+    @Req() req: Request,
+  ): Promise<CartResponseDto> {
+    const cartId = this.cartCookie.readCartId(req);
+    await this.cartService.updateItemQuantity(cartId, productId, dto.quantity);
     return this.cartService.getCart(cartId);
   }
 }

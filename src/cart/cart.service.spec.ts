@@ -8,7 +8,10 @@ import type { AddCartItemDto } from './dto/add-cart-item.dto.js';
 describe('CartService', () => {
   let service: CartService;
   let tx: {
-    product: { findUnique: ReturnType<typeof vi.fn> };
+    product: {
+      findUnique: ReturnType<typeof vi.fn>;
+      findUniqueOrThrow: ReturnType<typeof vi.fn>;
+    };
     cart: {
       findFirst: ReturnType<typeof vi.fn>;
       create: ReturnType<typeof vi.fn>;
@@ -18,7 +21,9 @@ describe('CartService', () => {
       findUnique: ReturnType<typeof vi.fn>;
       create: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
+      deleteMany: ReturnType<typeof vi.fn>;
     };
+    $executeRaw: ReturnType<typeof vi.fn>;
   };
   let prisma: {
     $transaction: ReturnType<typeof vi.fn>;
@@ -35,7 +40,7 @@ describe('CartService', () => {
 
   beforeEach(async () => {
     tx = {
-      product: { findUnique: vi.fn() },
+      product: { findUnique: vi.fn(), findUniqueOrThrow: vi.fn() },
       cart: {
         findFirst: vi.fn(),
         create: vi.fn(),
@@ -45,7 +50,9 @@ describe('CartService', () => {
         findUnique: vi.fn(),
         create: vi.fn(),
         update: vi.fn(),
+        deleteMany: vi.fn(),
       },
+      $executeRaw: vi.fn(),
     };
     prisma = {
       $transaction: vi.fn((cb: (tx: unknown) => unknown) => cb(tx)),
@@ -206,6 +213,117 @@ describe('CartService', () => {
         NotFoundException,
       );
       expect(tx.cart.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('updateItemQuantity', () => {
+    const cartId = 'existing-cart-id';
+    const productId = 'f65915f5-2931-4e50-af95-630b1fd7b950';
+
+    it('throws NotFoundException without touching the DB when there is no cartId', async () => {
+      await expect(
+        service.updateItemQuantity(null, productId, 3),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the cartId matches no live Cart', async () => {
+      tx.cart.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.updateItemQuantity(cartId, productId, 3),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(tx.cartItem.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the Product is not a line in that Cart', async () => {
+      tx.cart.findFirst.mockResolvedValue({
+        id: cartId,
+        expiresAt: new Date(Date.now() + 1000),
+      });
+      tx.cartItem.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.updateItemQuantity(cartId, productId, 3),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(tx.$executeRaw).not.toHaveBeenCalled();
+    });
+
+    it('removes the CartItem entirely (deleteMany, not a guarded update) when quantity is 0', async () => {
+      tx.cart.findFirst.mockResolvedValue({
+        id: cartId,
+        expiresAt: new Date(Date.now() + 1000),
+      });
+      tx.cartItem.findUnique.mockResolvedValue({
+        id: 'existing-item-id',
+        quantity: 4,
+      });
+
+      await service.updateItemQuantity(cartId, productId, 0);
+
+      expect(tx.cartItem.deleteMany).toHaveBeenCalledWith({
+        where: { id: 'existing-item-id' },
+      });
+      expect(tx.$executeRaw).not.toHaveBeenCalled();
+    });
+
+    it('applies the guarded UPDATE when quantity > 0 and the stock guard passes (affected row = 1)', async () => {
+      tx.cart.findFirst.mockResolvedValue({
+        id: cartId,
+        expiresAt: new Date(Date.now() + 1000),
+      });
+      tx.cartItem.findUnique.mockResolvedValue({
+        id: 'existing-item-id',
+        quantity: 4,
+      });
+      tx.$executeRaw.mockResolvedValue(1);
+
+      await service.updateItemQuantity(cartId, productId, 6);
+
+      expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+      expect(tx.cartItem.deleteMany).not.toHaveBeenCalled();
+      expect(tx.product.findUniqueOrThrow).not.toHaveBeenCalled();
+    });
+
+    it('rejects with ApiException(409, INSUFFICIENT_STOCK) and the real available stock when the guarded UPDATE affects 0 rows because the line still exists but stock does not cover it', async () => {
+      tx.cart.findFirst.mockResolvedValue({
+        id: cartId,
+        expiresAt: new Date(Date.now() + 1000),
+      });
+      tx.cartItem.findUnique
+        .mockResolvedValueOnce({ id: 'existing-item-id', quantity: 4 }) // initial lookup
+        .mockResolvedValueOnce({ id: 'existing-item-id' }); // still-exists re-check
+      tx.$executeRaw.mockResolvedValue(0);
+      tx.product.findUniqueOrThrow.mockResolvedValue({
+        stock: 10,
+        heldQty: 3,
+      });
+
+      await expect(
+        service.updateItemQuantity(cartId, productId, 50),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: {
+          errorCode: 'INSUFFICIENT_STOCK',
+          details: { availableStock: 7 },
+        },
+      });
+    });
+
+    it('throws NotFoundException (not 409) when the guarded UPDATE affects 0 rows because the line was concurrently removed', async () => {
+      tx.cart.findFirst.mockResolvedValue({
+        id: cartId,
+        expiresAt: new Date(Date.now() + 1000),
+      });
+      tx.cartItem.findUnique
+        .mockResolvedValueOnce({ id: 'existing-item-id', quantity: 4 }) // initial lookup
+        .mockResolvedValueOnce(null); // still-exists re-check: raced away
+      tx.$executeRaw.mockResolvedValue(0);
+
+      await expect(
+        service.updateItemQuantity(cartId, productId, 6),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(tx.product.findUniqueOrThrow).not.toHaveBeenCalled();
     });
   });
 
