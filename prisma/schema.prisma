@@ -92,6 +92,10 @@ model Product {
   /// guest Cart. Read-only back-reference — CartService never traverses it,
   /// but Prisma requires the relation declared on both sides.
   cartItems CartItem[]
+  /// Story 6.1: every ContactInquiry that optionally referenced this
+  /// Product. Read-only back-reference, same reasoning as `cartItems`
+  /// above.
+  contactInquiries ContactInquiry[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -144,6 +148,47 @@ model CartItem {
 
   @@unique([cartId, productId])
   @@map("Cart_Items")
+}
+
+/// A submitted Contact Inquiry (Story 6.1, FR-18/FR-19). `productId` is
+/// optional (SetNull on Product delete, not Cascade — the inquiry itself is
+/// never lost just because the Product it referenced was later removed from
+/// the catalog; AD-2 already treats "referenced elsewhere" as a reason not
+/// to hard-delete, and this mirrors that same caution here). `emailStatus`
+/// records whether the best-effort admin-notification email succeeded, per
+/// the Contact correctness rule (ARCHITECTURE-SPINE.md "Consistency
+/// Conventions" + architecture.md FR-18 note): the row is written first,
+/// unconditionally once validation passes, and this field is only updated
+/// *after* that write attempts to reflect what happened to the email —
+/// never the other way around, and a failure here never rolls back or
+/// deletes the row above it.
+enum ContactInquiryEmailStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+model ContactInquiry {
+  id      String @id @default(uuid()) @db.Uuid
+  name    String
+  email   String
+  message String
+
+  productId String?  @db.Uuid
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  /// Best-effort outcome of the admin-notification email attempted after
+  /// this row was persisted. Starts PENDING at creation (before the send is
+  /// even attempted), never blocks or gates the row's own persistence.
+  emailStatus       ContactInquiryEmailStatus @default(PENDING)
+  /// Set only when emailStatus ends up FAILED — the caught error's message,
+  /// for operator triage, never re-thrown to the caller.
+  emailErrorMessage String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("Contact_Inquiries")
 }
 
 /// One or more images associated with a Product (PRD §3 Glossary), one-to-
