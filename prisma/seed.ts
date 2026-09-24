@@ -25,8 +25,10 @@ import {
 import { SINGLETON_FX_RATE_ID } from '../src/checkout/fx-rate.constants.js';
 import {
   LANDING_SECTION_BANNERS,
+  LANDING_SECTION_DROP212,
   LANDING_SECTION_TEXTS,
   type LandingBannerKey,
+  type LandingDrop212Key,
   type LandingTextKey,
 } from '../src/admin-landing/landing-content.constants.js';
 
@@ -443,7 +445,9 @@ async function seedAdminUser(): Promise<void> {
  * never silently revert that edit back to the placeholder.
  */
 async function seedLandingContent(): Promise<void> {
-  console.log('Seeding landing content placeholders (texts + banners)...');
+  console.log(
+    'Seeding landing content placeholders (texts + banners + drop212)...',
+  );
 
   const textDefaults: Record<LandingTextKey, string> = {
     heroTitle: '212 Collectors Club',
@@ -494,6 +498,31 @@ async function seedLandingContent(): Promise<void> {
         section: LANDING_SECTION_BANNERS,
         key,
         valueType: 'json',
+        value,
+      },
+      update: {},
+    });
+  }
+
+  // Story 10.2: same idempotent placeholder pattern as texts/banners above
+  // — `update: {}` so re-running this seed never clobbers a real admin
+  // edit made through `PUT /api/v1/admin/landing-content/drop212/{key}`.
+  // `targetDate`'s placeholder is itself a real, valid ISO-8601 date/time
+  // (this seed goes through the same Prisma `upsert` the service uses, not
+  // the validated HTTP endpoint, but keeping it valid avoids shipping a
+  // countdown the storefront can't render before an admin sets a real
+  // date).
+  const drop212Defaults: Record<LandingDrop212Key, string> = {
+    targetDate: '2026-12-31T23:59:59.000Z',
+    displayText: '¡El próximo Drop 212 está por llegar!',
+  };
+  for (const [key, value] of Object.entries(drop212Defaults)) {
+    await prisma.landingConfigEntry.upsert({
+      where: { section_key: { section: LANDING_SECTION_DROP212, key } },
+      create: {
+        section: LANDING_SECTION_DROP212,
+        key,
+        valueType: key === 'targetDate' ? 'date' : 'text',
         value,
       },
       update: {},

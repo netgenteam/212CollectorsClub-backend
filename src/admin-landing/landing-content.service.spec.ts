@@ -150,6 +150,99 @@ describe('LandingContentService', () => {
     });
   });
 
+  describe('upsertDrop212', () => {
+    it('upserts a "date"-typed row for "targetDate" when the value is a real ISO-8601 date/time', async () => {
+      prisma.landingConfigEntry.upsert.mockResolvedValue({
+        section: 'drop212',
+        key: 'targetDate',
+        valueType: 'date',
+        value: '2026-12-25T00:00:00.000Z',
+        updatedAt: new Date('2026-01-01'),
+        updatedById: ADMIN_ID,
+      });
+
+      await service.upsertDrop212(
+        'targetDate',
+        { value: '2026-12-25T00:00:00.000Z' },
+        ADMIN_ID,
+      );
+
+      expect(prisma.landingConfigEntry.upsert).toHaveBeenCalledWith({
+        where: { section_key: { section: 'drop212', key: 'targetDate' } },
+        create: {
+          section: 'drop212',
+          key: 'targetDate',
+          valueType: 'date',
+          value: '2026-12-25T00:00:00.000Z',
+          updatedById: ADMIN_ID,
+        },
+        update: {
+          valueType: 'date',
+          value: '2026-12-25T00:00:00.000Z',
+          updatedById: ADMIN_ID,
+        },
+        select: expect.any(Object) as unknown,
+      });
+    });
+
+    it('upserts a "text"-typed row for "displayText", no ISO-8601 check applied (free text, empty string legal)', async () => {
+      prisma.landingConfigEntry.upsert.mockResolvedValue({
+        section: 'drop212',
+        key: 'displayText',
+        valueType: 'text',
+        value: '',
+        updatedAt: new Date('2026-01-01'),
+        updatedById: ADMIN_ID,
+      });
+
+      await service.upsertDrop212('displayText', { value: '' }, ADMIN_ID);
+
+      expect(prisma.landingConfigEntry.upsert).toHaveBeenCalledWith({
+        where: { section_key: { section: 'drop212', key: 'displayText' } },
+        create: {
+          section: 'drop212',
+          key: 'displayText',
+          valueType: 'text',
+          value: '',
+          updatedById: ADMIN_ID,
+        },
+        update: {
+          valueType: 'text',
+          value: '',
+          updatedById: ADMIN_ID,
+        },
+        select: expect.any(Object) as unknown,
+      });
+    });
+
+    it('rejects a key outside the fixed "drop212" set with 400 LANDING_KEY_NOT_EDITABLE, and never calls Prisma', async () => {
+      const thrown: unknown = await service
+        .upsertDrop212('someArbitraryField', { value: 'x' }, ADMIN_ID)
+        .catch((err: unknown) => err);
+
+      expect(thrown).toMatchObject({
+        status: 400,
+        response: { errorCode: 'LANDING_KEY_NOT_EDITABLE' },
+      });
+      expect(prisma.landingConfigEntry.upsert).not.toHaveBeenCalled();
+    });
+
+    it.each(['mañana', '2026-13-45', '2026-02-30', 'not-a-date', ''])(
+      'rejects "targetDate" = %j with 400 LANDING_INVALID_ISO8601_DATE, and never calls Prisma',
+      async (badValue) => {
+        const thrown: unknown = await service
+          .upsertDrop212('targetDate', { value: badValue }, ADMIN_ID)
+          .catch((err: unknown) => err);
+
+        expect(thrown).toMatchObject({
+          status: 400,
+          response: { errorCode: 'LANDING_INVALID_ISO8601_DATE' },
+        });
+        expect(prisma.landingConfigEntry.upsert).not.toHaveBeenCalled();
+      },
+    );
+  });
+
   describe('getPublicContent', () => {
     it('groups rows by section into { [section]: { [key]: { valueType, value, updatedAt } } }', async () => {
       const updatedAt = new Date('2026-01-01');

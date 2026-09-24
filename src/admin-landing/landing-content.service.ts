@@ -1,14 +1,19 @@
 import { HttpStatus, Injectable } from '@nestjs/common';
+import { isISO8601 } from 'class-validator';
 import { ApiException } from '../common/api-exception.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { LandingConfigEntryResponseDto } from './dto/landing-config-entry-response.dto.js';
 import { UpdateLandingBannerDto } from './dto/update-landing-banner.dto.js';
+import { UpdateLandingDrop212Dto } from './dto/update-landing-drop212.dto.js';
 import { UpdateLandingTextDto } from './dto/update-landing-text.dto.js';
 import {
+  LANDING_DROP212_TARGET_DATE_KEY,
   LANDING_SECTION_BANNERS,
+  LANDING_SECTION_DROP212,
   LANDING_SECTION_TEXTS,
   isLandingBannerKey,
+  isLandingDrop212Key,
   isLandingTextKey,
 } from './landing-content.constants.js';
 
@@ -108,6 +113,73 @@ export class LandingContentService {
       update: {
         valueType: 'json',
         value,
+        updatedById: adminUserId,
+      },
+      select: ENTRY_SELECT,
+    });
+  }
+
+  /**
+   * Story 10.2 (FR-30, NFR-2; AD-9, AD-10). Same fixed-key-enforcement
+   * pattern as `upsertText`/`upsertBanner` above — reuses the SAME
+   * `notEditableException()` helper (no duplicated "key not allowed"
+   * logic, just a new key set: `LANDING_DROP212_KEYS`).
+   *
+   * The one thing genuinely new here: `targetDate` gets a REAL,
+   * section-specific ISO-8601 validation beyond Story 10.1's generic
+   * `@IsString()` — checked with class-validator's own `isISO8601()`
+   * validator function (`{ strict: true, strictSeparator: true }`: rejects
+   * both non-date-shaped strings like "mañana" AND malformed/impossible
+   * calendar dates like "2026-02-30", and requires the literal "T"
+   * date/time separator). This can't be a static `@IsISO8601()` DTO
+   * decorator because it must apply ONLY when `key === "targetDate"` —
+   * `displayText` shares the exact same `UpdateLandingDrop212Dto`/route but
+   * must stay a free string (same criterion as "texts" from Story 10.1) —
+   * so the check runs imperatively here, after the fixed-key check, before
+   * ever touching Prisma (same "invalid input -> zero DB writes"
+   * guarantee `notEditableException` already gives the key check).
+   *
+   * `valueType`: "date" for `targetDate` (a more precise Admin-UI
+   * rendering hint than "text", now that this value is guaranteed
+   * ISO-8601), "text" for `displayText` — purely a rendering hint, per the
+   * schema's own doc comment, never branched on by backend logic.
+   */
+  async upsertDrop212(
+    key: string,
+    dto: UpdateLandingDrop212Dto,
+    adminUserId: string,
+  ): Promise<LandingConfigEntryResponseDto> {
+    if (!isLandingDrop212Key(key)) {
+      throw notEditableException(LANDING_SECTION_DROP212, key);
+    }
+
+    if (
+      key === LANDING_DROP212_TARGET_DATE_KEY &&
+      !isISO8601(dto.value, { strict: true, strictSeparator: true })
+    ) {
+      throw new ApiException(
+        HttpStatus.BAD_REQUEST,
+        'LANDING_INVALID_ISO8601_DATE',
+        `"${dto.value}" is not a valid ISO-8601 date/time. "targetDate" must be a real calendar date/time, e.g. "2026-12-25T00:00:00.000Z".`,
+      );
+    }
+
+    const valueType = key === LANDING_DROP212_TARGET_DATE_KEY ? 'date' : 'text';
+
+    return this.prisma.landingConfigEntry.upsert({
+      where: {
+        section_key: { section: LANDING_SECTION_DROP212, key },
+      },
+      create: {
+        section: LANDING_SECTION_DROP212,
+        key,
+        valueType,
+        value: dto.value,
+        updatedById: adminUserId,
+      },
+      update: {
+        valueType,
+        value: dto.value,
         updatedById: adminUserId,
       },
       select: ENTRY_SELECT,

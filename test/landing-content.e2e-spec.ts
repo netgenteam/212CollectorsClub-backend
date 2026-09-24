@@ -119,6 +119,14 @@ describe('LandingContent (e2e)', () => {
         .expect(401);
       expect((res.body as ApiErrorBody).errorCode).toBe('INVALID_ADMIN_TOKEN');
     });
+
+    it('PUT /api/v1/admin/landing-content/drop212/targetDate: 401 INVALID_ADMIN_TOKEN', async () => {
+      const res = await request(app.getHttpServer())
+        .put('/api/v1/admin/landing-content/drop212/targetDate')
+        .send({ value: '2026-12-25T00:00:00.000Z' })
+        .expect(401);
+      expect((res.body as ApiErrorBody).errorCode).toBe('INVALID_ADMIN_TOKEN');
+    });
   });
 
   describe('GET /api/v1/landing-content — public, never requires a token', () => {
@@ -235,6 +243,107 @@ describe('LandingContent (e2e)', () => {
       await authed('put', '/api/v1/admin/landing-content/banners/banner3')
         .send({ imageUrl: 'x', title: 'x' })
         .expect(400);
+    });
+  });
+
+  describe('PUT .../drop212/{key} -> immediately visible on the public GET (Story 10.2)', () => {
+    it('targetDate with a real, valid ISO-8601 date/time: 200, valueType "date", reflected immediately on the public GET', async () => {
+      const isoValue = '2026-12-25T18:30:00.000Z';
+
+      const putRes = await authed(
+        'put',
+        '/api/v1/admin/landing-content/drop212/targetDate',
+      )
+        .send({ value: isoValue })
+        .expect(200);
+      const updated = putRes.body as EntryResponse;
+      expect(updated.section).toBe('drop212');
+      expect(updated.key).toBe('targetDate');
+      expect(updated.valueType).toBe('date');
+      expect(updated.value).toBe(isoValue);
+      expect(updated.updatedById).toBe(adminId);
+
+      const publicRes = await request(app.getHttpServer())
+        .get('/api/v1/landing-content')
+        .expect(200);
+      const body = publicRes.body as PublicLandingContent;
+      expect(body.drop212.targetDate.value).toBe(isoValue);
+      expect(body.drop212.targetDate.valueType).toBe('date');
+    });
+
+    it('displayText with free text (including an empty string): 200, valueType "text", reflected immediately on the public GET', async () => {
+      const uniqueValue = `E2E countdown caption ${randomUUID()}`;
+
+      const putRes = await authed(
+        'put',
+        '/api/v1/admin/landing-content/drop212/displayText',
+      )
+        .send({ value: uniqueValue })
+        .expect(200);
+      const updated = putRes.body as EntryResponse;
+      expect(updated.section).toBe('drop212');
+      expect(updated.key).toBe('displayText');
+      expect(updated.valueType).toBe('text');
+      expect(updated.value).toBe(uniqueValue);
+
+      const publicRes = await request(app.getHttpServer())
+        .get('/api/v1/landing-content')
+        .expect(200);
+      const body = publicRes.body as PublicLandingContent;
+      expect(body.drop212.displayText.value).toBe(uniqueValue);
+    });
+
+    it.each([
+      ['a non-date word', 'mañana'],
+      ['an impossible calendar date', '2026-02-30T00:00:00.000Z'],
+      ['a malformed month', '2026-13-01T00:00:00.000Z'],
+      ['a plain non-ISO string', 'next tuesday at noon'],
+    ])(
+      'targetDate rejects %s (%j) with 400 LANDING_INVALID_ISO8601_DATE, and it is never persisted (verified directly against Postgres)',
+      async (_label, badValue) => {
+        const res = await authed(
+          'put',
+          '/api/v1/admin/landing-content/drop212/targetDate',
+        )
+          .send({ value: badValue })
+          .expect(400);
+        expect((res.body as ApiErrorBody).errorCode).toBe(
+          'LANDING_INVALID_ISO8601_DATE',
+        );
+
+        const row = await prisma.landingConfigEntry.findUnique({
+          where: { section_key: { section: 'drop212', key: 'targetDate' } },
+        });
+        // Never equal to the rejected value — either no row exists yet, or
+        // (once another test/seed has set a real value) it still holds
+        // that unrelated, previously-valid value, never the bad one.
+        expect(row?.value).not.toBe(badValue);
+      },
+    );
+
+    it('a key outside the fixed drop212 set: rejected with 400 LANDING_KEY_NOT_EDITABLE, and no row is ever created for it', async () => {
+      const bogusKey = `drop212_bogus_${randomUUID()}`;
+
+      const res = await authed(
+        'put',
+        `/api/v1/admin/landing-content/drop212/${bogusKey}`,
+      )
+        .send({ value: 'should never be persisted' })
+        .expect(400);
+      expect((res.body as ApiErrorBody).errorCode).toBe(
+        'LANDING_KEY_NOT_EDITABLE',
+      );
+
+      const row = await prisma.landingConfigEntry.findUnique({
+        where: { section_key: { section: 'drop212', key: bogusKey } },
+      });
+      expect(row).toBeNull();
+
+      const publicRes = await request(app.getHttpServer())
+        .get('/api/v1/landing-content')
+        .expect(200);
+      const body = publicRes.body as PublicLandingContent;
+      expect(body.drop212?.[bogusKey]).toBeUndefined();
     });
   });
 });

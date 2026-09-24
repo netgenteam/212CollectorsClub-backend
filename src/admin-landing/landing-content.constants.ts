@@ -18,10 +18,12 @@
  * for a key outside these two lists, by construction (the service never
  * calls `upsert` unless the key passed this check first).
  *
- * Stories 10.2 (`section` = "drop212") and 10.3 (`section` =
- * "pack_simulator") are expected to add their OWN sibling constant lists in
- * this same file (or a story-specific one) and their OWN admin
- * controllers/routes — this file only ever governs "texts"/"banners".
+ * Story 10.2 (`section` = "drop212") added its own sibling constant list
+ * (`LANDING_DROP212_KEYS`, below) in this same file, reusing the same
+ * `notEditableException()` rejection mechanism and adding its OWN route on
+ * the existing `AdminLandingContentController` (no new controller class
+ * needed). Story 10.3 (`section` = "pack_simulator") is expected to follow
+ * the same shape.
  */
 
 export const LANDING_SECTION_TEXTS = 'texts';
@@ -69,4 +71,38 @@ export function isLandingTextKey(key: string): key is LandingTextKey {
 
 export function isLandingBannerKey(key: string): key is LandingBannerKey {
   return (LANDING_BANNER_KEYS as readonly string[]).includes(key);
+}
+
+/**
+ * Story 10.2 (FR-30, AD-9, AD-10): the "drop212" section — exactly the
+ * sibling constant list `landing-content.constants.ts`'s own doc comment
+ * (above) anticipated 10.1 would need. Same fixed-key enforcement pattern
+ * as `LANDING_TEXT_KEYS`/`LANDING_BANNER_KEYS`, reusing the SAME
+ * `notEditableException()` rejection helper in `LandingContentService`
+ * (never duplicated) — only the key SET is new here, not the rejection
+ * mechanism.
+ *
+ * - `targetDate`: the Drop 212 countdown's target date/time. Unlike every
+ *   other `LandingConfigEntry` value so far (free-form text/JSON, only
+ *   `@IsString()`-checked), this one gets a REAL, section-specific
+ *   ISO-8601 validation (format AND real-calendar-date, e.g. rejects
+ *   "2026-02-30") — see `LandingContentService.upsertDrop212` for why that
+ *   check lives there (imperative, class-validator's `isISO8601()`
+ *   function) rather than as a static DTO decorator: it only applies to
+ *   THIS key, not to `displayText`, and both share one route/DTO.
+ * - `displayText`: free-text countdown caption (e.g. "¡El próximo Drop 212
+ *   está por llegar!") — same validation criterion as Story 10.1's
+ *   "texts" section (`@IsString()` + length bound only, empty string
+ *   legal).
+ */
+export const LANDING_SECTION_DROP212 = 'drop212';
+
+export const LANDING_DROP212_KEYS = ['targetDate', 'displayText'] as const;
+export type LandingDrop212Key = (typeof LANDING_DROP212_KEYS)[number];
+
+/** The one `drop212` key that gets the extra ISO-8601 validation. */
+export const LANDING_DROP212_TARGET_DATE_KEY: LandingDrop212Key = 'targetDate';
+
+export function isLandingDrop212Key(key: string): key is LandingDrop212Key {
+  return (LANDING_DROP212_KEYS as readonly string[]).includes(key);
 }

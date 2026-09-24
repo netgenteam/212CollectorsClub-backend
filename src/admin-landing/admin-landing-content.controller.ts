@@ -19,6 +19,7 @@ import { AdminAuthGuard } from '../common/admin-auth.guard.js';
 import type { RequestWithAdminUser } from '../common/admin-auth.guard.js';
 import { LandingConfigEntryResponseDto } from './dto/landing-config-entry-response.dto.js';
 import { UpdateLandingBannerDto } from './dto/update-landing-banner.dto.js';
+import { UpdateLandingDrop212Dto } from './dto/update-landing-drop212.dto.js';
 import { UpdateLandingTextDto } from './dto/update-landing-text.dto.js';
 import { LandingContentService } from './landing-content.service.js';
 
@@ -99,5 +100,35 @@ export class AdminLandingContentController {
     @Req() req: RequestWithAdminUser,
   ): Promise<LandingConfigEntryResponseDto> {
     return this.landingContentService.upsertBanner(key, dto, req.user.id);
+  }
+
+  @Put('drop212/:key')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Edit one "drop212" countdown field',
+    description:
+      'Upserts LandingConfigEntry(section="drop212", key). Restricted to the fixed key set in landing-content.constants.ts (targetDate, displayText) — a key outside that set is rejected with 400 LANDING_KEY_NOT_EDITABLE, and no row is ever created for it. "targetDate" is additionally validated as a real ISO-8601 date/time (400 LANDING_INVALID_ISO8601_DATE otherwise, e.g. "mañana" or a malformed/impossible calendar date) — section-specific validation beyond Story 10.1\'s generic mechanism. Immediately visible via the public GET /api/v1/landing-content (AD-10, no cache).',
+  })
+  @ApiParam({
+    name: 'key',
+    description: 'targetDate or displayText.',
+  })
+  @ApiResponse({ status: HttpStatus.OK, type: LandingConfigEntryResponseDto })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      'errorCode LANDING_KEY_NOT_EDITABLE (key outside the fixed "drop212" key set) or LANDING_INVALID_ISO8601_DATE ("targetDate" not a valid, real ISO-8601 date/time).',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description:
+      'errorCode INVALID_ADMIN_TOKEN — missing/invalid/expired Admin JWT.',
+  })
+  updateDrop212(
+    @Param('key') key: string,
+    @Body() dto: UpdateLandingDrop212Dto,
+    @Req() req: RequestWithAdminUser,
+  ): Promise<LandingConfigEntryResponseDto> {
+    return this.landingContentService.upsertDrop212(key, dto, req.user.id);
   }
 }

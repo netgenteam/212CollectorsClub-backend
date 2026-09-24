@@ -22,13 +22,16 @@ import { LandingContentService } from './landing-content.service.js';
 @Module({
   imports: [PassportModule.register({ defaultStrategy: 'admin-jwt' })],
   // Story 10.1: the public GET (LandingContentController, no guard) and the
-  // two guarded admin PUTs (AdminLandingContentController) both live in
-  // this one module — mirrors AdminCatalogModule's "public + admin
-  // controllers, one module" shape rather than splitting into two modules
-  // for a single small feature area. Stories 10.2/10.3 are expected to add
-  // their own admin controllers to this same module (their own fixed key
-  // sets, same shared LandingContentService/LandingConfigEntry table) —
-  // see landing-content.constants.ts's doc comment.
+  // guarded admin PUTs (AdminLandingContentController) both live in this
+  // one module — mirrors AdminCatalogModule's "public + admin controllers,
+  // one module" shape rather than splitting into two modules for a single
+  // small feature area. Story 10.2 added its "drop212" PUT as a 3rd route
+  // on this SAME AdminLandingContentController (own fixed key set, own
+  // section-specific ISO-8601 validation for "targetDate", same shared
+  // LandingContentService/LandingConfigEntry table) rather than a new
+  // controller class — no new module wiring needed. Story 10.3 is expected
+  // to follow the same shape for "pack_simulator" — see
+  // landing-content.constants.ts's doc comment.
   controllers: [AdminLandingContentController, LandingContentController],
   providers: [LandingContentService],
 })
