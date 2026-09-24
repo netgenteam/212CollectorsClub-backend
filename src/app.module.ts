@@ -7,6 +7,7 @@ import { CatalogModule } from './catalog/catalog.module.js';
 import { CartModule } from './cart/cart.module.js';
 import { ContactModule } from './contact/contact.module.js';
 import { CheckoutModule } from './checkout/checkout.module.js';
+import { OrdersModule } from './orders/orders.module.js';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { CheckoutModule } from './checkout/checkout.module.js';
     CartModule,
     ContactModule,
     CheckoutModule,
+    OrdersModule,
   ],
   controllers: [AppController],
   providers: [AppService],

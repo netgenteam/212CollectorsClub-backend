@@ -53,6 +53,19 @@ async function bootstrap() {
       'Versioned REST API for the 212CollectorsClub backend (e-commerce TCG platform).',
     )
     .setVersion('1.0')
+    // Story 4.2 (AD-17): documents the "Authorization: Bearer <token>"
+    // scheme every orders/:orderId/... route (Proof-of-Payment upload,
+    // and later Story 5.1's order lookup) expects the one-time
+    // orderAccessToken in — referenced by @ApiBearerAuth() on those routes.
+    // Not actually a JWT (it's a raw SHA-256-backed opaque token — see
+    // CheckoutService), so `bearerFormat` is left generic rather than
+    // claiming a JWT shape the token doesn't have.
+    .addBearerAuth({
+      type: 'http',
+      scheme: 'bearer',
+      description:
+        'The one-time orderAccessToken from the checkout response (Story 4.1) — an opaque token, not a JWT.',
+    })
     .build();
   const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('api/docs', app, swaggerDocument);

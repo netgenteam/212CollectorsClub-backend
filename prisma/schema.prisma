@@ -344,9 +344,17 @@ model Order {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  lines         OrderLine[]
-  statusHistory OrderStatusHistory[]
-  stockHolds    StockHold[]
+  lines           OrderLine[]
+  statusHistory   OrderStatusHistory[]
+  stockHolds      StockHold[]
+  /// Story 4.2: every ProofOfPayment file the buyer has uploaded against
+  /// this Order. A one-to-many relation (not a single nullable column) per
+  /// AD-12 — modeled as its own entity so a re-upload (e.g. the buyer's
+  /// first screenshot was illegible) never has to overwrite/destroy the
+  /// previous row, and Story 9.2's admin review can see the full history.
+  /// "Does this Order have proof attached yet" (AC3) is simply "is this
+  /// list non-empty" — see ProofOfPaymentService.
+  proofOfPayments ProofOfPayment[]
 
   @@map("Orders")
 }
@@ -429,4 +437,36 @@ model StockHold {
   createdAt DateTime @default(now())
 
   @@map("Stock_Holds")
+}
+
+// ---------------------------------------------------------------------------
+// Story 4.2 — Pago Móvil Proof-of-Payment Upload.
+// ---------------------------------------------------------------------------
+
+/// AD-12: Proof of Payment is modeled as its **own** entity (one-to-many
+/// from Order), never a column on `Order` — a later re-upload, or Story
+/// 9.2's admin review needing to see every attempt, would otherwise have
+/// nowhere to go. `filePath` is a path **relative to `uploads/private/`**
+/// on local disk (never a public URL — there isn't one; AD-12 forbids this
+/// directory from ever being static-mounted) and is always a server-
+/// generated name (a UUID plus an extension derived from the validated
+/// MIME type), never the client's original filename — see
+/// `ProofOfPaymentService` for why (path-traversal safety: the client's
+/// filename never participates in constructing a disk path at all, so
+/// there is nothing to sanitize).
+model ProofOfPayment {
+  id      String @id @default(uuid()) @db.Uuid
+  orderId String @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// Relative to `uploads/private/` (e.g.
+  /// "proof-of-payment/3f9e...-c1a2.png") — join with the configured
+  /// uploads root to get an absolute path. Never a client-supplied value.
+  filePath  String
+  mimeType  String
+  sizeBytes Int
+
+  createdAt DateTime @default(now())
+
+  @@map("Proof_Of_Payments")
 }

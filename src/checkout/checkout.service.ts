@@ -1,6 +1,7 @@
 import { HttpStatus, Injectable } from '@nestjs/common';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { hashOrderAccessToken } from '../common/order-access-token.js';
 import { Prisma } from '../generated/prisma/client.js';
 import {
   FulfillmentType,
@@ -56,13 +57,20 @@ function insufficientStockException(items: StockLineIssue[]): ApiException {
  * as a valid token) — a single cryptographic hash already provides that,
  * and is the same class of primitive this codebase already trusts
  * elsewhere (HMAC-SHA256 signs the AD-5 cart cookie).
+ *
+ * The hashing step itself lives in `common/order-access-token.ts`
+ * (`hashOrderAccessToken`) as of Story 4.2, so every later buyer-facing
+ * Order route gated by AD-17 (Proof-of-Payment upload, order lookup)
+ * verifies a submitted token with the exact same algorithm instead of a
+ * second implementation — this function only adds the "also generate a
+ * fresh random raw token" half, which only checkout itself ever needs.
  */
 function generateOrderAccessToken(): {
   rawToken: string;
   tokenHash: string;
 } {
   const rawToken = randomBytes(32).toString('hex');
-  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const tokenHash = hashOrderAccessToken(rawToken);
   return { rawToken, tokenHash };
 }
 
