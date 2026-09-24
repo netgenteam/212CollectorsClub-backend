@@ -53,6 +53,25 @@ export interface RequestWithAdminUser extends Request {
  * its own routes, never spin up a separate `AdminOrders`/`AdminCatalog`
  * module split from its public counterpart.
  *
+ * **Correction (Story 8.1), one specific DI wrinkle the paragraph above
+ * doesn't cover**: the *Passport strategy registry* (where `'admin-jwt'`
+ * itself lives) really is process-wide and needs `AdminJwtStrategy`
+ * instantiated only once, as claimed above. But `AuthGuard('admin-jwt')`
+ * (the class this guard extends) ALSO has its own Nest-DI constructor
+ * dependency on an `AuthModuleOptions` provider, and Nest DI providers are
+ * scoped per-module — `AdminAuthModule` registering `PassportModule` for
+ * itself does not make that provider reachable from a guard instantiated
+ * inside a *different* module. Confirmed empirically in Story 8.1:
+ * `AdminCategoriesController` (in its own `admin-catalog/` module) failed
+ * to boot with `Nest can't resolve dependencies of the AdminAuthGuard
+ * (?)... argument AuthModuleOptions ... is not available` until that
+ * module ALSO imported `PassportModule.register({ defaultStrategy:
+ * 'admin-jwt' })` itself (see `admin-catalog.module.ts`'s own doc comment
+ * for the full writeup) — never `AdminAuthModule`, which would violate
+ * AD-14. Every future Epic 8/9/10 module adding its own
+ * `@UseGuards(AdminAuthGuard)` route needs that same one-line
+ * `PassportModule.register(...)` import alongside it.
+ *
  * **Why `AuthGuard('admin-jwt')` and not a hand-rolled `CanActivate`** (the
  * pattern `OrderAccessTokenGuard` uses): that guard verifies a raw opaque
  * token against a DB-stored hash it has to look up itself. This guard

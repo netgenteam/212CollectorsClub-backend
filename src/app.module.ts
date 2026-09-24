@@ -11,6 +11,7 @@ import { CheckoutModule } from './checkout/checkout.module.js';
 import { OrdersModule } from './orders/orders.module.js';
 import { PaymentsPaypalModule } from './payments-paypal/payments-paypal.module.js';
 import { AdminAuthModule } from './admin-auth/admin-auth.module.js';
+import { AdminCatalogModule } from './admin-catalog/admin-catalog.module.js';
 
 @Module({
   imports: [
@@ -37,6 +38,11 @@ import { AdminAuthModule } from './admin-auth/admin-auth.module.js';
     // in the app. See AdminAuthGuard's own doc comment for the full
     // reasoning.
     AdminAuthModule,
+    // Story 8.1 (AD-2, AD-14): admin CRUD over Category, gated by
+    // AdminAuthGuard at the route level — imported directly by its own
+    // controller from common/, so this module (like CatalogModule) never
+    // needs to import AdminAuthModule itself.
+    AdminCatalogModule,
   ],
   controllers: [AppController],
   providers: [AppService],
