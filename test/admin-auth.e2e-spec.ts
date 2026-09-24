@@ -416,6 +416,94 @@ describe('AdminAuthController (e2e)', () => {
         .catch(() => undefined);
     });
 
+    it('TRUE concurrent double logout (Promise.all, NOT sequential awaits) of the SAME freshly-issued token: neither request ever surfaces a raw 500, the jti ends up revoked exactly once in Postgres, and the whole race is repeated with a fresh token many times over to rule out intermittency — regression test for the QA-found bug where `revokedToken.upsert` is NOT atomic against a second truly-concurrent upsert for the same PK under Prisma 7.10.0 + @prisma/adapter-pg (both requests can see "no row yet" and both attempt `create`; the loser used to get an uncaught P2002 that fell through to a raw 500 — AdminAuthService.logout now catches that P2002 and treats it as a successful no-op)', async () => {
+      // What counts as "handled cleanly" here (documented since the Dev
+      // brief left this to judgement): in a genuine race, BOTH concurrent
+      // requests can pass AdminAuthGuard's revocation check (which reads
+      // RevokedToken by jti) before EITHER write commits — that shared
+      // window is the race itself — so BOTH reach
+      // AdminAuthService.logout() and BOTH should resolve 204 (the fix
+      // catches the loser's P2002 and swallows it as success). Depending
+      // on real scheduling/DB round-trip timing, it is also possible for
+      // one request's guard check to land AFTER the other request's row
+      // has already committed; that request is correctly rejected at the
+      // guard with 401 INVALID_ADMIN_TOKEN, same as any other
+      // already-revoked token — a different but equally correct
+      // interleaving, not a bug. The only outcome this test forbids is a
+      // raw 5xx on either side, and it additionally requires that AT
+      // LEAST ONE of the pair actually succeeds with 204 (so the token is
+      // guaranteed to end up revoked, never silently dropped by both
+      // sides swallowing an error).
+      const RACE_ITERATIONS = 15;
+
+      for (let i = 0; i < RACE_ITERATIONS; i++) {
+        const loginRes = await request(app.getHttpServer())
+          .post('/api/v1/admin/auth/login')
+          .send({ usernameOrEmail: TEST_USERNAME, password: TEST_PASSWORD })
+          .expect(200);
+        const { accessToken } = loginRes.body as AdminLoginResponse;
+
+        // Promise.all, not `await` one then the other — both requests are
+        // in flight on the wire at the same time, which is what actually
+        // exercises the race window (a sequential double-logout, like the
+        // existing test above, never does).
+        const [resA, resB] = await Promise.all([
+          request(app.getHttpServer())
+            .post('/api/v1/admin/auth/logout')
+            .set('Authorization', `Bearer ${accessToken}`),
+          request(app.getHttpServer())
+            .post('/api/v1/admin/auth/logout')
+            .set('Authorization', `Bearer ${accessToken}`),
+        ]);
+
+        for (const res of [resA, resB]) {
+          if (res.status >= 500) {
+            throw new Error(
+              `iteration ${i}: a truly concurrent logout must NEVER surface a 5xx, got ${res.status}: ${JSON.stringify(res.body)}`,
+            );
+          }
+          if (res.status !== 204 && res.status !== 401) {
+            throw new Error(
+              `iteration ${i}: expected 204 or 401 from a concurrent logout, got ${res.status}: ${JSON.stringify(res.body)}`,
+            );
+          }
+        }
+        if (resA.status !== 204 && resB.status !== 204) {
+          throw new Error(
+            `iteration ${i}: expected at least one of the two concurrent logouts to succeed with 204, got ${resA.status} and ${resB.status}`,
+          );
+        }
+
+        // Regardless of which concurrent request "won", the token must be
+        // unusable afterwards.
+        const meRes = await request(app.getHttpServer())
+          .get('/api/v1/admin/auth/me')
+          .set('Authorization', `Bearer ${accessToken}`)
+          .expect(401);
+        const meBody = meRes.body as ApiErrorBody;
+        if (meBody.errorCode !== 'INVALID_ADMIN_TOKEN') {
+          throw new Error(
+            `iteration ${i}: expected INVALID_ADMIN_TOKEN after a concurrent logout, got ${JSON.stringify(meBody)}`,
+          );
+        }
+
+        // Exactly one RevokedToken row for this jti — never duplicated by
+        // the race, never missing either, even though two concurrent
+        // writes contended for the exact same primary key.
+        const decoded = jwtService.decode<{ jti: string }>(accessToken);
+        const revokedRows = await prisma.revokedToken.findMany({
+          where: { jti: decoded.jti },
+        });
+        if (revokedRows.length !== 1) {
+          throw new Error(
+            `iteration ${i}: expected exactly 1 RevokedToken row for jti ${decoded.jti}, found ${revokedRows.length}`,
+          );
+        }
+
+        await prisma.revokedToken.delete({ where: { jti: decoded.jti } });
+      }
+    }, 30_000);
+
     it('a revoked token is STILL rejected against a brand-new app instance (simulates surviving a real process restart — the denylist is Postgres, never in-memory)', async () => {
       const loginRes = await request(app.getHttpServer())
         .post('/api/v1/admin/auth/login')

@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
 import { ApiException } from '../common/api-exception.js';
+import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AdminJwtPayload } from './admin-jwt.strategy.js';
 import type { AdminLoginResponseDto } from './dto/admin-login-response.dto.js';
@@ -117,11 +118,28 @@ export class AdminAuthService {
    * every other revoked/expired/malformed token gets (no special
    * "already logged out" status — consistent with this module's existing
    * non-enumeration posture: the caller never learns *why* their token
-   * was rejected). `upsert` (not `create`) exists only for the genuine
-   * race — two requests for the same still-valid token landing concurrently
-   * before either write commits, both passing the guard's revocation check
-   * — so that race resolves as a harmless no-op instead of a Prisma unique-
-   * constraint error surfacing as an unhandled 500.
+   * was rejected). `upsert` (not `create`) exists for the genuine race —
+   * two requests for the same still-valid token landing concurrently
+   * before either write commits, both passing the guard's revocation check.
+   *
+   * **QA fix (Story 7.2, 2nd review pass)**: `upsert` alone does NOT make
+   * that race safe. Under Prisma 7.10.0 + `@prisma/adapter-pg`, `upsert`
+   * is not atomic against another truly-concurrent `upsert`/`create` for
+   * the same PK — both requests can read "no row exists" before either
+   * commits, so both take the `create` branch; the DB's own unique
+   * constraint (correctly) allows only one to land, and the loser gets a
+   * `PrismaClientKnownRequestError` (code `P2002`) instead of silently
+   * resolving. QA reproduced this with genuinely parallel (not sequential)
+   * curl logout pairs and saw a raw 500 on the losing request 4/5 times.
+   * The `catch` below is what actually makes the race a no-op: a P2002
+   * here means "another concurrent request already revoked this exact
+   * jti" (the winning write's data is what we wanted anyway — the row
+   * exists, this jti is revoked, mission accomplished), so it's swallowed
+   * and treated as success. `upsert` is kept (not swapped for a plain
+   * `create`) since it's still the right shape for the common case where
+   * the row doesn't exist yet, and it's harmless — the `catch` is the only
+   * piece that was actually missing. Any other error (bad connection,
+   * schema drift, a different constraint) still propagates untouched.
    */
   async logout(rawToken: string): Promise<void> {
     const decoded = this.jwtService.decode<
@@ -141,10 +159,25 @@ export class AdminAuthService {
       throw invalidAdminTokenException();
     }
 
-    await this.prisma.revokedToken.upsert({
-      where: { jti: decoded.jti },
-      create: { jti: decoded.jti, expiresAt: new Date(decoded.exp * 1000) },
-      update: {},
-    });
+    try {
+      await this.prisma.revokedToken.upsert({
+        where: { jti: decoded.jti },
+        create: { jti: decoded.jti, expiresAt: new Date(decoded.exp * 1000) },
+        update: {},
+      });
+    } catch (err) {
+      // P2002 = unique constraint violation on `jti` (the PK): a genuinely
+      // concurrent logout for this same token already won the race and
+      // inserted the row first. That's the exact outcome we want (jti is
+      // revoked either way), so treat it as success. Anything else
+      // (connection errors, unexpected schema issues, etc.) is a real
+      // failure and must keep propagating.
+      const isConcurrentDuplicateRevoke =
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002';
+      if (!isConcurrentDuplicateRevoke) {
+        throw err;
+      }
+    }
   }
 }
