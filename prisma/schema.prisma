@@ -83,6 +83,19 @@ model Product {
   /// needs to add the `StockHold` table later, not alter Product again
   /// mid-checkout-epic. Effective available stock = stock - heldQty.
   heldQty     Int         @default(0)
+  /// Story 8.2 (FR-22): closes the gap Stories 2.1/2.3 flagged ("deactivated
+  /// Product" had no real field yet). Defaults `true` so every Story 1.4
+  /// seed row stays publicly visible after this migration with no data
+  /// backfill needed. `CatalogService`'s public reads (`listProducts`,
+  /// `getProductDetail`) filter on this; `AdminProductsService`'s admin
+  /// reads never do (Admin must always see deactivated Products too).
+  /// **Deactivate, never a DB-level soft-delete flag pair** — this is the
+  /// ONLY mechanism `AdminProductsService.remove` falls back to when a real
+  /// `DELETE` is rejected by Postgres because the Product still has
+  /// historical `OrderLine`/`CartItem`/`StockHold` rows referencing it (see
+  /// that service's own doc comment for the full delete-vs-deactivate
+  /// policy writeup).
+  isActive    Boolean     @default(true)
 
   categoryId String   @db.Uuid
   category   Category @relation(fields: [categoryId], references: [id])

@@ -255,7 +255,7 @@ describe('CatalogService', () => {
       const result = await service.getProductDetail(product.id);
 
       expect(prisma.product.findUnique).toHaveBeenCalledWith({
-        where: { id: product.id },
+        where: { id: product.id, isActive: true },
         include: {
           category: { select: { id: true, name: true, slug: true } },
           images: {

@@ -78,7 +78,13 @@ export class CatalogService {
     const offset = (page - 1) * limit;
     const search = query.search;
 
-    const conditions: Prisma.Sql[] = [];
+    // Story 8.2: closes the gap Story 2.2's own doc comment left open — a
+    // deactivated Product (`isActive = false`, Story 8.2's new field) must
+    // never appear in the public list, unconditionally (not just when a
+    // filter is supplied) — so this is pushed first and always, unlike
+    // every other condition below which is only added when its matching
+    // query param is present.
+    const conditions: Prisma.Sql[] = [Prisma.sql`"isActive" = true`];
     if (search) {
       conditions.push(
         Prisma.sql`(name % ${search} OR description % ${search})`,
@@ -183,17 +189,18 @@ export class CatalogService {
    * Postgres read on every call, no caching layer anywhere in this app),
    * and the joined `Category`.
    *
-   * The AC also mentions a "deactivated Product" 404, but `Product` (Story
-   * 1.4) has no `isActive`/soft-delete field yet — the same gap as Story
-   * 2.1's "active Categories" wording, and this story's Technical Notes
-   * explicitly rule out schema changes. Today every existing row is
-   * implicitly "active": only a genuinely missing id 404s. Add an
-   * `isActive` filter here once that field exists on the model (Epic 8,
-   * admin CRUD Products).
+   * Story 8.2 closes the gap this doc comment used to flag: `isActive`
+   * (defaults `true`, Story 8.2's new field) is now filtered here too — a
+   * deactivated Product 404s exactly like a genuinely missing id, never
+   * distinguished from it (no information leak about a deactivated-but-
+   * once-real id). `findUnique` accepts `isActive` alongside `id` in the
+   * same `where` (Prisma's extended-whereUnique support — `id` alone is
+   * still what makes the query plan a unique lookup) rather than switching
+   * to `findFirst`.
    */
   async getProductDetail(id: string): Promise<ProductDetailDto> {
     const product = await this.prisma.product.findUnique({
-      where: { id },
+      where: { id, isActive: true },
       include: {
         category: { select: { id: true, name: true, slug: true } },
         images: {

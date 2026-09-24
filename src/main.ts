@@ -6,6 +6,10 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module.js';
 import { createGlobalValidationPipe } from './common/global-validation-pipe.js';
+import {
+  PUBLIC_STATIC_PREFIX,
+  UPLOADS_PUBLIC_ROOT,
+} from './admin-catalog/product-image-upload-paths.constants.js';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -30,6 +34,17 @@ async function bootstrap() {
   // cookies with this same secret. Mounted before the versioning/pipe
   // setup below since it only touches cookie parsing, not routing.
   app.use(cookieParser(configService.getOrThrow<string>('COOKIE_SECRET')));
+
+  // Story 8.2 (AD-12): `uploads/public/` is the ONE static-mounted
+  // directory in this codebase — contrast with Story 4.2's
+  // `uploads/private/` (proof-of-payment), which `src/orders/upload-paths.
+  // constants.ts`'s own doc comment confirms is never passed to
+  // `useStaticAssets`/`ServeStaticModule` anywhere. Express's static
+  // middleware is NOT routed through Nest's controller layer, so it sits
+  // completely outside `setGlobalPrefix('api')`/`enableVersioning(...)`
+  // below — a Product image's real URL is `<host>/uploads/public/
+  // products/<file>`, never `<host>/api/v1/...`.
+  app.useStaticAssets(UPLOADS_PUBLIC_ROOT, { prefix: PUBLIC_STATIC_PREFIX });
 
   // FR-1: every route is reachable only under /api/v1 — a global prefix
   // ("api") plus URI versioning with default version "1" combine into that

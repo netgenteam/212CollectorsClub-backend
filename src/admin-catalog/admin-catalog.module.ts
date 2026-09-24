@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { PassportModule } from '@nestjs/passport';
 import { AdminCategoriesController } from './admin-categories.controller.js';
 import { AdminCategoriesService } from './admin-categories.service.js';
+import { AdminProductsController } from './admin-products.controller.js';
+import { AdminProductsService } from './admin-products.service.js';
 
 // PrismaService is provided by the global PrismaModule (see
 // src/prisma/prisma.module.ts) — no need to re-import it here.
@@ -29,7 +31,12 @@ import { AdminCategoriesService } from './admin-categories.service.js';
 // import.
 @Module({
   imports: [PassportModule.register({ defaultStrategy: 'admin-jwt' })],
-  controllers: [AdminCategoriesController],
-  providers: [AdminCategoriesService],
+  // Story 8.2: Products/ProductImages join Categories in this same module
+  // (both are "admin catalog CRUD") rather than a separate module — avoids
+  // a second copy of the PassportModule.register(...) wiring this doc
+  // comment documents, and matches the Architecture Spine's module map
+  // (Catalog --> AdminCatalog, singular).
+  controllers: [AdminCategoriesController, AdminProductsController],
+  providers: [AdminCategoriesService, AdminProductsService],
 })
 export class AdminCatalogModule {}
