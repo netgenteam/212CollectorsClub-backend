@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { VersioningType } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module.js';
 import { createGlobalValidationPipe } from './common/global-validation-pipe.js';
 
@@ -9,6 +10,14 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
   const port = configService.get<number>('PORT', 3000);
+
+  // Story 3.1 / AD-5: cookie-parser, given the COOKIE_SECRET from
+  // @nestjs/config, signs/verifies the HttpOnly cartId cookie. It also
+  // sets `req.secret`, which is what lets CartCookieService's plain
+  // `res.cookie(name, value, { signed: true })` calls sign outgoing
+  // cookies with this same secret. Mounted before the versioning/pipe
+  // setup below since it only touches cookie parsing, not routing.
+  app.use(cookieParser(configService.getOrThrow<string>('COOKIE_SECRET')));
 
   // FR-1: every route is reachable only under /api/v1 — a global prefix
   // ("api") plus URI versioning with default version "1" combine into that

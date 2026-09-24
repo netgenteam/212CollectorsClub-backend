@@ -88,6 +88,10 @@ model Product {
   category   Category @relation(fields: [categoryId], references: [id])
 
   images ProductImage[]
+  /// Story 3.1: every CartItem row referencing this Product, across every
+  /// guest Cart. Read-only back-reference — CartService never traverses it,
+  /// but Prisma requires the relation declared on both sides.
+  cartItems CartItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -98,6 +102,48 @@ model Product {
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
   @@index([description(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("Products")
+}
+
+/// A guest buyer's shopping cart (Story 3.1, first story needing this
+/// model). Identity is deliberately opaque: nothing but this row's `id`
+/// (a UUID) is ever handed to the client, carried in a signed HttpOnly
+/// cookie (AD-5) — never a JWT, never buyer PII on this path.
+/// `expiresAt` implements AD-5's 30-day *sliding* expiry: `CartService`
+/// pushes it forward by 30 days from "now" every time `POST cart/items`
+/// touches this cart, so an actively-used guest cart never expires
+/// mid-session while an abandoned one eventually does. Nothing currently
+/// deletes expired rows (no cron in this story's scope, unlike AD-6's
+/// stock-hold expiry cron) — an expired Cart is simply treated as if it
+/// didn't exist by CartService; a future maintenance job may reap them.
+model Cart {
+  id        String   @id @default(uuid()) @db.Uuid
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  expiresAt DateTime
+
+  items CartItem[]
+
+  @@map("Carts")
+}
+
+/// One Product line within a Cart (Story 3.1). `@@unique([cartId,
+/// productId])` enforces "at most one row per Product per Cart" — Story
+/// 3.1's decision is that adding a Product already present in the Cart
+/// increments `quantity` on this same row rather than inserting a second
+/// row for the same Product (see CartService.addItem for the reasoning).
+model CartItem {
+  id        String   @id @default(uuid()) @db.Uuid
+  cartId    String   @db.Uuid
+  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId String   @db.Uuid
+  product   Product  @relation(fields: [productId], references: [id])
+  quantity  Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([cartId, productId])
+  @@map("Cart_Items")
 }
 
 /// One or more images associated with a Product (PRD §3 Glossary), one-to-
