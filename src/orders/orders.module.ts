@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { PassportModule } from '@nestjs/passport';
 import { ProofOfPaymentController } from './proof-of-payment.controller.js';
 import { ProofOfPaymentService } from './proof-of-payment.service.js';
 import { OrderLookupController } from './order-lookup.controller.js';
@@ -6,6 +7,8 @@ import { OrderLookupService } from './order-lookup.service.js';
 import { OrderAccessTokenGuard } from './order-access-token.guard.js';
 import { StockHoldExpiryCronService } from './cron/stock-hold-expiry-cron.service.js';
 import { PaymentProcessingTimeoutCronService } from './cron/payment-processing-timeout-cron.service.js';
+import { AdminOrdersController } from './admin-orders.controller.js';
+import { AdminOrdersService } from './admin-orders.service.js';
 
 // PrismaService is provided by the global PrismaModule — no need to
 // re-import it here (same pattern CheckoutModule already uses).
@@ -23,14 +26,36 @@ import { PaymentProcessingTimeoutCronService } from './cron/payment-processing-t
 // exports `FakePaypalClient`: it's the explicit, discoverable way for an
 // e2e test to say "yes, this provider is meant to be reached from
 // outside this module").
+//
+// Story 9.1 (AD-11, AD-14): `AdminOrdersController`/`-Service` add the
+// first `AdminAuthGuard`-gated route to THIS module (§4.9 admin order
+// management — AD-14 requires it live here, not a separate `AdminOrders`
+// module, unlike Epic 8's `admin-catalog/`). `AdminAuthGuard extends
+// AuthGuard('admin-jwt')`, and `@nestjs/passport`'s `AuthGuard()` mixin has
+// its own DI dependency on an `AuthModuleOptions` provider that's scoped
+// per-module — `AdminAuthModule` registering `PassportModule` for itself
+// does NOT make that provider reachable from a guard instantiated inside a
+// different module (confirmed empirically in Story 8.1, see
+// `admin-catalog.module.ts`'s and `AdminAuthGuard`'s own doc comments for
+// the full writeup). `OrdersModule` never needed this before — its two
+// pre-existing controllers use the unrelated hand-rolled
+// `OrderAccessTokenGuard` — so this `PassportModule.register(...)` import
+// is new as of this story, added for exactly the same one-line reason
+// every Epic 8/9/10 module gains it.
 @Module({
-  controllers: [ProofOfPaymentController, OrderLookupController],
+  imports: [PassportModule.register({ defaultStrategy: 'admin-jwt' })],
+  controllers: [
+    ProofOfPaymentController,
+    OrderLookupController,
+    AdminOrdersController,
+  ],
   providers: [
     ProofOfPaymentService,
     OrderLookupService,
     OrderAccessTokenGuard,
     StockHoldExpiryCronService,
     PaymentProcessingTimeoutCronService,
+    AdminOrdersService,
   ],
   exports: [StockHoldExpiryCronService, PaymentProcessingTimeoutCronService],
 })
