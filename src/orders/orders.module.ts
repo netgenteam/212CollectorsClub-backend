@@ -9,6 +9,7 @@ import { StockHoldExpiryCronService } from './cron/stock-hold-expiry-cron.servic
 import { PaymentProcessingTimeoutCronService } from './cron/payment-processing-timeout-cron.service.js';
 import { AdminOrdersController } from './admin-orders.controller.js';
 import { AdminOrdersService } from './admin-orders.service.js';
+import { AdminOrderPaymentService } from './admin-order-payment.service.js';
 
 // PrismaService is provided by the global PrismaModule — no need to
 // re-import it here (same pattern CheckoutModule already uses).
@@ -42,6 +43,12 @@ import { AdminOrdersService } from './admin-orders.service.js';
 // `OrderAccessTokenGuard` — so this `PassportModule.register(...)` import
 // is new as of this story, added for exactly the same one-line reason
 // every Epic 8/9/10 module gains it.
+//
+// Story 9.2: `AdminOrderPaymentService` (proof-of-payment file serving +
+// confirm/reject) is a sibling provider to `AdminOrdersService`, both
+// consumed by the SAME `AdminOrdersController` — no new controller, no new
+// module (same AD-14 reasoning Story 9.1 already established for this
+// module as a whole).
 @Module({
   imports: [PassportModule.register({ defaultStrategy: 'admin-jwt' })],
   controllers: [
@@ -56,6 +63,7 @@ import { AdminOrdersService } from './admin-orders.service.js';
     StockHoldExpiryCronService,
     PaymentProcessingTimeoutCronService,
     AdminOrdersService,
+    AdminOrderPaymentService,
   ],
   exports: [StockHoldExpiryCronService, PaymentProcessingTimeoutCronService],
 })
