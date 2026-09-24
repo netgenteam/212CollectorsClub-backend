@@ -30,6 +30,8 @@ import { ListAdminOrdersQueryDto } from './dto/list-admin-orders-query.dto.js';
 import { PaginatedAdminOrdersResponseDto } from './dto/paginated-admin-orders-response.dto.js';
 import { AdminPaymentDecisionResponseDto } from './dto/admin-payment-decision-response.dto.js';
 import { AdminFulfillmentDecisionResponseDto } from './dto/admin-fulfillment-decision-response.dto.js';
+import { ReconciliationQueryDto } from './dto/reconciliation-query.dto.js';
+import { AdminReconciliationResponseDto } from './dto/admin-reconciliation-response.dto.js';
 
 /**
  * Story 9.1 (FR-26, NFR-4; AD-11, AD-14). The first §4.9 "Admin Order &
@@ -65,6 +67,19 @@ import { AdminFulfillmentDecisionResponseDto } from './dto/admin-fulfillment-dec
  * — same one-concern-per-service split this controller already follows for
  * 9.1/9.2). Same `ParseUUIDPipe` treatment as the 9.2 routes: a malformed
  * `orderId` is a plain 400 before ever reaching the service/Prisma.
+ *
+ * **Story 9.4 addition** (FR-28, NFR-4; AD-11, AD-14): one more route,
+ * `GET admin/orders/reconciliation`, delegating back to the read-only
+ * `AdminOrdersService` (Story 9.1) — same service, a second method, not a
+ * new one (this is a query, not a mutation, so it belongs with `listOrders`
+ * rather than the payment/fulfillment services). Declared BEFORE the
+ * `:orderId/...` routes below so the static segment `reconciliation` is
+ * never a candidate to be captured as a `:orderId` param (Nest matches
+ * routes in declaration order); today there's no bare `:orderId` route to
+ * collide with, but keeping the static route first is the defensive
+ * convention regardless. See `AdminOrdersService.getReconciliation`'s own
+ * doc comment for why the story's "the one sanctioned $queryRaw exception"
+ * framing is stale, and what this endpoint actually aggregates and why.
  */
 @ApiTags('orders')
 @ApiBearerAuth('admin-jwt')
@@ -102,6 +117,33 @@ export class AdminOrdersController {
     @Query() query: ListAdminOrdersQueryDto,
   ): Promise<PaginatedAdminOrdersResponseDto> {
     return this.adminOrdersService.listOrders(query);
+  }
+
+  @Get('reconciliation')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Consolidated payment reconciliation summary (admin)',
+    description:
+      "Cross-rail (PayPal + Pago Móvil) payment summary for the given period, grouped by (paymentRail, status) with per-rail subtotals and a grand total — see AdminOrdersService.getReconciliation's own doc comment for the full field-choice rationale (PRD UJ-5). A period with no matching Orders returns this same shape with empty arrays and a zeroed grandTotal, never an error.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'The reconciliation summary for the given period.',
+    type: AdminReconciliationResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      'from/to are not valid ISO-8601 dates, or `to` is before `from`.',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'errorCode INVALID_ADMIN_TOKEN.',
+  })
+  getReconciliation(
+    @Query() query: ReconciliationQueryDto,
+  ): Promise<AdminReconciliationResponseDto> {
+    return this.adminOrdersService.getReconciliation(query);
   }
 
   @Get(':orderId/proof-of-payment')
