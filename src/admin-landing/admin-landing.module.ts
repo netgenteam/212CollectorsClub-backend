@@ -29,9 +29,12 @@ import { LandingContentService } from './landing-content.service.js';
   // on this SAME AdminLandingContentController (own fixed key set, own
   // section-specific ISO-8601 validation for "targetDate", same shared
   // LandingContentService/LandingConfigEntry table) rather than a new
-  // controller class — no new module wiring needed. Story 10.3 is expected
-  // to follow the same shape for "pack_simulator" — see
-  // landing-content.constants.ts's doc comment.
+  // controller class — no new module wiring needed. Story 10.3 added a 4th
+  // route ("pack_simulator/:key") the same way — same
+  // controller/service/module, zero new wiring — but with an OPEN key set
+  // instead of a fixed one; see landing-content.constants.ts's doc comment
+  // for why. This completes Epic 10: all three FR-29/30/31 stories share
+  // one table and one controller/service pair.
   controllers: [AdminLandingContentController, LandingContentController],
   providers: [LandingContentService],
 })

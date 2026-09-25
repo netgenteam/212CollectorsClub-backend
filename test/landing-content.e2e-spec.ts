@@ -91,6 +91,18 @@ describe('LandingContent (e2e)', () => {
   });
 
   afterEach(async () => {
+    // Story 10.3: unlike texts/banners/drop212 (a fixed, small set of
+    // pre-seeded keys these tests overwrite in place — nothing new ever
+    // accumulates), pack_simulator has no fixed key set, so these tests use
+    // fresh randomUUID()-derived keys (all prefixed "e2e_") to avoid
+    // colliding with each other/real data. Clean those rows up here so
+    // repeated local runs don't pile up garbage in the shared dev DB —
+    // every such key in this file is prefixed "e2e_" by convention.
+    await prisma.landingConfigEntry
+      .deleteMany({
+        where: { section: 'pack_simulator', key: { startsWith: 'e2e_' } },
+      })
+      .catch(() => undefined);
     await prisma.adminUser
       .delete({ where: { id: adminId } })
       .catch(() => undefined);
@@ -124,6 +136,14 @@ describe('LandingContent (e2e)', () => {
       const res = await request(app.getHttpServer())
         .put('/api/v1/admin/landing-content/drop212/targetDate')
         .send({ value: '2026-12-25T00:00:00.000Z' })
+        .expect(401);
+      expect((res.body as ApiErrorBody).errorCode).toBe('INVALID_ADMIN_TOKEN');
+    });
+
+    it('PUT /api/v1/admin/landing-content/pack_simulator/rarityOdds: 401 INVALID_ADMIN_TOKEN', async () => {
+      const res = await request(app.getHttpServer())
+        .put('/api/v1/admin/landing-content/pack_simulator/rarityOdds')
+        .send({ value: { COMMON: 0.6, RARE: 0.4 } })
         .expect(401);
       expect((res.body as ApiErrorBody).errorCode).toBe('INVALID_ADMIN_TOKEN');
     });
@@ -344,6 +364,203 @@ describe('LandingContent (e2e)', () => {
         .expect(200);
       const body = publicRes.body as PublicLandingContent;
       expect(body.drop212?.[bogusKey]).toBeUndefined();
+    });
+  });
+
+  describe('PUT .../pack_simulator/{key} -> immediately visible on the public GET (Story 10.3)', () => {
+    it('a flat JSON object (simple per-rarity odds table): 200, reflected immediately, exact shape preserved on the public GET', async () => {
+      const key = `e2e_flat_${randomUUID().replace(/-/g, '')}`;
+      const value = { COMMON: 0.6, RARE: 0.3, ULTRA_RARE: 0.1 };
+
+      const putRes = await authed(
+        'put',
+        `/api/v1/admin/landing-content/pack_simulator/${key}`,
+      )
+        .send({ value })
+        .expect(200);
+      const updated = putRes.body as EntryResponse;
+      expect(updated.section).toBe('pack_simulator');
+      expect(updated.key).toBe(key);
+      expect(updated.valueType).toBe('json');
+      expect(updated.value).toEqual(value);
+      expect(updated.updatedById).toBe(adminId);
+
+      const publicRes = await request(app.getHttpServer())
+        .get('/api/v1/landing-content')
+        .expect(200);
+      const body = publicRes.body as PublicLandingContent;
+      expect(body.pack_simulator[key].value).toEqual(value);
+      expect(body.pack_simulator[key].valueType).toBe('json');
+    });
+
+    it('a genuinely nested JSON object (per-set, per-rarity odds table): 200, exact nesting/types preserved on the public GET', async () => {
+      const key = `e2e_nested_${randomUUID().replace(/-/g, '')}`;
+      const value = {
+        'base-set': { COMMON: 0.6, RARE: 0.3, ULTRA_RARE: 0.1 },
+        'promo-set': { COMMON: 0.5, RARE: 0.35, ULTRA_RARE: 0.15 },
+        featuredSetId: 'base-set',
+        pityTimerEnabled: true,
+      };
+
+      const putRes = await authed(
+        'put',
+        `/api/v1/admin/landing-content/pack_simulator/${key}`,
+      )
+        .send({ value })
+        .expect(200);
+      const updated = putRes.body as EntryResponse;
+      expect(updated.value).toEqual(value);
+
+      const publicRes = await request(app.getHttpServer())
+        .get('/api/v1/landing-content')
+        .expect(200);
+      const body = publicRes.body as PublicLandingContent;
+      // Deep-equal against the exact original object — same keys, same
+      // nesting depth, same value types (numbers stay numbers, the boolean
+      // stays a boolean, not stringified) — the backend never reshapes it.
+      expect(body.pack_simulator[key].value).toEqual(value);
+    });
+
+    it('a key nobody pre-defined anywhere in the backend is accepted (the open-key-set design decision)', async () => {
+      const key = `e2e_totally_novel_variable_${randomUUID().replace(/-/g, '')}`;
+
+      const putRes = await authed(
+        'put',
+        `/api/v1/admin/landing-content/pack_simulator/${key}`,
+      )
+        .send({ value: { anything: 'goes' } })
+        .expect(200);
+      expect((putRes.body as EntryResponse).key).toBe(key);
+    });
+
+    it('an absent/malformed "value" (missing from the body): rejected with 400, never persisted', async () => {
+      const key = `e2e_missing_value_${randomUUID().replace(/-/g, '')}`;
+
+      await authed('put', `/api/v1/admin/landing-content/pack_simulator/${key}`)
+        .send({})
+        .expect(400);
+
+      const row = await prisma.landingConfigEntry.findUnique({
+        where: { section_key: { section: 'pack_simulator', key } },
+      });
+      expect(row).toBeNull();
+    });
+
+    it('a "value" that is explicitly null: rejected with 400, never persisted', async () => {
+      const key = `e2e_null_value_${randomUUID().replace(/-/g, '')}`;
+
+      await authed('put', `/api/v1/admin/landing-content/pack_simulator/${key}`)
+        .send({ value: null })
+        .expect(400);
+
+      const row = await prisma.landingConfigEntry.findUnique({
+        where: { section_key: { section: 'pack_simulator', key } },
+      });
+      expect(row).toBeNull();
+    });
+
+    it('a malformed key (invalid characters): rejected with 400 LANDING_KEY_INVALID_FORMAT, never persisted', async () => {
+      const bogusKey = 'not a valid key!';
+
+      const res = await authed(
+        'put',
+        `/api/v1/admin/landing-content/pack_simulator/${encodeURIComponent(bogusKey)}`,
+      )
+        .send({ value: { x: 1 } })
+        .expect(400);
+      expect((res.body as ApiErrorBody).errorCode).toBe(
+        'LANDING_KEY_INVALID_FORMAT',
+      );
+
+      const row = await prisma.landingConfigEntry.findUnique({
+        where: { section_key: { section: 'pack_simulator', key: bogusKey } },
+      });
+      expect(row).toBeNull();
+    });
+
+    it('a value nested past the max depth: rejected with 400 LANDING_VALUE_TOO_DEEP, never persisted', async () => {
+      const key = `e2e_too_deep_${randomUUID().replace(/-/g, '')}`;
+      let deep: unknown = 1;
+      for (let i = 0; i < 10; i++) {
+        deep = { nested: deep };
+      }
+
+      const res = await authed(
+        'put',
+        `/api/v1/admin/landing-content/pack_simulator/${key}`,
+      )
+        .send({ value: deep })
+        .expect(400);
+      expect((res.body as ApiErrorBody).errorCode).toBe(
+        'LANDING_VALUE_TOO_DEEP',
+      );
+
+      const row = await prisma.landingConfigEntry.findUnique({
+        where: { section_key: { section: 'pack_simulator', key } },
+      });
+      expect(row).toBeNull();
+    });
+
+    it('a value whose serialized size exceeds the max: rejected with 400 LANDING_VALUE_TOO_LARGE, never persisted', async () => {
+      const key = `e2e_too_large_${randomUUID().replace(/-/g, '')}`;
+      const huge = { blob: 'x'.repeat(20_000) };
+
+      const res = await authed(
+        'put',
+        `/api/v1/admin/landing-content/pack_simulator/${key}`,
+      )
+        .send({ value: huge })
+        .expect(400);
+      expect((res.body as ApiErrorBody).errorCode).toBe(
+        'LANDING_VALUE_TOO_LARGE',
+      );
+
+      const row = await prisma.landingConfigEntry.findUnique({
+        where: { section_key: { section: 'pack_simulator', key } },
+      });
+      expect(row).toBeNull();
+    });
+
+    it('never applies simulator business logic: odds that do not sum to 100% are accepted, not rejected', async () => {
+      const key = `e2e_no_business_logic_${randomUUID().replace(/-/g, '')}`;
+      // Deliberately "invalid" odds (sums to 150%, not 100%) — if the
+      // backend ever grows an odds-sum-to-100% check, this test starts
+      // failing, which is the point: FR-31's Technical Note requires the
+      // backend to stay pure store-and-serve, no simulator math/validation.
+      const notNormalizedOdds = { COMMON: 1.0, RARE: 0.5 };
+
+      const putRes = await authed(
+        'put',
+        `/api/v1/admin/landing-content/pack_simulator/${key}`,
+      )
+        .send({ value: notNormalizedOdds })
+        .expect(200);
+      expect((putRes.body as EntryResponse).value).toEqual(notNormalizedOdds);
+
+      const publicRes = await request(app.getHttpServer())
+        .get('/api/v1/landing-content')
+        .expect(200);
+      const body = publicRes.body as PublicLandingContent;
+      expect(body.pack_simulator[key].value).toEqual(notNormalizedOdds);
+    });
+
+    it('updating the same key twice overwrites (upsert), and the public GET always reflects the latest write', async () => {
+      const key = `e2e_overwrite_${randomUUID().replace(/-/g, '')}`;
+
+      await authed('put', `/api/v1/admin/landing-content/pack_simulator/${key}`)
+        .send({ value: { COMMON: 0.9, RARE: 0.1 } })
+        .expect(200);
+
+      const secondValue = { COMMON: 0.4, RARE: 0.4, ULTRA_RARE: 0.2 };
+      await authed('put', `/api/v1/admin/landing-content/pack_simulator/${key}`)
+        .send({ value: secondValue })
+        .expect(200);
+
+      const publicRes = await request(app.getHttpServer())
+        .get('/api/v1/landing-content')
+        .expect(200);
+      const body = publicRes.body as PublicLandingContent;
+      expect(body.pack_simulator[key].value).toEqual(secondValue);
     });
   });
 });

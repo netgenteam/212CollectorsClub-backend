@@ -18,6 +18,7 @@ import * as argon2 from 'argon2';
 import { PrismaPg } from '@prisma/adapter-pg';
 import {
   PrismaClient,
+  Prisma,
   Franchise,
   ProductType,
   Rarity,
@@ -26,6 +27,7 @@ import { SINGLETON_FX_RATE_ID } from '../src/checkout/fx-rate.constants.js';
 import {
   LANDING_SECTION_BANNERS,
   LANDING_SECTION_DROP212,
+  LANDING_SECTION_PACK_SIMULATOR,
   LANDING_SECTION_TEXTS,
   type LandingBannerKey,
   type LandingDrop212Key,
@@ -446,7 +448,7 @@ async function seedAdminUser(): Promise<void> {
  */
 async function seedLandingContent(): Promise<void> {
   console.log(
-    'Seeding landing content placeholders (texts + banners + drop212)...',
+    'Seeding landing content placeholders (texts + banners + drop212 + pack_simulator)...',
   );
 
   const textDefaults: Record<LandingTextKey, string> = {
@@ -524,6 +526,31 @@ async function seedLandingContent(): Promise<void> {
         key,
         valueType: key === 'targetDate' ? 'date' : 'text',
         value,
+      },
+      update: {},
+    });
+  }
+
+  // Story 10.3: unlike texts/banners/drop212 above, "pack_simulator" has NO
+  // fixed key set (see landing-content.constants.ts's doc comment) — this
+  // is just ONE illustrative example key/value, not an exhaustive schema,
+  // seeded purely so the public GET has something real to show under
+  // `pack_simulator` from day one and so SM-5's "edit one simulator
+  // variable" admin checklist item has an existing row to edit. Any other
+  // key an admin (or the eventual frontend team) invents works exactly the
+  // same way via the PUT endpoint — this placeholder does not special-case
+  // "rarityOdds" in any backend code.
+  const packSimulatorDefaults: Record<string, unknown> = {
+    rarityOdds: { COMMON: 0.6, RARE: 0.3, ULTRA_RARE: 0.1 },
+  };
+  for (const [key, value] of Object.entries(packSimulatorDefaults)) {
+    await prisma.landingConfigEntry.upsert({
+      where: { section_key: { section: LANDING_SECTION_PACK_SIMULATOR, key } },
+      create: {
+        section: LANDING_SECTION_PACK_SIMULATOR,
+        key,
+        valueType: 'json',
+        value: value as Prisma.InputJsonValue,
       },
       update: {},
     });
