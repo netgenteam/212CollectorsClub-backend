@@ -13,6 +13,7 @@ import {
   PaginationMetaDto,
 } from './dto/paginated-products-response.dto.js';
 import { MACRO_CATEGORY_TYPES } from './macro-category.js';
+import { RelatedProductsResponseDto } from './dto/related-products-response.dto.js';
 import type { GradingCompany } from './grading-company.js';
 import {
   ProductListItemDto,
@@ -166,6 +167,51 @@ export class CatalogService {
     };
 
     return { data, meta };
+  }
+
+  /**
+   * Story 11.3 (FR-33, AD-20): related products. Base product must exist and
+   * be active (else 404, same as detail). One raw statement ranks candidates:
+   * in-stock first, then same franchise + same macro-category, then
+   * same category, then name/id. `toListItems` adds one batched image query.
+   */
+  async getRelatedProducts(
+    id: string,
+    limit: number,
+  ): Promise<RelatedProductsResponseDto> {
+    const base = await this.prisma.product.findUnique({
+      where: { id, isActive: true },
+      select: {
+        id: true,
+        franchise: true,
+        productType: true,
+        categoryId: true,
+      },
+    });
+    if (!base) {
+      throw new NotFoundException(`Product ${id} not found`);
+    }
+
+    const macroSet: ProductType[] = Object.values(MACRO_CATEGORY_TYPES).find(
+      (types) => types.includes(base.productType),
+    ) ?? [base.productType];
+    const strongMatch = Prisma.sql`(franchise = ${base.franchise}::"Franchise" AND "productType" = ANY(${macroSet}::"ProductType"[]))`;
+
+    const rows = await this.prisma.$queryRaw<ProductSearchRow[]>(
+      Prisma.sql`
+        SELECT id, name, slug, "isPreorder", "releaseDate", "priceUsd", stock, "heldQty", franchise, "productType", rarity
+        FROM "Products"
+        WHERE "isActive" = true
+          AND id <> ${id}::uuid
+          AND (${strongMatch} OR "categoryId" = ${base.categoryId}::uuid)
+        ORDER BY ((stock - "heldQty") > 0) DESC,
+                 CASE WHEN ${strongMatch} THEN 0 ELSE 1 END ASC,
+                 name ASC, id ASC
+        LIMIT ${limit}
+      `,
+    );
+
+    return { data: await this.toListItems(rows) };
   }
 
   /**

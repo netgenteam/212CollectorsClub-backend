@@ -11,6 +11,8 @@ import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CatalogService } from './catalog.service.js';
 import { ListProductsQueryDto } from './dto/list-products-query.dto.js';
 import { PaginatedProductsResponseDto } from './dto/paginated-products-response.dto.js';
+import { RelatedProductsQueryDto } from './dto/related-products-query.dto.js';
+import { RelatedProductsResponseDto } from './dto/related-products-response.dto.js';
 import { ProductDetailDto } from './dto/product-detail.dto.js';
 
 @ApiTags('catalog')
@@ -81,5 +83,37 @@ export class ProductsController {
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<ProductDetailDto> {
     return this.catalogService.getProductDetail(id);
+  }
+
+  /**
+   * Story 11.3 (FR-33, AD-20): related products. Declared after `:id`; the
+   * extra `/related` segment means the two routes never collide.
+   */
+  @Get(':id/related')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Get related products',
+    description:
+      'Active products related to the given one (same franchise + macro-category first, then same category), in-stock first. Excludes the product itself.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Product id.' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Related products (possibly empty).',
+    type: RelatedProductsResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'No active Product exists with the given id.',
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Invalid UUID or limit outside 1..10.',
+  })
+  getRelatedProducts(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: RelatedProductsQueryDto,
+  ): Promise<RelatedProductsResponseDto> {
+    return this.catalogService.getRelatedProducts(id, query.limit);
   }
 }

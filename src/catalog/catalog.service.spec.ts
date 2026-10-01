@@ -421,4 +421,90 @@ describe('CatalogService', () => {
       expect(result.inStock).toBe(false);
     });
   });
+
+  describe('getRelatedProducts', () => {
+    const baseId = '6f0c2b7e-3c1d-4a55-9d0e-1b2c3d4e5f60';
+
+    it('404s when the base product is missing or inactive', async () => {
+      prisma.product.findUnique.mockResolvedValue(null);
+
+      await expect(service.getRelatedProducts(baseId, 4)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(prisma.product.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: baseId, isActive: true } }),
+      );
+      expect(prisma.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('returns { data: [] } without an image query when nothing matches', async () => {
+      prisma.product.findUnique.mockResolvedValue({
+        id: baseId,
+        franchise: 'POKEMON',
+        productType: 'BOOSTER_BOX',
+        categoryId: baseId,
+      });
+      prisma.$queryRaw.mockResolvedValue([]);
+
+      await expect(service.getRelatedProducts(baseId, 4)).resolves.toEqual({
+        data: [],
+      });
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(prisma.productImage.findMany).not.toHaveBeenCalled();
+    });
+
+    it('binds the macro set of the base type and the limit as parameters', async () => {
+      prisma.product.findUnique.mockResolvedValue({
+        id: baseId,
+        franchise: 'POKEMON',
+        productType: 'SINGLE_CARD',
+        categoryId: baseId,
+      });
+      prisma.$queryRaw.mockResolvedValue([]);
+
+      await service.getRelatedProducts(baseId, 7);
+
+      const sql = prisma.$queryRaw.mock.calls[0][0] as {
+        values: unknown[];
+      };
+      expect(sql.values).toContainEqual(['SINGLE_CARD']);
+      expect(sql.values).toContain(7);
+      expect(sql.values).toContain('POKEMON');
+    });
+
+    it('maps rows through toListItems (one batched image query)', async () => {
+      prisma.product.findUnique.mockResolvedValue({
+        id: baseId,
+        franchise: 'POKEMON',
+        productType: 'BOOSTER_BOX',
+        categoryId: baseId,
+      });
+      prisma.$queryRaw.mockResolvedValue([
+        {
+          id: 'a',
+          name: 'A',
+          slug: 'a',
+          isPreorder: false,
+          releaseDate: null,
+          priceUsd: '5.00',
+          stock: 3,
+          heldQty: 1,
+          franchise: 'POKEMON',
+          productType: 'BOOSTER_PACK',
+          rarity: 'COMMON',
+        },
+      ]);
+      prisma.productImage.findMany.mockResolvedValue([]);
+
+      const res = await service.getRelatedProducts(baseId, 4);
+
+      expect(res.data).toHaveLength(1);
+      expect(res.data[0]).toMatchObject({
+        id: 'a',
+        availableStock: 2,
+        inStock: true,
+      });
+      expect(prisma.productImage.findMany).toHaveBeenCalledTimes(1);
+    });
+  });
 });
