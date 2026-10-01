@@ -53,6 +53,10 @@ export class WishlistController {
   })
   @ApiResponse({ status: HttpStatus.OK, type: WishlistProductIdsResponseDto })
   @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'productId is missing or not a UUID.',
+  })
+  @ApiResponse({
     status: HttpStatus.NOT_FOUND,
     description: 'Unknown or inactive product.',
   })
@@ -82,6 +86,10 @@ export class WishlistController {
   })
   @ApiParam({ name: 'productId', format: 'uuid' })
   @ApiResponse({ status: HttpStatus.NO_CONTENT })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'productId is not a UUID.',
+  })
   async removeItem(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Req() req: Request,
