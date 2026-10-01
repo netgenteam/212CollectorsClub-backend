@@ -218,11 +218,49 @@ export class AdminProductsService {
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
     if (dto.isPreorder !== undefined) data.isPreorder = dto.isPreorder;
     if (dto.releaseDate !== undefined)
-      data.releaseDate = new Date(dto.releaseDate);
-    if (dto.gradingCompany !== undefined)
-      data.gradingCompany = dto.gradingCompany;
+      data.releaseDate =
+        dto.releaseDate === null ? null : new Date(dto.releaseDate);
     if (dto.gradeValue !== undefined) data.gradeValue = dto.gradeValue;
     if (dto.certNumber !== undefined) data.certNumber = dto.certNumber;
+
+    // Story 11.1 (AD-18): grade/cert only make sense with a real grading
+    // house. Validate against the RESULTING company (body, else stored) and
+    // clear them when the company is set to null/RAW.
+    const touchesGrading =
+      dto.gradingCompany !== undefined ||
+      (dto.gradeValue !== undefined && dto.gradeValue !== null) ||
+      (dto.certNumber !== undefined && dto.certNumber !== null);
+    if (touchesGrading) {
+      let company: string | null;
+      if (dto.gradingCompany !== undefined) {
+        company = dto.gradingCompany;
+      } else {
+        const stored = await this.prisma.product.findUnique({
+          where: { id },
+          select: { gradingCompany: true },
+        });
+        if (!stored) throw productNotFoundException(id);
+        company = stored.gradingCompany;
+      }
+      const graded = company !== null && company !== 'RAW';
+      if (!graded) {
+        if (
+          (dto.gradeValue !== undefined && dto.gradeValue !== null) ||
+          (dto.certNumber !== undefined && dto.certNumber !== null)
+        ) {
+          throw new ApiException(
+            HttpStatus.BAD_REQUEST,
+            'GRADING_COMPANY_REQUIRED',
+            'gradeValue/certNumber require gradingCompany to be PSA, BGS or CGC (not null/RAW).',
+          );
+        }
+        data.gradeValue = null;
+        data.certNumber = null;
+      }
+      if (dto.gradingCompany !== undefined) {
+        data.gradingCompany = dto.gradingCompany;
+      }
+    }
 
     try {
       await this.prisma.product.update({ where: { id }, data });

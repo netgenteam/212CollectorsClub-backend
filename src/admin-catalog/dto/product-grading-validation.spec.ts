@@ -49,19 +49,39 @@ describe.each([
     expect(await errorsFor(cls, { gradingCompany: 'RAW' }, base)).toEqual([]);
   });
 
+  // Cross-field rule: body-only on create; on PATCH the service validates
+  // against the stored company (covered by e2e + service specs).
+  if (cls === CreateProductDto) {
+    it.each([
+      [
+        'certNumber without gradingCompany',
+        { certNumber: '123' },
+        'certNumber',
+      ],
+      ['gradeValue without gradingCompany', { gradeValue: '9' }, 'gradeValue'],
+      [
+        'certNumber with RAW',
+        { gradingCompany: 'RAW', certNumber: '123' },
+        'certNumber',
+      ],
+      [
+        'gradeValue with RAW',
+        { gradingCompany: 'RAW', gradeValue: '9' },
+        'gradeValue',
+      ],
+    ])('rejects %s', async (_label, extra, property) => {
+      expect(await errorsFor(cls, extra, base)).toContain(property);
+    });
+  }
+
+  it('accepts null to clear releaseDate/gradingCompany on PATCH', async () => {
+    if (cls !== UpdateProductDto) return;
+    expect(
+      await errorsFor(cls, { releaseDate: null, gradingCompany: null }, base),
+    ).toEqual([]);
+  });
+
   it.each([
-    ['certNumber without gradingCompany', { certNumber: '123' }, 'certNumber'],
-    ['gradeValue without gradingCompany', { gradeValue: '9' }, 'gradeValue'],
-    [
-      'certNumber with RAW',
-      { gradingCompany: 'RAW', certNumber: '123' },
-      'certNumber',
-    ],
-    [
-      'gradeValue with RAW',
-      { gradingCompany: 'RAW', gradeValue: '9' },
-      'gradeValue',
-    ],
     [
       'non-alphanumeric certNumber',
       { gradingCompany: 'PSA', certNumber: '12-34' },

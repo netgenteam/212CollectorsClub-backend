@@ -215,6 +215,62 @@ describe('Collectibles fields (e2e, Story 11.1)', () => {
       await createRequest(fields).expect(400);
     });
 
+    describe('PATCH clearing and stored-company rules', () => {
+      async function createSlab(): Promise<string> {
+        const res = await createRequest({
+          releaseDate: '2027-03-01T00:00:00.000Z',
+          gradingCompany: 'PSA',
+          gradeValue: '10',
+          certNumber: 'ABC123',
+        }).expect(201);
+        const id = (res.body as AdminProduct).id;
+        createdIds.push(id);
+        return id;
+      }
+      function patch(id: string, body: Record<string, unknown>) {
+        return request(app.getHttpServer())
+          .patch(`/api/v1/admin/products/${id}`)
+          .set('Authorization', `Bearer ${accessToken}`)
+          .send(body);
+      }
+
+      it('releaseDate: null clears the field (never 1970-01-01)', async () => {
+        const id = await createSlab();
+        const res = await patch(id, { releaseDate: null }).expect(200);
+        expect((res.body as AdminProduct).releaseDate).toBeNull();
+      });
+
+      it.each([null, 'RAW'])(
+        'gradingCompany: %s clears gradeValue and certNumber too',
+        async (value) => {
+          const id = await createSlab();
+          const res = await patch(id, { gradingCompany: value }).expect(200);
+          const body = res.body as AdminProduct;
+          expect(body.gradeValue).toBeNull();
+          expect(body.certNumber).toBeNull();
+          expect(body.gradingCompany).toBe(value);
+          const row = await prisma.product.findUniqueOrThrow({ where: { id } });
+          expect(row.gradeValue).toBeNull();
+          expect(row.certNumber).toBeNull();
+        },
+      );
+
+      it('certNumber alone is accepted when the STORED company is graded', async () => {
+        const id = await createSlab();
+        const res = await patch(id, { certNumber: 'NEW999' }).expect(200);
+        expect((res.body as AdminProduct).certNumber).toBe('NEW999');
+      });
+
+      it('certNumber/gradeValue alone are 400 when the stored company is null or RAW', async () => {
+        const id = await createSlab();
+        await patch(id, { gradingCompany: 'RAW' }).expect(200);
+        await patch(id, { certNumber: 'ABC' }).expect(400);
+        await patch(id, { gradeValue: '9' }).expect(400);
+        await patch(id, { gradingCompany: null }).expect(200);
+        await patch(id, { certNumber: 'ABC' }).expect(400);
+      });
+    });
+
     it('PATCH rejects certNumber without gradingCompany with 400', async () => {
       const seeded = await prisma.product.findFirstOrThrow();
       await request(app.getHttpServer())

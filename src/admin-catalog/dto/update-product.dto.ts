@@ -25,7 +25,6 @@ import {
   CERT_NUMBER_REGEX,
   GradingCompany,
 } from '../../catalog/grading-company.js';
-import { RequiresGradedCompany } from './requires-graded-company.validator.js';
 
 /**
  * Story 8.2 (FR-22). Body of `PATCH /api/v1/admin/products/:id` — plain
@@ -131,38 +130,37 @@ export class UpdateProductDto {
 
   @ApiPropertyOptional({
     example: '2026-12-01T00:00:00.000Z',
-    description: 'Expected release date (informational only).',
+    description: 'Expected release date (informational only). null clears it.',
   })
   @IsOptional()
   @IsDateString()
-  releaseDate?: string;
+  releaseDate?: string | null;
 
   @ApiPropertyOptional({
     enum: GradingCompany,
     enumName: 'GradingCompany',
-    description: 'Grading house (PSA|BGS|CGC|RAW).',
+    description:
+      'Grading house (PSA|BGS|CGC|RAW). null or RAW also clears gradeValue/certNumber. gradeValue/certNumber are validated against the resulting company (stored + body) by the service.',
   })
   @IsOptional()
   @IsIn(Object.values(GradingCompany))
-  gradingCompany?: GradingCompany;
+  gradingCompany?: GradingCompany | null;
 
   @ApiPropertyOptional({ example: '9.5', maxLength: 20 })
   @IsOptional()
-  @RequiresGradedCompany()
   @IsString()
   @IsNotEmpty()
   @MaxLength(20)
-  gradeValue?: string;
+  gradeValue?: string | null;
 
   @ApiPropertyOptional({
     example: '12345678',
     description: 'Alphanumeric certification number, max 50 chars.',
   })
   @IsOptional()
-  @RequiresGradedCompany()
   @IsString()
   @Matches(CERT_NUMBER_REGEX, {
     message: 'certNumber must be alphanumeric (1-50 chars)',
   })
-  certNumber?: string;
+  certNumber?: string | null;
 }

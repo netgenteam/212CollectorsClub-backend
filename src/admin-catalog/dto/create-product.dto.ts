@@ -118,6 +118,7 @@ export class CreateProductDto {
   })
   @IsUUID()
   categoryId: string;
+
   @ApiPropertyOptional({
     description: 'Preorder flag (default false).',
   })
