@@ -68,6 +68,12 @@ interface SeedProduct {
   stock: number;
   categorySlug: string;
   images: SeedImage[];
+  // Story 11.1 (FR-35): optional collectibles fields.
+  isPreorder?: boolean;
+  releaseDate?: Date;
+  gradingCompany?: 'PSA' | 'BGS' | 'CGC' | 'RAW';
+  gradeValue?: string;
+  certNumber?: string;
 }
 
 const categories: SeedCategory[] = [
@@ -370,6 +376,142 @@ const products: SeedProduct[] = [
       },
     ],
   },
+  // Story 11.1 (FR-35): collectibles seed — new franchises, accessory,
+  // preorder and graded slabs. Fixed ids keep the upsert idempotent.
+  {
+    id: 'd5b07a82-c52a-4330-b1ea-32f8f87972a1',
+    name: 'Topps Chrome Baseball - Caja Hobby',
+    slug: 'topps-chrome-baseball-hobby-box',
+    description:
+      'Caja hobby de Topps Chrome Baseball con cartas autografiadas y refractores.',
+    franchise: Franchise.TOPPS,
+    productType: ProductType.BOOSTER_BOX,
+    rarity: Rarity.RARE,
+    priceUsd: '149.99',
+    stock: 15,
+    categorySlug: 'sobres-y-cajas',
+    images: [
+      {
+        id: '1510169d-08aa-42ac-a0b2-eb9b5f9405b3',
+        url: 'https://picsum.photos/seed/topps-chrome-baseball-hobby-box-1/600/800',
+        altText: 'Topps Chrome Baseball - Caja Hobby',
+        sortOrder: 0,
+      },
+    ],
+  },
+  {
+    id: '05b791d2-d315-46f8-8e55-7d37ccec9aa4',
+    name: 'Naruto - Sobre Kayou',
+    slug: 'naruto-kayou-booster-pack',
+    description:
+      'Sobre de cartas coleccionables de Naruto Shippuden.',
+    franchise: Franchise.NARUTO,
+    productType: ProductType.BOOSTER_PACK,
+    rarity: Rarity.COMMON,
+    priceUsd: '3.99',
+    stock: 60,
+    categorySlug: 'sobres-y-cajas',
+    images: [
+      {
+        id: '0a792b06-0bd1-406f-8bf7-9a022ce6d5f3',
+        url: 'https://picsum.photos/seed/naruto-kayou-booster-pack-1/600/800',
+        altText: 'Naruto - Sobre Kayou',
+        sortOrder: 0,
+      },
+    ],
+  },
+  {
+    id: 'd3361ec8-a210-4765-a29b-c8bee4b389d4',
+    name: 'Ultra PRO - Deck Box Premium',
+    slug: 'ultra-pro-deck-box-premium',
+    description:
+      'Caja rigida para mazos con cierre magnetico, ideal para proteger tus cartas.',
+    franchise: Franchise.POKEMON,
+    productType: ProductType.ACCESSORY,
+    rarity: Rarity.COMMON,
+    priceUsd: '12.99',
+    stock: 40,
+    categorySlug: 'ediciones-especiales',
+    images: [
+      {
+        id: 'e5699cb7-ab5f-4fec-ade7-110c2e7b18ce',
+        url: 'https://picsum.photos/seed/ultra-pro-deck-box-premium-1/600/800',
+        altText: 'Ultra PRO - Deck Box Premium',
+        sortOrder: 0,
+      },
+    ],
+  },
+  {
+    id: '0ab82a2e-aa7c-4d99-8ac8-05efe41a4f74',
+    name: 'Pokemon - Prismatic Evolutions Elite Trainer Box (Preventa)',
+    slug: 'pokemon-prismatic-evolutions-preorder',
+    description:
+      'Preventa de la Elite Trainer Box de Prismatic Evolutions. Envio a partir de la fecha de lanzamiento.',
+    franchise: Franchise.POKEMON,
+    productType: ProductType.COLLECTOR_TIN,
+    rarity: Rarity.RARE,
+    priceUsd: '59.99',
+    stock: 100,
+    categorySlug: 'ediciones-especiales',
+    isPreorder: true,
+    releaseDate: new Date('2027-01-15T00:00:00.000Z'),
+    images: [
+      {
+        id: '093bb075-9fb3-4d2b-950e-176becf1e63b',
+        url: 'https://picsum.photos/seed/pokemon-prismatic-evolutions-preorder-1/600/800',
+        altText: 'Pokemon - Prismatic Evolutions Elite Trainer Box (Preventa)',
+        sortOrder: 0,
+      },
+    ],
+  },
+  {
+    id: '7da6351f-64eb-4e57-a179-9c5e51ff3a7b',
+    name: 'Charizard Base Set - PSA 10',
+    slug: 'psa-10-charizard-base-set-slab',
+    description:
+      'Charizard del Base Set graduado PSA 10 Gem Mint, en slab sellado.',
+    franchise: Franchise.POKEMON,
+    productType: ProductType.SINGLE_CARD,
+    rarity: Rarity.ULTRA_RARE,
+    priceUsd: '4999.00',
+    stock: 1,
+    categorySlug: 'cartas-sueltas',
+    gradingCompany: 'PSA',
+    gradeValue: '10',
+    certNumber: '82451937',
+    images: [
+      {
+        id: 'c2024dd2-0985-415b-b78c-7d9469631429',
+        url: 'https://picsum.photos/seed/psa-10-charizard-base-set-slab-1/600/800',
+        altText: 'Charizard Base Set - PSA 10',
+        sortOrder: 0,
+      },
+    ],
+  },
+  {
+    id: '2c8171c4-2ff8-4296-a841-64034be43d2f',
+    name: 'Pikachu Promo - BGS 9.5',
+    slug: 'bgs-9-5-pikachu-promo-slab',
+    description:
+      'Pikachu promo graduado BGS 9.5 Gem Mint, en slab sellado.',
+    franchise: Franchise.POKEMON,
+    productType: ProductType.SINGLE_CARD,
+    rarity: Rarity.PROMO,
+    priceUsd: '899.00',
+    stock: 1,
+    categorySlug: 'cartas-sueltas',
+    gradingCompany: 'BGS',
+    gradeValue: '9.5',
+    certNumber: '0012345678',
+    images: [
+      {
+        id: 'e10b608a-d5bc-4dec-b2b8-1653d46b7230',
+        url: 'https://picsum.photos/seed/bgs-9-5-pikachu-promo-slab-1/600/800',
+        altText: 'Pikachu Promo - BGS 9.5',
+        sortOrder: 0,
+      },
+    ],
+  },
 ];
 
 /**
@@ -602,6 +744,11 @@ async function main(): Promise<void> {
       priceUsd: product.priceUsd,
       stock: product.stock,
       categoryId,
+      isPreorder: product.isPreorder ?? false,
+      releaseDate: product.releaseDate ?? null,
+      gradingCompany: product.gradingCompany ?? null,
+      gradeValue: product.gradeValue ?? null,
+      certNumber: product.certNumber ?? null,
     };
 
     await prisma.product.upsert({

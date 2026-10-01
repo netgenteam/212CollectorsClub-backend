@@ -53,6 +53,11 @@ function buildProductRow(overrides: Record<string, unknown> = {}) {
     stock: 25,
     heldQty: 0,
     isActive: true,
+    isPreorder: false,
+    releaseDate: null,
+    gradingCompany: null,
+    gradeValue: null,
+    certNumber: null,
     categoryId: CATEGORY.id,
     category: CATEGORY,
     images: [
@@ -178,7 +183,62 @@ describe('AdminProductsService', () => {
       expect(result.isActive).toBe(true);
       expect(result.priceUsd).toBe(79.99);
       expect(result.images).toHaveLength(1);
+      expect(result.isPreorder).toBe(false);
+      expect(result.releaseDate).toBeNull();
+      expect(result.gradingCompany).toBeNull();
       expect(unlinkMock).not.toHaveBeenCalled();
+    });
+
+    it('persists the optional preorder/grading fields and returns them in the admin DTO', async () => {
+      const file = buildFile();
+      prisma.product.create.mockResolvedValue(buildProductRow());
+      prisma.product.findUnique.mockResolvedValue(
+        buildProductRow({
+          isPreorder: true,
+          releaseDate: new Date('2027-01-15T00:00:00.000Z'),
+          gradingCompany: 'PSA',
+          gradeValue: '10',
+          certNumber: 'AB123',
+        }),
+      );
+
+      const result = await service.create(
+        {
+          ...CREATE_DTO,
+          isPreorder: true,
+          releaseDate: '2027-01-15T00:00:00.000Z',
+          gradingCompany: 'PSA',
+          gradeValue: '10',
+          certNumber: 'AB123',
+        },
+        [file],
+      );
+
+      expect(prisma.product.create).toHaveBeenCalledWith({
+        data: {
+          name: CREATE_DTO.name,
+          slug: CREATE_DTO.slug,
+          description: CREATE_DTO.description,
+          franchise: CREATE_DTO.franchise,
+          productType: CREATE_DTO.productType,
+          rarity: CREATE_DTO.rarity,
+          priceUsd: CREATE_DTO.priceUsd,
+          stock: CREATE_DTO.stock,
+          categoryId: CREATE_DTO.categoryId,
+          isPreorder: true,
+          releaseDate: new Date('2027-01-15T00:00:00.000Z'),
+          gradingCompany: 'PSA',
+          gradeValue: '10',
+          certNumber: 'AB123',
+        },
+      });
+      expect(result).toMatchObject({
+        isPreorder: true,
+        releaseDate: '2027-01-15T00:00:00.000Z',
+        gradingCompany: 'PSA',
+        gradeValue: '10',
+        certNumber: 'AB123',
+      });
     });
 
     it('translates a P2002 (duplicate slug) into 409 PRODUCT_SLUG_TAKEN and cleans up the now-orphaned uploaded file(s)', async () => {

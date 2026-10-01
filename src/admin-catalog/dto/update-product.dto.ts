@@ -1,8 +1,10 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsBoolean,
+  IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsNotEmpty,
   IsNumber,
@@ -19,6 +21,11 @@ import {
   ProductType,
   Rarity,
 } from '../../generated/prisma/enums.js';
+import {
+  CERT_NUMBER_REGEX,
+  GradingCompany,
+} from '../../catalog/grading-company.js';
+import { RequiresGradedCompany } from './requires-graded-company.validator.js';
 
 /**
  * Story 8.2 (FR-22). Body of `PATCH /api/v1/admin/products/:id` — plain
@@ -62,17 +69,17 @@ export class UpdateProductDto {
   @MaxLength(5000)
   description?: string;
 
-  @ApiPropertyOptional({ enum: Franchise })
+  @ApiPropertyOptional({ enum: Franchise, enumName: 'Franchise' })
   @IsOptional()
   @IsEnum(Franchise)
   franchise?: Franchise;
 
-  @ApiPropertyOptional({ enum: ProductType })
+  @ApiPropertyOptional({ enum: ProductType, enumName: 'ProductType' })
   @IsOptional()
   @IsEnum(ProductType)
   productType?: ProductType;
 
-  @ApiPropertyOptional({ enum: Rarity })
+  @ApiPropertyOptional({ enum: Rarity, enumName: 'Rarity' })
   @IsOptional()
   @IsEnum(Rarity)
   rarity?: Rarity;
@@ -112,4 +119,50 @@ export class UpdateProductDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+  @ApiPropertyOptional({
+    description: 'Preorder flag (default false).',
+  })
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    value === 'true' ? true : value === 'false' ? false : value,
+  )
+  @IsBoolean()
+  isPreorder?: boolean;
+
+  @ApiPropertyOptional({
+    example: '2026-12-01T00:00:00.000Z',
+    description: 'Expected release date (informational only).',
+  })
+  @IsOptional()
+  @IsDateString()
+  releaseDate?: string;
+
+  @ApiPropertyOptional({
+    enum: GradingCompany,
+    enumName: 'GradingCompany',
+    description: 'Grading house (PSA|BGS|CGC|RAW).',
+  })
+  @IsOptional()
+  @IsIn(Object.values(GradingCompany))
+  gradingCompany?: GradingCompany;
+
+  @ApiPropertyOptional({ example: '9.5', maxLength: 20 })
+  @IsOptional()
+  @RequiresGradedCompany()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(20)
+  gradeValue?: string;
+
+  @ApiPropertyOptional({
+    example: '12345678',
+    description: 'Alphanumeric certification number, max 50 chars.',
+  })
+  @IsOptional()
+  @RequiresGradedCompany()
+  @IsString()
+  @Matches(CERT_NUMBER_REGEX, {
+    message: 'certNumber must be alphanumeric (1-50 chars)',
+  })
+  certNumber?: string;
 }

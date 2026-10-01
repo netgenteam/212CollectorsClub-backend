@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { GradingCompany } from '../grading-company.js';
 import {
   Franchise,
   ProductType,
@@ -53,6 +54,22 @@ export class ProductDetailCategoryDto {
   slug: string;
 }
 
+/** Story 11.1 (FR-35): grading slab info, nested only in the DTO mapper. */
+export class GradingDto {
+  @ApiProperty({
+    enum: GradingCompany,
+    enumName: 'GradingCompany',
+    example: 'PSA',
+  })
+  company: GradingCompany;
+
+  @ApiProperty({ nullable: true, type: String, example: '10' })
+  grade: string | null;
+
+  @ApiProperty({ nullable: true, type: String, example: '12345678' })
+  certNumber: string | null;
+}
+
 /**
  * Story 2.3 (FR-7): the response shape of `GET /api/v1/products/:id`. Unlike
  * `ProductListItemDto` (Story 2.2), this carries the full `description`,
@@ -102,14 +119,27 @@ export class ProductDetailDto {
   })
   availableStock: number;
 
-  @ApiProperty({ enum: Franchise })
+  @ApiProperty({ enum: Franchise, enumName: 'Franchise' })
   franchise: Franchise;
 
-  @ApiProperty({ enum: ProductType })
+  @ApiProperty({ enum: ProductType, enumName: 'ProductType' })
   productType: ProductType;
 
-  @ApiProperty({ enum: Rarity })
+  @ApiProperty({ enum: Rarity, enumName: 'Rarity' })
   rarity: Rarity;
+
+  @ApiProperty({ example: false })
+  isPreorder: boolean;
+
+  @ApiProperty({ nullable: true, type: String, example: null })
+  releaseDate: string | null;
+
+  @ApiProperty({
+    type: GradingDto,
+    nullable: true,
+    description: 'Null when the Product has no gradingCompany.',
+  })
+  grading: GradingDto | null;
 
   @ApiProperty({ type: ProductDetailCategoryDto })
   category: ProductDetailCategoryDto;

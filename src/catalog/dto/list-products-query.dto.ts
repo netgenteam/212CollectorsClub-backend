@@ -70,6 +70,7 @@ export class ListProductsQueryDto {
 
   @ApiPropertyOptional({
     enum: Franchise,
+    enumName: 'Franchise',
     description: 'Filter by Franchise (AD-2 enum).',
   })
   @IsOptional()
@@ -78,6 +79,7 @@ export class ListProductsQueryDto {
 
   @ApiPropertyOptional({
     enum: ProductType,
+    enumName: 'ProductType',
     description: 'Filter by Product Type (AD-2 enum).',
   })
   @IsOptional()
@@ -86,6 +88,7 @@ export class ListProductsQueryDto {
 
   @ApiPropertyOptional({
     enum: Rarity,
+    enumName: 'Rarity',
     description: 'Filter by Rarity (AD-2 enum).',
   })
   @IsOptional()

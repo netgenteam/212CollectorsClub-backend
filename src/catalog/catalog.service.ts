@@ -12,7 +12,11 @@ import {
   PaginatedProductsResponseDto,
   PaginationMetaDto,
 } from './dto/paginated-products-response.dto.js';
-import { ProductListItemDto } from './dto/product-list-item.dto.js';
+import type { GradingCompany } from './grading-company.js';
+import {
+  ProductListItemDto,
+  ProductPrimaryImageDto,
+} from './dto/product-list-item.dto.js';
 import { ProductDetailDto } from './dto/product-detail.dto.js';
 
 // Raw shape of one row from the hand-written SQL in `listProducts` below —
@@ -26,6 +30,9 @@ interface ProductSearchRow {
   franchise: Franchise;
   productType: ProductType;
   rarity: Rarity;
+  slug: string;
+  isPreorder: boolean;
+  releaseDate: Date | null;
 }
 
 interface CountRow {
@@ -118,7 +125,7 @@ export class CatalogService {
     const [rows, countRows] = await Promise.all([
       this.prisma.$queryRaw<ProductSearchRow[]>(
         Prisma.sql`
-          SELECT id, name, "priceUsd", stock, "heldQty", franchise, "productType", rarity
+          SELECT id, name, slug, "isPreorder", "releaseDate", "priceUsd", stock, "heldQty", franchise, "productType", rarity
           FROM "Products"
           ${whereSql}
           ${orderBySql}
@@ -131,45 +138,7 @@ export class CatalogService {
     ]);
 
     const total = Number(countRows[0]?.count ?? 0);
-    const productIds = rows.map((row) => row.id);
-
-    // Primary image = first ProductImage per Product ordered by sortOrder —
-    // fetched as one batched query (not N+1) and reduced to a first-wins
-    // map in JS, since Prisma has no native "first row per group" query.
-    const images = productIds.length
-      ? await this.prisma.productImage.findMany({
-          where: { productId: { in: productIds } },
-          orderBy: { sortOrder: 'asc' },
-          select: { productId: true, url: true, altText: true },
-        })
-      : [];
-    const primaryImageByProductId = new Map<
-      string,
-      { url: string; altText: string | null }
-    >();
-    for (const image of images) {
-      if (!primaryImageByProductId.has(image.productId)) {
-        primaryImageByProductId.set(image.productId, {
-          url: image.url,
-          altText: image.altText,
-        });
-      }
-    }
-
-    const data: ProductListItemDto[] = rows.map((row) => {
-      const availableStock = Math.max(row.stock - row.heldQty, 0);
-      return {
-        id: row.id,
-        name: row.name,
-        price: Number(row.priceUsd),
-        inStock: availableStock > 0,
-        availableStock,
-        franchise: row.franchise,
-        productType: row.productType,
-        rarity: row.rarity,
-        primaryImage: primaryImageByProductId.get(row.id) ?? null,
-      };
-    });
+    const data = await this.toListItems(rows);
 
     const meta: PaginationMetaDto = {
       page,
@@ -179,6 +148,60 @@ export class CatalogService {
     };
 
     return { data, meta };
+  }
+
+  /**
+   * Story 11.1 (AD-19): maps raw list rows to `ProductListItemDto`, batching
+   * the primary-image lookup into one query (no N+1). Reused by later
+   * stories (related, wishlist).
+   */
+  async toListItems(rows: ProductSearchRow[]): Promise<ProductListItemDto[]> {
+    const productIds = rows.map((row) => row.id);
+
+    // Primary image = first ProductImage per Product ordered by sortOrder —
+    // one batched query reduced to a first-wins map in JS.
+    const images = productIds.length
+      ? await this.prisma.productImage.findMany({
+          where: { productId: { in: productIds } },
+          orderBy: { sortOrder: 'asc' },
+          select: {
+            id: true,
+            productId: true,
+            url: true,
+            altText: true,
+            sortOrder: true,
+          },
+        })
+      : [];
+    const primaryImageByProductId = new Map<string, ProductPrimaryImageDto>();
+    for (const image of images) {
+      if (!primaryImageByProductId.has(image.productId)) {
+        primaryImageByProductId.set(image.productId, {
+          id: image.id,
+          url: image.url,
+          altText: image.altText,
+          sortOrder: image.sortOrder,
+        });
+      }
+    }
+
+    return rows.map((row) => {
+      const availableStock = Math.max(row.stock - row.heldQty, 0);
+      return {
+        id: row.id,
+        name: row.name,
+        slug: row.slug,
+        isPreorder: row.isPreorder,
+        releaseDate: row.releaseDate ? row.releaseDate.toISOString() : null,
+        price: Number(row.priceUsd),
+        inStock: availableStock > 0,
+        availableStock,
+        franchise: row.franchise,
+        productType: row.productType,
+        rarity: row.rarity,
+        primaryImage: primaryImageByProductId.get(row.id) ?? null,
+      };
+    });
   }
 
   /**
@@ -229,6 +252,15 @@ export class CatalogService {
       rarity: product.rarity,
       category: product.category,
       images: product.images,
+      isPreorder: product.isPreorder,
+      releaseDate: product.releaseDate?.toISOString() ?? null,
+      grading: product.gradingCompany
+        ? {
+            company: product.gradingCompany as GradingCompany,
+            grade: product.gradeValue,
+            certNumber: product.certNumber,
+          }
+        : null,
     };
   }
 }

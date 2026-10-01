@@ -84,6 +84,9 @@ describe('CatalogService', () => {
           {
             id: 'f65915f5-2931-4e50-af95-630b1fd7b950',
             name: 'Charizard VMAX',
+            slug: 'charizard-vmax',
+            isPreorder: true,
+            releaseDate: new Date('2027-01-15T00:00:00.000Z'),
             priceUsd: '89.99',
             stock: 12,
             heldQty: 0,
@@ -95,9 +98,11 @@ describe('CatalogService', () => {
         .mockResolvedValueOnce([{ count: '1' }]);
       prisma.productImage.findMany.mockResolvedValue([
         {
+          id: 'img-1',
           productId: 'f65915f5-2931-4e50-af95-630b1fd7b950',
           url: 'https://picsum.photos/seed/charizard-vmax-1/600/800',
           altText: 'Charizard VMAX - frente',
+          sortOrder: 0,
         },
       ]);
 
@@ -108,6 +113,9 @@ describe('CatalogService', () => {
           {
             id: 'f65915f5-2931-4e50-af95-630b1fd7b950',
             name: 'Charizard VMAX',
+            slug: 'charizard-vmax',
+            isPreorder: true,
+            releaseDate: '2027-01-15T00:00:00.000Z',
             price: 89.99,
             inStock: true,
             availableStock: 12,
@@ -115,6 +123,8 @@ describe('CatalogService', () => {
             productType: 'SINGLE_CARD',
             rarity: 'ULTRA_RARE',
             primaryImage: {
+              id: 'img-1',
+              sortOrder: 0,
               url: 'https://picsum.photos/seed/charizard-vmax-1/600/800',
               altText: 'Charizard VMAX - frente',
             },
@@ -125,7 +135,13 @@ describe('CatalogService', () => {
       expect(prisma.productImage.findMany).toHaveBeenCalledWith({
         where: { productId: { in: ['f65915f5-2931-4e50-af95-630b1fd7b950'] } },
         orderBy: { sortOrder: 'asc' },
-        select: { productId: true, url: true, altText: true },
+        select: {
+          id: true,
+          productId: true,
+          url: true,
+          altText: true,
+          sortOrder: true,
+        },
       });
     });
 
@@ -225,6 +241,11 @@ describe('CatalogService', () => {
         priceUsd: '89.99',
         stock: 12,
         heldQty: 0,
+        isPreorder: false,
+        releaseDate: null,
+        gradingCompany: null,
+        gradeValue: null,
+        certNumber: null,
         category: {
           id: 'dd848f24-aac0-4346-ae25-b672bb0d7e14',
           name: 'Cartas Sueltas',
@@ -278,6 +299,30 @@ describe('CatalogService', () => {
         rarity: 'ULTRA_RARE',
         category: product.category,
         images: product.images,
+        isPreorder: false,
+        releaseDate: null,
+        grading: null,
+      });
+    });
+
+    it('nests flat grading columns into grading {company, grade, certNumber}, and serializes isPreorder/releaseDate', async () => {
+      const product = buildProduct({
+        isPreorder: true,
+        releaseDate: new Date('2027-01-15T00:00:00.000Z'),
+        gradingCompany: 'PSA',
+        gradeValue: '10',
+        certNumber: '82451937',
+      });
+      prisma.product.findUnique.mockResolvedValue(product);
+
+      const result = await service.getProductDetail(product.id);
+
+      expect(result.isPreorder).toBe(true);
+      expect(result.releaseDate).toBe('2027-01-15T00:00:00.000Z');
+      expect(result.grading).toEqual({
+        company: 'PSA',
+        grade: '10',
+        certNumber: '82451937',
       });
     });
 

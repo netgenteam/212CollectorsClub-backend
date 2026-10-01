@@ -1,10 +1,14 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform, Type } from 'class-transformer';
 import {
+  IsBoolean,
+  IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsNotEmpty,
   IsNumber,
+  IsOptional,
   IsString,
   IsUUID,
   Matches,
@@ -17,6 +21,11 @@ import {
   ProductType,
   Rarity,
 } from '../../generated/prisma/enums.js';
+import {
+  CERT_NUMBER_REGEX,
+  GradingCompany,
+} from '../../catalog/grading-company.js';
+import { RequiresGradedCompany } from './requires-graded-company.validator.js';
 
 /**
  * Story 8.2 (FR-22, NFR-3, NFR-4; AD-2). The text fields of
@@ -70,15 +79,15 @@ export class CreateProductDto {
   @MaxLength(5000)
   description: string;
 
-  @ApiProperty({ enum: Franchise })
+  @ApiProperty({ enum: Franchise, enumName: 'Franchise' })
   @IsEnum(Franchise)
   franchise: Franchise;
 
-  @ApiProperty({ enum: ProductType })
+  @ApiProperty({ enum: ProductType, enumName: 'ProductType' })
   @IsEnum(ProductType)
   productType: ProductType;
 
-  @ApiProperty({ enum: Rarity })
+  @ApiProperty({ enum: Rarity, enumName: 'Rarity' })
   @IsEnum(Rarity)
   rarity: Rarity;
 
@@ -109,4 +118,50 @@ export class CreateProductDto {
   })
   @IsUUID()
   categoryId: string;
+  @ApiPropertyOptional({
+    description: 'Preorder flag (default false).',
+  })
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    value === 'true' ? true : value === 'false' ? false : value,
+  )
+  @IsBoolean()
+  isPreorder?: boolean;
+
+  @ApiPropertyOptional({
+    example: '2026-12-01T00:00:00.000Z',
+    description: 'Expected release date (informational only).',
+  })
+  @IsOptional()
+  @IsDateString()
+  releaseDate?: string;
+
+  @ApiPropertyOptional({
+    enum: GradingCompany,
+    enumName: 'GradingCompany',
+    description: 'Grading house (PSA|BGS|CGC|RAW).',
+  })
+  @IsOptional()
+  @IsIn(Object.values(GradingCompany))
+  gradingCompany?: GradingCompany;
+
+  @ApiPropertyOptional({ example: '9.5', maxLength: 20 })
+  @IsOptional()
+  @RequiresGradedCompany()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(20)
+  gradeValue?: string;
+
+  @ApiPropertyOptional({
+    example: '12345678',
+    description: 'Alphanumeric certification number, max 50 chars.',
+  })
+  @IsOptional()
+  @RequiresGradedCompany()
+  @IsString()
+  @Matches(CERT_NUMBER_REGEX, {
+    message: 'certNumber must be alphanumeric (1-50 chars)',
+  })
+  certNumber?: string;
 }

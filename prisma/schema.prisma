@@ -29,6 +29,8 @@ enum Franchise {
   MAGIC_THE_GATHERING
   YU_GI_OH
   DRAGON_BALL_SUPER
+  TOPPS
+  NARUTO
 }
 
 /// The physical/commercial form of a Product (PRD §3 Glossary — e.g.
@@ -39,6 +41,7 @@ enum ProductType {
   BOOSTER_BOX
   STARTER_DECK
   COLLECTOR_TIN
+  ACCESSORY
 }
 
 /// A Product's collectible rarity tier (PRD §3 Glossary — e.g. Common, Rare,
@@ -96,6 +99,14 @@ model Product {
   /// that service's own doc comment for the full delete-vs-deactivate
   /// policy writeup).
   isActive    Boolean     @default(true)
+  /// Story 11.1 (FR-35, AD-18): preorder flag; `releaseDate` is informational only.
+  isPreorder  Boolean     @default(false)
+  releaseDate DateTime?   @db.Timestamptz
+  /// Story 11.1 (AD-18): PSA|BGS|CGC|RAW, validated at DTO level (varchar, not a
+  /// Prisma enum, so new grading houses need no `ALTER TYPE`).
+  gradingCompany String?  @db.VarChar(10)
+  gradeValue     String?  @db.VarChar(20)
+  certNumber     String?  @db.VarChar(50)
 
   categoryId String   @db.Uuid
   category   Category @relation(fields: [categoryId], references: [id])

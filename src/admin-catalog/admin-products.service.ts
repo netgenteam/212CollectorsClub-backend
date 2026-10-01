@@ -9,6 +9,7 @@ import type {
   Category,
 } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import type { GradingCompany } from '../catalog/grading-company.js';
 import { CreateProductDto } from './dto/create-product.dto.js';
 import { UpdateProductDto } from './dto/update-product.dto.js';
 import { AdjustProductStockDto } from './dto/adjust-product-stock.dto.js';
@@ -141,6 +142,13 @@ export class AdminProductsService {
             priceUsd: dto.priceUsd,
             stock: dto.stock,
             categoryId: dto.categoryId,
+            isPreorder: dto.isPreorder,
+            releaseDate: dto.releaseDate
+              ? new Date(dto.releaseDate)
+              : undefined,
+            gradingCompany: dto.gradingCompany,
+            gradeValue: dto.gradeValue,
+            certNumber: dto.certNumber,
           },
         });
         await tx.productImage.createMany({
@@ -208,6 +216,13 @@ export class AdminProductsService {
     if (dto.stock !== undefined) data.stock = dto.stock;
     if (dto.categoryId !== undefined) data.categoryId = dto.categoryId;
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
+    if (dto.isPreorder !== undefined) data.isPreorder = dto.isPreorder;
+    if (dto.releaseDate !== undefined)
+      data.releaseDate = new Date(dto.releaseDate);
+    if (dto.gradingCompany !== undefined)
+      data.gradingCompany = dto.gradingCompany;
+    if (dto.gradeValue !== undefined) data.gradeValue = dto.gradeValue;
+    if (dto.certNumber !== undefined) data.certNumber = dto.certNumber;
 
     try {
       await this.prisma.product.update({ where: { id }, data });
@@ -404,6 +419,11 @@ export class AdminProductsService {
       stock: product.stock,
       heldQty: product.heldQty,
       isActive: product.isActive,
+      isPreorder: product.isPreorder,
+      releaseDate: product.releaseDate?.toISOString() ?? null,
+      gradingCompany: product.gradingCompany as GradingCompany | null,
+      gradeValue: product.gradeValue,
+      certNumber: product.certNumber,
       category: {
         id: product.category.id,
         name: product.category.name,

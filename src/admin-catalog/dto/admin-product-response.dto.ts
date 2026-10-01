@@ -1,4 +1,5 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { GradingCompany } from '../../catalog/grading-company.js';
 import {
   Franchise,
   ProductType,
@@ -56,13 +57,13 @@ export class AdminProductResponseDto {
   @ApiProperty({ example: 'Carta individual Blastoise VMAX.' })
   description: string;
 
-  @ApiProperty({ enum: Franchise })
+  @ApiProperty({ enum: Franchise, enumName: 'Franchise' })
   franchise: Franchise;
 
-  @ApiProperty({ enum: ProductType })
+  @ApiProperty({ enum: ProductType, enumName: 'ProductType' })
   productType: ProductType;
 
-  @ApiProperty({ enum: Rarity })
+  @ApiProperty({ enum: Rarity, enumName: 'Rarity' })
   rarity: Rarity;
 
   @ApiProperty({ example: 79.99, description: 'Product.priceUsd.' })
@@ -83,6 +84,25 @@ export class AdminProductResponseDto {
       'false = deactivated: hidden from GET /api/v1/products and /products/:id (public), still visible/editable here.',
   })
   isActive: boolean;
+
+  @ApiProperty({ example: false, description: 'Preorder flag (Story 11.1).' })
+  isPreorder: boolean;
+
+  @ApiProperty({ nullable: true, example: null, type: String })
+  releaseDate: string | null;
+
+  @ApiPropertyOptional({
+    enum: GradingCompany,
+    enumName: 'GradingCompany',
+    nullable: true,
+  })
+  gradingCompany: GradingCompany | null;
+
+  @ApiProperty({ nullable: true, example: null, type: String })
+  gradeValue: string | null;
+
+  @ApiProperty({ nullable: true, example: null, type: String })
+  certNumber: string | null;
 
   @ApiProperty({ type: AdminProductCategoryDto })
   category: AdminProductCategoryDto;

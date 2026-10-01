@@ -8,6 +8,12 @@ import {
 // Mirrors CategoryResponseDto's pattern: a class (not an interface) so
 // @nestjs/swagger can read @ApiProperty metadata at runtime.
 export class ProductPrimaryImageDto {
+  @ApiProperty({ format: 'uuid' })
+  id: string;
+
+  @ApiProperty({ example: 0, description: 'Display order among images.' })
+  sortOrder: number;
+
   @ApiProperty({
     example: 'https://picsum.photos/seed/charizard-vmax-1/600/800',
     description: 'Public URL of the primary image.',
@@ -41,6 +47,20 @@ export class ProductListItemDto {
   @ApiProperty({ example: 'Charizard VMAX' })
   name: string;
 
+  @ApiProperty({ example: 'charizard-vmax' })
+  slug: string;
+
+  @ApiProperty({ example: false })
+  isPreorder: boolean;
+
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    example: '2026-12-01T00:00:00.000Z',
+    description: 'Expected release date (ISO 8601) or null.',
+  })
+  releaseDate: string | null;
+
   @ApiProperty({
     example: 89.99,
     description: 'Price in USD (Product.priceUsd).',
@@ -59,13 +79,13 @@ export class ProductListItemDto {
   })
   availableStock: number;
 
-  @ApiProperty({ enum: Franchise })
+  @ApiProperty({ enum: Franchise, enumName: 'Franchise' })
   franchise: Franchise;
 
-  @ApiProperty({ enum: ProductType })
+  @ApiProperty({ enum: ProductType, enumName: 'ProductType' })
   productType: ProductType;
 
-  @ApiProperty({ enum: Rarity })
+  @ApiProperty({ enum: Rarity, enumName: 'Rarity' })
   rarity: Rarity;
 
   @ApiPropertyOptional({
