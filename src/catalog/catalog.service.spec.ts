@@ -227,6 +227,80 @@ describe('CatalogService', () => {
     });
   });
 
+  describe('listProducts filters (Story 11.2)', () => {
+    function sqlOf(call: number): { sql: string; values: unknown[] } {
+      const arg = prisma.$queryRaw.mock.calls[call][0] as {
+        sql: string;
+        values: unknown[];
+      };
+      return { sql: arg.sql, values: arg.values };
+    }
+
+    beforeEach(() => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ count: '0' }]);
+      prisma.productImage.findMany.mockResolvedValue([]);
+    });
+
+    it('expands macroCategory SEALED into an ANY(...::ProductType[]) condition', async () => {
+      await service.listProducts(buildQuery({ macroCategory: 'SEALED' }));
+      const { sql, values } = sqlOf(0);
+      expect(sql).toContain('"productType" = ANY(');
+      expect(values).toContainEqual([
+        'BOOSTER_PACK',
+        'BOOSTER_BOX',
+        'STARTER_DECK',
+        'COLLECTOR_TIN',
+        'ACCESSORY',
+      ]);
+    });
+
+    it('maps SINGLES to SINGLE_CARD only', async () => {
+      await service.listProducts(buildQuery({ macroCategory: 'SINGLES' }));
+      expect(sqlOf(0).values).toContainEqual(['SINGLE_CARD']);
+    });
+
+    it('intersects productType[] with the macroCategory set', async () => {
+      await service.listProducts(
+        buildQuery({
+          macroCategory: 'SEALED',
+          productType: ['BOOSTER_BOX', 'SINGLE_CARD'] as never,
+        }),
+      );
+      expect(sqlOf(0).values).toContainEqual(['BOOSTER_BOX']);
+    });
+
+    it('uses a constant FALSE when the intersection is empty', async () => {
+      await service.listProducts(
+        buildQuery({
+          macroCategory: 'SEALED',
+          productType: ['SINGLE_CARD'] as never,
+        }),
+      );
+      expect(sqlOf(0).sql).toContain('FALSE');
+      expect(sqlOf(1).sql).toContain('FALSE');
+    });
+
+    it('adds preorder and in-stock conditions, shared by list and count', async () => {
+      await service.listProducts(
+        buildQuery({ onlyPreorder: true, onlyInStock: true }),
+      );
+      for (const call of [0, 1]) {
+        expect(sqlOf(call).sql).toContain('"isPreorder" = true');
+        expect(sqlOf(call).sql).toContain('(stock - "heldQty") > 0');
+      }
+    });
+
+    it('adds no condition when the booleans are false', async () => {
+      await service.listProducts(
+        buildQuery({ onlyPreorder: false, onlyInStock: false }),
+      );
+      expect(sqlOf(0).sql).not.toContain('"isPreorder" = true');
+      expect(sqlOf(0).sql).not.toContain('"heldQty") > 0');
+    });
+  });
+
   describe('getProductDetail', () => {
     function buildProduct(overrides: Record<string, unknown> = {}) {
       return {

@@ -1,6 +1,9 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
+  IsBoolean,
   IsEnum,
   IsInt,
   IsOptional,
@@ -15,6 +18,17 @@ import {
   ProductType,
   Rarity,
 } from '../../generated/prisma/enums.js';
+import { MacroCategory } from '../macro-category.js';
+
+export const MAX_PRODUCT_TYPES = 10;
+
+// Explicit string->boolean (no implicit conversion: 'false' must stay false).
+// Anything else is left untouched so `@IsBoolean` rejects it with a 400.
+const toBoolean = ({ value }: { value: unknown }): unknown => {
+  if (value === 'true' || value === true) return true;
+  if (value === 'false' || value === false) return false;
+  return value;
+};
 
 export const DEFAULT_PAGE = 1;
 export const DEFAULT_LIMIT = 20;
@@ -80,11 +94,46 @@ export class ListProductsQueryDto {
   @ApiPropertyOptional({
     enum: ProductType,
     enumName: 'ProductType',
-    description: 'Filter by Product Type (AD-2 enum).',
+    isArray: true,
+    maxItems: MAX_PRODUCT_TYPES,
+    description:
+      'Filter by one or more Product Types (AD-2 enum); repeat the param for several (max 10).',
   })
   @IsOptional()
-  @IsEnum(ProductType)
-  productType?: ProductType;
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? [value] : value,
+  )
+  @IsArray()
+  @ArrayMaxSize(MAX_PRODUCT_TYPES)
+  @IsEnum(ProductType, { each: true })
+  productType?: ProductType[];
+
+  @ApiPropertyOptional({
+    enum: MacroCategory,
+    enumName: 'MacroCategory',
+    description: 'SEALED (packs, boxes, decks, tins, accessories) or SINGLES.',
+  })
+  @IsOptional()
+  @IsEnum(MacroCategory)
+  macroCategory?: MacroCategory;
+
+  @ApiPropertyOptional({
+    type: Boolean,
+    description: 'Only products with stock - heldQty > 0.',
+  })
+  @IsOptional()
+  @Transform(toBoolean)
+  @IsBoolean()
+  onlyInStock?: boolean;
+
+  @ApiPropertyOptional({
+    type: Boolean,
+    description: 'Only preorder products (isPreorder = true).',
+  })
+  @IsOptional()
+  @Transform(toBoolean)
+  @IsBoolean()
+  onlyPreorder?: boolean;
 
   @ApiPropertyOptional({
     enum: Rarity,

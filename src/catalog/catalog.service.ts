@@ -12,6 +12,7 @@ import {
   PaginatedProductsResponseDto,
   PaginationMetaDto,
 } from './dto/paginated-products-response.dto.js';
+import { MACRO_CATEGORY_TYPES } from './macro-category.js';
 import type { GradingCompany } from './grading-company.js';
 import {
   ProductListItemDto,
@@ -100,10 +101,27 @@ export class CatalogService {
     if (query.franchise) {
       conditions.push(Prisma.sql`franchise = ${query.franchise}::"Franchise"`);
     }
-    if (query.productType) {
+    // AD-19: effective ProductType set = productType[] ∩ macroCategory set.
+    // An empty intersection becomes a constant FALSE (200, empty page).
+    let typeSet: ProductType[] | undefined = query.productType;
+    if (query.macroCategory) {
+      const macroTypes = MACRO_CATEGORY_TYPES[query.macroCategory];
+      typeSet = typeSet
+        ? typeSet.filter((type) => macroTypes.includes(type))
+        : macroTypes;
+    }
+    if (typeSet) {
       conditions.push(
-        Prisma.sql`"productType" = ${query.productType}::"ProductType"`,
+        typeSet.length > 0
+          ? Prisma.sql`"productType" = ANY(${typeSet}::"ProductType"[])`
+          : Prisma.sql`FALSE`,
       );
+    }
+    if (query.onlyPreorder === true) {
+      conditions.push(Prisma.sql`"isPreorder" = true`);
+    }
+    if (query.onlyInStock === true) {
+      conditions.push(Prisma.sql`(stock - "heldQty") > 0`);
     }
     if (query.rarity) {
       conditions.push(Prisma.sql`rarity = ${query.rarity}::"Rarity"`);
