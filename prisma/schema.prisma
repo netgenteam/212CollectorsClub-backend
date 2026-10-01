@@ -118,6 +118,7 @@ model Product {
   /// guest Cart. Read-only back-reference — CartService never traverses it,
   /// but Prisma requires the relation declared on both sides.
   cartItems        CartItem[]
+  wishlistItems    WishlistItem[]
   /// Story 6.1: every ContactInquiry that optionally referenced this
   /// Product. Read-only back-reference, same reasoning as `cartItems`
   /// above.
@@ -676,4 +677,31 @@ model LandingConfigEntry {
 
   @@unique([section, key])
   @@map("Landing_Config_Entries")
+}
+
+/// Anonymous wishlist (Story 11.5, FR-36, AD-22), identified by a signed
+/// `wishlistId` cookie. `expiresAt` is a 30-day sliding window, filtered on read.
+model Wishlist {
+  id        String   @id @default(uuid()) @db.Uuid
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  expiresAt DateTime
+
+  items WishlistItem[]
+
+  @@map("Wishlists")
+}
+
+/// One saved Product. Product FK cascades so the admin hard-delete (Story 8.2) is never blocked.
+model WishlistItem {
+  id         String   @id @default(uuid()) @db.Uuid
+  wishlistId String   @db.Uuid
+  wishlist   Wishlist @relation(fields: [wishlistId], references: [id], onDelete: Cascade)
+  productId  String   @db.Uuid
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([wishlistId, productId])
+  @@map("Wishlist_Items")
 }

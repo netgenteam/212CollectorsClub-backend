@@ -8,5 +8,6 @@ import { CatalogService } from './catalog.service.js';
 @Module({
   controllers: [CatalogController, ProductsController],
   providers: [CatalogService],
+  exports: [CatalogService],
 })
 export class CatalogModule {}

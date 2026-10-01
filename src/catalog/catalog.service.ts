@@ -217,6 +217,27 @@ export class CatalogService {
   }
 
   /**
+   * Story 11.5 (AD-19, AD-22): active products by id as `ProductListItemDto[]`,
+   * in the order of `ids` (unknown/inactive ids are omitted). Reuses
+   * `toListItems`, so the shape is identical to the catalog list.
+   */
+  async findListItemsByIds(ids: string[]): Promise<ProductListItemDto[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+    const rows = await this.prisma.$queryRaw<ProductSearchRow[]>(
+      Prisma.sql`
+        SELECT id, name, slug, "isPreorder", "releaseDate", "priceUsd", stock, "heldQty", franchise, "productType", rarity
+        FROM "Products"
+        WHERE "isActive" = true AND id = ANY(${ids}::uuid[])
+      `,
+    );
+    const position = new Map(ids.map((id, index) => [id, index]));
+    rows.sort((a, b) => (position.get(a.id) ?? 0) - (position.get(b.id) ?? 0));
+    return this.toListItems(rows);
+  }
+
+  /**
    * Story 11.1 (AD-19): maps raw list rows to `ProductListItemDto`, batching
    * the primary-image lookup into one query (no N+1). Reused by later
    * stories (related, wishlist).
