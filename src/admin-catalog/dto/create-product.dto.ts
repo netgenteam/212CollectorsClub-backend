@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsDateString,
   IsEnum,
@@ -15,7 +17,15 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
+import {
+  MARKET_REFERENCES_MAX,
+  MarketReferenceInputDto,
+  marketReferencesApiProperty,
+  TransformMarketReferences,
+} from './market-reference-input.dto.js';
+
 import {
   Franchise,
   ProductType,
@@ -165,4 +175,12 @@ export class CreateProductDto {
     message: 'certNumber must be alphanumeric (1-50 chars)',
   })
   certNumber?: string;
+
+  @marketReferencesApiProperty()
+  @IsOptional()
+  @TransformMarketReferences()
+  @IsArray()
+  @ArrayMaxSize(MARKET_REFERENCES_MAX)
+  @ValidateNested({ each: true })
+  marketReferences?: MarketReferenceInputDto[];
 }

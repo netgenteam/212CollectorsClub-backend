@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { MarketReferenceDto } from './market-reference.dto.js';
 import { GradingCompany } from '../grading-company.js';
 import {
   Franchise,
@@ -150,4 +151,12 @@ export class ProductDetailDto {
     description: 'Every ProductImage for this Product, ordered by sortOrder.',
   })
   images: ProductImageItemDto[];
+
+  @ApiProperty({
+    type: MarketReferenceDto,
+    isArray: true,
+    description:
+      'Stored references ordered by sortOrder plus a calculated PSA cert link (AD-21). Never null; [] when none.',
+  })
+  marketReferences: MarketReferenceDto[];
 }

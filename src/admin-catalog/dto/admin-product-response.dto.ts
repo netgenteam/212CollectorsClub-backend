@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { GradingCompany } from '../../catalog/grading-company.js';
 import {
   Franchise,
+  MarketProvider,
   ProductType,
   Rarity,
 } from '../../generated/prisma/enums.js';
@@ -22,6 +23,20 @@ export class AdminProductImageDto {
 
   @ApiProperty({ example: 0 })
   sortOrder: number;
+}
+
+export class AdminMarketReferenceDto {
+  @ApiProperty({ enum: MarketProvider, enumName: 'MarketProvider' })
+  provider: MarketProvider;
+
+  @ApiProperty()
+  label: string;
+
+  @ApiProperty()
+  url: string;
+
+  @ApiPropertyOptional({ nullable: true, type: Number })
+  suggestedPriceEur: number | null;
 }
 
 export class AdminProductCategoryDto {
@@ -109,6 +124,14 @@ export class AdminProductResponseDto {
 
   @ApiProperty({ type: AdminProductImageDto, isArray: true })
   images: AdminProductImageDto[];
+
+  @ApiProperty({
+    type: AdminMarketReferenceDto,
+    isArray: true,
+    description:
+      'STORED references only, ordered by sortOrder (the calculated PSA link appears only on the public detail).',
+  })
+  marketReferences: AdminMarketReferenceDto[];
 
   @ApiProperty()
   createdAt: string;

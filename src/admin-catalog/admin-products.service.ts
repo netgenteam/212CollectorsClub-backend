@@ -7,10 +7,12 @@ import type {
   Product,
   ProductImage,
   Category,
+  ProductMarketReference,
 } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { GradingCompany } from '../catalog/grading-company.js';
 import { CreateProductDto } from './dto/create-product.dto.js';
+import type { MarketReferenceInputDto } from './dto/market-reference-input.dto.js';
 import { UpdateProductDto } from './dto/update-product.dto.js';
 import { AdjustProductStockDto } from './dto/adjust-product-stock.dto.js';
 import {
@@ -27,12 +29,49 @@ import {
 type ProductWithRelations = Product & {
   category: Category;
   images: ProductImage[];
+  marketReferences: ProductMarketReference[];
 };
 
 const PRODUCT_INCLUDE = {
   category: true,
-  images: { orderBy: { sortOrder: 'asc' as const } },
-} as const;
+  images: { orderBy: { sortOrder: 'asc' } },
+  marketReferences: {
+    orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+  },
+} satisfies Prisma.ProductInclude;
+
+/** Story 11.4: duplicate (provider, url) pairs would violate the unique key. */
+function assertNoDuplicateMarketReferences(
+  refs: readonly MarketReferenceInputDto[],
+): void {
+  const seen = new Set<string>();
+  for (const ref of refs) {
+    const key = `${ref.provider}|${ref.url}`;
+    if (seen.has(key)) {
+      throw new ApiException(
+        HttpStatus.BAD_REQUEST,
+        'MARKET_REFERENCE_DUPLICATE',
+        `Duplicate market reference (${ref.provider}, ${ref.url}).`,
+      );
+    }
+    seen.add(key);
+  }
+}
+
+/** Array position becomes `sortOrder`. */
+function toMarketReferenceRows(
+  productId: string,
+  refs: readonly MarketReferenceInputDto[],
+) {
+  return refs.map((ref, index) => ({
+    productId,
+    provider: ref.provider,
+    label: ref.label,
+    url: ref.url,
+    suggestedPriceEur: ref.suggestedPriceEur ?? null,
+    sortOrder: index,
+  }));
+}
 
 function isPrismaKnownError(
   err: unknown,
@@ -129,7 +168,9 @@ export class AdminProductsService {
       throw productImageRequiredException();
     }
 
+    const marketRefs = dto.marketReferences ?? [];
     try {
+      assertNoDuplicateMarketReferences(marketRefs);
       const created = await this.prisma.$transaction(async (tx) => {
         const product = await tx.product.create({
           data: {
@@ -159,6 +200,11 @@ export class AdminProductsService {
             sortOrder: index,
           })),
         });
+        if (marketRefs.length > 0) {
+          await tx.productMarketReference.createMany({
+            data: toMarketReferenceRows(product.id, marketRefs),
+          });
+        }
         return product;
       });
 
@@ -263,7 +309,25 @@ export class AdminProductsService {
     }
 
     try {
-      await this.prisma.product.update({ where: { id }, data });
+      if (dto.marketReferences === undefined) {
+        await this.prisma.product.update({ where: { id }, data });
+      } else {
+        // Story 11.4 semantics: an array (even []) REPLACES every stored
+        // reference atomically with the product update; omitted = untouched.
+        const marketRefs = dto.marketReferences;
+        assertNoDuplicateMarketReferences(marketRefs);
+        await this.prisma.$transaction(async (tx) => {
+          await tx.product.update({ where: { id }, data });
+          await tx.productMarketReference.deleteMany({
+            where: { productId: id },
+          });
+          if (marketRefs.length > 0) {
+            await tx.productMarketReference.createMany({
+              data: toMarketReferenceRows(id, marketRefs),
+            });
+          }
+        });
+      }
     } catch (err) {
       if (isPrismaKnownError(err, 'P2025')) {
         throw productNotFoundException(id);
@@ -468,6 +532,13 @@ export class AdminProductsService {
         slug: product.category.slug,
       },
       images,
+      marketReferences: (product.marketReferences ?? []).map((ref) => ({
+        provider: ref.provider,
+        label: ref.label,
+        url: ref.url,
+        suggestedPriceEur:
+          ref.suggestedPriceEur === null ? null : Number(ref.suggestedPriceEur),
+      })),
       createdAt: product.createdAt.toISOString(),
       updatedAt: product.updatedAt.toISOString(),
     };

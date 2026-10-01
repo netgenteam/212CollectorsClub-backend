@@ -1,3 +1,5 @@
+import { buildMarketReferences } from './market-references.js';
+import type { MarketReferenceDto } from './dto/market-reference.dto.js';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { Prisma } from '../generated/prisma/client.js';
@@ -294,6 +296,9 @@ export class CatalogService {
           orderBy: { sortOrder: 'asc' },
           select: { id: true, url: true, altText: true, sortOrder: true },
         },
+        marketReferences: {
+          orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+        },
       },
     });
 
@@ -325,6 +330,10 @@ export class CatalogService {
             certNumber: product.certNumber,
           }
         : null,
+      marketReferences: buildMarketReferences(
+        product,
+        product.marketReferences,
+      ) as MarketReferenceDto[],
     };
   }
 }

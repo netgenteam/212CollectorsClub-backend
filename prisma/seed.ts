@@ -20,6 +20,7 @@ import {
   PrismaClient,
   Prisma,
   Franchise,
+  MarketProvider,
   ProductType,
   Rarity,
 } from '../src/generated/prisma/client.js';
@@ -173,8 +174,7 @@ const products: SeedProduct[] = [
     id: '7abf28f6-a761-4d1a-b2a7-f1e1a05e2a19',
     name: 'Pokémon Scarlet & Violet - Caja de Sobres',
     slug: 'sv-booster-box',
-    description:
-      'Caja sellada con 36 sobres de la expansión Scarlet & Violet.',
+    description: 'Caja sellada con 36 sobres de la expansión Scarlet & Violet.',
     franchise: Franchise.POKEMON,
     productType: ProductType.BOOSTER_BOX,
     rarity: Rarity.RARE,
@@ -403,8 +403,7 @@ const products: SeedProduct[] = [
     id: '05b791d2-d315-46f8-8e55-7d37ccec9aa4',
     name: 'Naruto - Sobre Kayou',
     slug: 'naruto-kayou-booster-pack',
-    description:
-      'Sobre de cartas coleccionables de Naruto Shippuden.',
+    description: 'Sobre de cartas coleccionables de Naruto Shippuden.',
     franchise: Franchise.NARUTO,
     productType: ProductType.BOOSTER_PACK,
     rarity: Rarity.COMMON,
@@ -492,8 +491,7 @@ const products: SeedProduct[] = [
     id: '2c8171c4-2ff8-4296-a841-64034be43d2f',
     name: 'Pikachu Promo - BGS 9.5',
     slug: 'bgs-9-5-pikachu-promo-slab',
-    description:
-      'Pikachu promo graduado BGS 9.5 Gem Mint, en slab sellado.',
+    description: 'Pikachu promo graduado BGS 9.5 Gem Mint, en slab sellado.',
     franchise: Franchise.POKEMON,
     productType: ProductType.SINGLE_CARD,
     rarity: Rarity.PROMO,
@@ -699,6 +697,44 @@ async function seedLandingContent(): Promise<void> {
   }
 }
 
+// Story 11.4 (FR-34): stored market references. Keyed by the product's fixed
+// id + (provider, url) so the upsert below is idempotent. The PSA cert link of
+// the PSA slab is deliberately NOT stored: it is calculated at read time (AD-21).
+const marketReferences = [
+  {
+    productId: 'f65915f5-2931-4e50-af95-630b1fd7b950',
+    provider: MarketProvider.CARDMARKET,
+    label: 'Cardmarket - Charizard VMAX',
+    url: 'https://www.cardmarket.com/en/Pokemon/Products/Singles/Champions-Path/Charizard-VMAX',
+    suggestedPriceEur: '79.90',
+    sortOrder: 0,
+  },
+  {
+    productId: 'f65915f5-2931-4e50-af95-630b1fd7b950',
+    provider: MarketProvider.TCGPLAYER,
+    label: 'TCGplayer - Charizard VMAX',
+    url: 'https://www.tcgplayer.com/search/pokemon/product?q=charizard+vmax',
+    suggestedPriceEur: null,
+    sortOrder: 1,
+  },
+  {
+    productId: '7da6351f-64eb-4e57-a179-9c5e51ff3a7b',
+    provider: MarketProvider.PRICECHARTING,
+    label: 'PriceCharting - Charizard Base Set',
+    url: 'https://www.pricecharting.com/game/pokemon-base-set/charizard-4',
+    suggestedPriceEur: null,
+    sortOrder: 0,
+  },
+  {
+    productId: '7abf28f6-a761-4d1a-b2a7-f1e1a05e2a19',
+    provider: MarketProvider.CARDMARKET,
+    label: 'Cardmarket - Scarlet & Violet Booster Box',
+    url: 'https://www.cardmarket.com/en/Pokemon/Products/Booster-Boxes',
+    suggestedPriceEur: null,
+    sortOrder: 0,
+  },
+] as const;
+
 async function main(): Promise<void> {
   console.log('Seeding FX rate setting...');
   await prisma.fxRateSetting.upsert({
@@ -770,6 +806,16 @@ async function main(): Promise<void> {
         update: imageFields,
       });
     }
+  }
+
+  console.log(`Seeding ${marketReferences.length} market references...`);
+  for (const ref of marketReferences) {
+    const { productId, provider, url, ...rest } = ref;
+    await prisma.productMarketReference.upsert({
+      where: { productId_provider_url: { productId, provider, url } },
+      create: { productId, provider, url, ...rest },
+      update: rest,
+    });
   }
 
   const [categoryCount, productCount, imageCount] = await Promise.all([

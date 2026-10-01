@@ -93,3 +93,60 @@ describe.each([
     expect(await errorsFor(cls, extra, base)).toContain(property);
   });
 });
+
+describe.each([
+  ['CreateProductDto', CreateProductDto, BASE_CREATE],
+  ['UpdateProductDto', UpdateProductDto, {}],
+] as const)('%s marketReferences (Story 11.4)', (_name, cls, base) => {
+  const ok = {
+    provider: 'CARDMARKET',
+    label: 'CM',
+    url: 'https://www.cardmarket.com/x',
+    suggestedPriceEur: 10,
+  };
+
+  it('accepts a valid array, [] and a JSON-encoded string (multipart)', async () => {
+    expect(await errorsFor(cls, { marketReferences: [ok] }, base)).toEqual([]);
+    expect(await errorsFor(cls, { marketReferences: [] }, base)).toEqual([]);
+    expect(
+      await errorsFor(cls, { marketReferences: JSON.stringify([ok]) }, base),
+    ).toEqual([]);
+  });
+
+  it.each([
+    ['javascript: url', { ...ok, url: 'javascript:alert(1)' }],
+    ['data: url', { ...ok, url: 'data:text/html,x' }],
+    ['ftp url', { ...ok, url: 'ftp://x.test/a' }],
+    ['relative url', { ...ok, url: '/cert/1' }],
+    ['unknown provider', { ...ok, provider: 'EBAY' }],
+    ['negative price', { ...ok, suggestedPriceEur: -1 }],
+    ['empty label', { ...ok, label: '' }],
+  ])('rejects %s', async (_label, ref) => {
+    expect(await errorsFor(cls, { marketReferences: [ref] }, base)).toContain(
+      'marketReferences',
+    );
+  });
+
+  it('accepts http and suggestedPriceEur = 0', async () => {
+    expect(
+      await errorsFor(
+        cls,
+        {
+          marketReferences: [
+            { ...ok, url: 'http://x.test/a', suggestedPriceEur: 0 },
+          ],
+        },
+        base,
+      ),
+    ).toEqual([]);
+  });
+
+  it('rejects non-array / unparseable JSON', async () => {
+    expect(
+      await errorsFor(cls, { marketReferences: 'not json' }, base),
+    ).toContain('marketReferences');
+    expect(
+      await errorsFor(cls, { marketReferences: { a: 1 } }, base),
+    ).toContain('marketReferences');
+  });
+});

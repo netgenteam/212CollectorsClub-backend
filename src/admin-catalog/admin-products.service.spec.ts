@@ -60,6 +60,7 @@ function buildProductRow(overrides: Record<string, unknown> = {}) {
     certNumber: null,
     categoryId: CATEGORY.id,
     category: CATEGORY,
+    marketReferences: [],
     images: [
       {
         id: 'img-1',
@@ -295,6 +296,7 @@ describe('AdminProductsService', () => {
         include: {
           category: true,
           images: { orderBy: { sortOrder: 'asc' } },
+          marketReferences: { orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] },
         },
         orderBy: { name: 'asc' },
       });
@@ -306,6 +308,66 @@ describe('AdminProductsService', () => {
       await expect(
         service.findOne('00000000-0000-0000-0000-000000000000'),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('update (marketReferences, Story 11.4)', () => {
+    const REF = {
+      provider: 'CARDMARKET' as const,
+      label: 'Cardmarket',
+      url: 'https://www.cardmarket.com/x',
+      suggestedPriceEur: 12.5,
+    };
+
+    const refs = {
+      deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+      createMany: vi.fn().mockResolvedValue({ count: 1 }),
+    };
+
+    beforeEach(() => {
+      refs.deleteMany.mockClear();
+      refs.createMany.mockClear();
+      (prisma as Record<string, unknown>).productMarketReference = refs;
+      prisma.product.update.mockResolvedValue(buildProductRow());
+      prisma.product.findUnique.mockResolvedValue(buildProductRow());
+    });
+
+    it('omitted marketReferences: no transaction, references untouched', async () => {
+      await service.update(buildProductRow().id, { name: 'X' });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(refs.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('array replaces all references inside one transaction, sortOrder = position', async () => {
+      const id = buildProductRow().id;
+      await service.update(id, {
+        marketReferences: [REF, { ...REF, url: 'https://b.test' }],
+      });
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(refs.deleteMany).toHaveBeenCalledWith({
+        where: { productId: id },
+      });
+      expect(refs.createMany).toHaveBeenCalledWith({
+        data: [
+          { productId: id, ...REF, sortOrder: 0 },
+          { productId: id, ...REF, url: 'https://b.test', sortOrder: 1 },
+        ],
+      });
+    });
+
+    it('[] clears references without createMany', async () => {
+      await service.update(buildProductRow().id, { marketReferences: [] });
+      expect(refs.deleteMany).toHaveBeenCalled();
+      expect(refs.createMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects duplicate (provider,url) with 400 before touching the DB', async () => {
+      await expect(
+        service.update(buildProductRow().id, {
+          marketReferences: [REF, REF],
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
     });
   });
 

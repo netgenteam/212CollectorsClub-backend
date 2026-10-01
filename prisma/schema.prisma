@@ -112,6 +112,8 @@ model Product {
   category   Category @relation(fields: [categoryId], references: [id])
 
   images           ProductImage[]
+  /// Story 11.4 (FR-34, AD-18): stored external market reference links.
+  marketReferences ProductMarketReference[]
   /// Story 3.1: every CartItem row referencing this Product, across every
   /// guest Cart. Read-only back-reference — CartService never traverses it,
   /// but Prisma requires the relation declared on both sides.
@@ -139,6 +141,32 @@ model Product {
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
   @@index([description(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("Products")
+}
+
+/// Story 11.4 (FR-34, AD-18/AD-23): external market-price providers a
+/// Product can link to. Native Postgres enum.
+enum MarketProvider {
+  CARDMARKET
+  PRICECHARTING
+  PSA_CERT
+  TCGPLAYER
+}
+
+/// Story 11.4 (FR-34, AD-18): admin-curated external reference link for a
+/// Product. The PSA cert link is calculated at read time (AD-21), never
+/// required to be stored here. Cascades on Product delete.
+model ProductMarketReference {
+  id                String         @id @default(uuid()) @db.Uuid
+  productId         String         @db.Uuid
+  product           Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  provider          MarketProvider
+  label             String
+  url               String
+  suggestedPriceEur Decimal?       @db.Decimal(10, 2)
+  sortOrder         Int            @default(0)
+
+  @@unique([productId, provider, url])
+  @@map("Product_Market_References")
 }
 
 /// A guest buyer's shopping cart (Story 3.1, first story needing this

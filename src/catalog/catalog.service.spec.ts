@@ -339,6 +339,7 @@ describe('CatalogService', () => {
             sortOrder: 1,
           },
         ],
+        marketReferences: [],
         ...overrides,
       };
     }
@@ -356,6 +357,9 @@ describe('CatalogService', () => {
           images: {
             orderBy: { sortOrder: 'asc' },
             select: { id: true, url: true, altText: true, sortOrder: true },
+          },
+          marketReferences: {
+            orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
           },
         },
       });
@@ -376,7 +380,41 @@ describe('CatalogService', () => {
         isPreorder: false,
         releaseDate: null,
         grading: null,
+        marketReferences: [],
       });
+    });
+
+    it('lists stored references then a calculated PSA_CERT link (Story 11.4)', async () => {
+      const product = buildProduct({
+        gradingCompany: 'PSA',
+        gradeValue: '10',
+        certNumber: '82451937',
+        marketReferences: [
+          {
+            provider: 'CARDMARKET',
+            label: 'CM',
+            url: 'https://cm.test/x',
+            suggestedPriceEur: '79.90',
+          },
+        ],
+      });
+      prisma.product.findUnique.mockResolvedValue(product);
+
+      const result = await service.getProductDetail(product.id);
+
+      expect(result.marketReferences).toEqual([
+        {
+          provider: 'CARDMARKET',
+          label: 'CM',
+          url: 'https://cm.test/x',
+          suggestedPriceEur: 79.9,
+        },
+        {
+          provider: 'PSA_CERT',
+          label: 'PSA Cert Verification',
+          url: 'https://www.psacard.com/cert/82451937',
+        },
+      ]);
     });
 
     it('nests flat grading columns into grading {company, grade, certNumber}, and serializes isPreorder/releaseDate', async () => {
