@@ -240,6 +240,9 @@ describe('Market references and PSA link (e2e, Story 11.4)', () => {
         ]),
       }).expect(400);
       await createRequest({
+        marketReferences: JSON.stringify([{ ...CM, url: 'http://a.com/x' }]),
+      }).expect(400);
+      await createRequest({
         marketReferences: JSON.stringify([{ ...CM, provider: 'EBAY' }]),
       }).expect(400);
       expect(await prisma.product.count()).toBe(before);
@@ -268,6 +271,9 @@ describe('Market references and PSA link (e2e, Story 11.4)', () => {
 
       await patch(created.id, {
         marketReferences: [{ ...PC, url: 'javascript:alert(1)' }],
+      }).expect(400);
+      await patch(created.id, {
+        marketReferences: [{ ...PC, url: 'http://a.com/x' }],
       }).expect(400);
       await patch(created.id, {
         marketReferences: [{ ...PC, suggestedPriceEur: -1 }],

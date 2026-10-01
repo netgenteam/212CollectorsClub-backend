@@ -20,7 +20,7 @@ async function errorsFor(
   extra: Record<string, unknown>,
   base: Record<string, unknown> = {},
 ): Promise<string[]> {
-  const dto = plainToInstance(cls, { ...base, ...extra });
+  const dto = plainToInstance(cls as new () => object, { ...base, ...extra });
   const errors = await validate(dto);
   return errors.map((e) => e.property);
 }
@@ -116,6 +116,7 @@ describe.each([
   it.each([
     ['javascript: url', { ...ok, url: 'javascript:alert(1)' }],
     ['data: url', { ...ok, url: 'data:text/html,x' }],
+    ['http url', { ...ok, url: 'http://a.com/x' }],
     ['ftp url', { ...ok, url: 'ftp://x.test/a' }],
     ['relative url', { ...ok, url: '/cert/1' }],
     ['unknown provider', { ...ok, provider: 'EBAY' }],
@@ -127,14 +128,12 @@ describe.each([
     );
   });
 
-  it('accepts http and suggestedPriceEur = 0', async () => {
+  it('accepts suggestedPriceEur = 0', async () => {
     expect(
       await errorsFor(
         cls,
         {
-          marketReferences: [
-            { ...ok, url: 'http://x.test/a', suggestedPriceEur: 0 },
-          ],
+          marketReferences: [{ ...ok, suggestedPriceEur: 0 }],
         },
         base,
       ),

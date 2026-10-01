@@ -30,13 +30,13 @@ export class MarketReferenceInputDto {
   @ApiProperty({
     example: 'https://www.cardmarket.com/en/Pokemon',
     description:
-      'Absolute http(s) URL (javascript:, data:, etc. are rejected).',
+      'Absolute https URL only (http:, javascript:, data:, etc. are rejected).',
   })
   @IsString()
   @MaxLength(2048)
   @IsUrl(
-    { protocols: ['http', 'https'], require_protocol: true },
-    { message: 'url must be an absolute http or https URL' },
+    { protocols: ['https'], require_protocol: true },
+    { message: 'url must be an absolute https URL' },
   )
   url: string;
 
