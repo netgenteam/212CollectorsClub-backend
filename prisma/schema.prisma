@@ -767,3 +767,82 @@ model WishlistItem {
   @@unique([wishlistId, productId])
   @@map("Wishlist_Items")
 }
+
+/// Story 12.3 (AD-26, FR-42): storefront customer account, BetterAuth
+/// `user` of the CUSTOMER instance. Separate tables from `AdminUser` on
+/// purpose (FR-41): no shared table, no role column. Passwords live in
+/// `CustomerAccount.password` (Argon2id), never here.
+model Customer {
+  id            String   @id @default(uuid()) @db.Uuid
+  /// Normalized (trim + lowercase) at the DTO and again by BetterAuth.
+  email         String   @unique
+  name          String
+  phone         String?
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  /// The all-lowercase names are mandatory: the BetterAuth Prisma adapter
+  /// joins through `<lowercased modelName>s`.
+  customersessions CustomerSession[]
+  customeraccounts CustomerAccount[]
+
+  @@map("Customers")
+}
+
+/// Story 12.3: BetterAuth session of the customer instance (cookie
+/// `cc_session`, 7 days, 1-day sliding). The row IS the revocable login.
+model CustomerSession {
+  id        String   @id @default(uuid()) @db.Uuid
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user Customer @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("Customer_Sessions")
+}
+
+/// Story 12.3: credential account (`providerId = 'credential'`, `password`
+/// = Argon2id digest) of a customer.
+model CustomerAccount {
+  id                    String    @id @default(uuid()) @db.Uuid
+  accountId             String
+  providerId            String
+  userId                String    @db.Uuid
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user Customer @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("Customer_Accounts")
+}
+
+/// Story 12.3: BetterAuth verification tokens (email verification and
+/// password reset are filled in by Story 12.4; the table exists from now).
+model CustomerVerification {
+  id         String   @id @default(uuid()) @db.Uuid
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("Customer_Verifications")
+}

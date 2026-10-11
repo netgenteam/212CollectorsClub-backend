@@ -97,6 +97,13 @@ async function bootstrap() {
       },
       'admin-jwt',
     )
+    // Story 12.3 (AD-28): the customer session is an httpOnly cookie, never a
+    // bearer token (Authorization stays for admin / orderAccessToken).
+    .addCookieAuth(
+      'cc_session',
+      { type: 'apiKey', in: 'cookie', name: 'cc_session' },
+      'customer-session',
+    )
     .build();
   const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('api/docs', app, swaggerDocument);

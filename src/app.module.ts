@@ -14,6 +14,7 @@ import { PaymentsPaypalModule } from './payments-paypal/payments-paypal.module.j
 import { AdminAuthModule } from './admin-auth/admin-auth.module.js';
 import { AdminCatalogModule } from './admin-catalog/admin-catalog.module.js';
 import { AdminLandingModule } from './admin-landing/admin-landing.module.js';
+import { CustomerAuthModule } from './customer-auth/customer-auth.module.js';
 import { WishlistModule } from './wishlist/wishlist.module.js';
 
 @Module({
@@ -53,6 +54,8 @@ import { WishlistModule } from './wishlist/wishlist.module.js';
     AdminLandingModule,
     // Story 11.5 (FR-36, AD-22): anonymous wishlist via signed cookie.
     WishlistModule,
+    // Story 12.3 (FR-42, AD-28): storefront customer accounts under /auth.
+    CustomerAuthModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -68,6 +68,9 @@ jobs:
           --health-retries 10
     env:
       NODE_ENV: test
+      COOKIE_SECRET: ci-only-cookie-secret
+      ADMIN_AUTH_SECRET: ci-only-admin-auth-secret
+      CUSTOMER_AUTH_SECRET: ci-only-customer-auth-secret
       DATABASE_URL: postgresql://collectorsclub_ci:collectorsclub_ci_password@localhost:5432/collectorsclub_ci?schema=public
     steps:
       - name: Checkout
