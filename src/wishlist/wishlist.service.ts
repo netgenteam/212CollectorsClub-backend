@@ -25,15 +25,21 @@ export class WishlistService {
    * missing/invalid/expired/unknown wishlist yields an empty list. Inactive
    * products are omitted from both `data` and `productIds`.
    */
-  async getWishlist(wishlistId: string | null): Promise<WishlistResponseDto> {
-    if (!wishlistId || !UUID_RE.test(wishlistId)) {
+  async getWishlist(
+    wishlistId: string | null,
+    customerId?: string | null,
+  ): Promise<WishlistResponseDto> {
+    if (!customerId && (!wishlistId || !UUID_RE.test(wishlistId))) {
       return { data: [], productIds: [] };
     }
     const items = await this.prisma.wishlistItem.findMany({
-      where: {
-        wishlistId,
-        wishlist: { expiresAt: { gt: new Date() } },
-      },
+      // Account wishlists (Story 12.5) are owned, not cookie-expiring.
+      where: customerId
+        ? { wishlist: { customerId } }
+        : {
+            wishlistId: wishlistId as string,
+            wishlist: { customerId: null, expiresAt: { gt: new Date() } },
+          },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       select: { productId: true },
     });
@@ -51,6 +57,7 @@ export class WishlistService {
   async addItem(
     wishlistId: string | null,
     productId: string,
+    customerId?: string | null,
   ): Promise<{ wishlistId: string; productIds: string[] }> {
     const product = await this.prisma.product.findUnique({
       where: { id: productId, isActive: true },
@@ -62,10 +69,16 @@ export class WishlistService {
 
     const expiresAt = new Date(Date.now() + WISHLIST_COOKIE_TTL_MS);
     let id: string | null = null;
-    if (wishlistId && UUID_RE.test(wishlistId)) {
+    if (customerId) {
+      id = await this.ensureAccountWishlist(customerId, expiresAt);
+    } else if (wishlistId && UUID_RE.test(wishlistId)) {
       // Sliding expiry; matches nothing when expired/unknown.
       const refreshed = await this.prisma.wishlist.updateMany({
-        where: { id: wishlistId, expiresAt: { gt: new Date() } },
+        where: {
+          id: wishlistId,
+          customerId: null,
+          expiresAt: { gt: new Date() },
+        },
         data: { expiresAt },
       });
       if (refreshed.count > 0) {
@@ -118,12 +131,119 @@ export class WishlistService {
   async removeItem(
     wishlistId: string | null,
     productId: string,
+    customerId?: string | null,
   ): Promise<void> {
+    if (customerId) {
+      await this.prisma.wishlistItem.deleteMany({
+        where: { productId, wishlist: { customerId } },
+      });
+      return;
+    }
     if (!wishlistId || !UUID_RE.test(wishlistId)) {
       return;
     }
     await this.prisma.wishlistItem.deleteMany({
-      where: { wishlistId, productId },
+      where: { wishlistId, productId, wishlist: { customerId: null } },
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Story 12.5 (FR-44, AD-29): account-bound wishlist + merge on login
+  // ---------------------------------------------------------------------
+
+  private async lockAccountWishlist(
+    tx: Prisma.TransactionClient,
+    customerId: string,
+  ): Promise<void> {
+    await tx.$executeRaw(
+      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${'wishlist:' + customerId}, 0))`,
+    );
+  }
+
+  /** Account wishlist, created on demand (under the account lock). */
+  private ensureAccountWishlist(
+    customerId: string,
+    expiresAt: Date,
+  ): Promise<string> {
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockAccountWishlist(tx, customerId);
+      const rows = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+        INSERT INTO "Wishlists" ("id", "customerId", "expiresAt", "createdAt", "updatedAt")
+        VALUES (${randomUUID()}::uuid, ${customerId}::uuid, ${expiresAt}, now(), now())
+        ON CONFLICT ("customerId") DO UPDATE SET "expiresAt" = EXCLUDED."expiresAt", "updatedAt" = now()
+        RETURNING id
+      `);
+      return rows[0].id;
+    });
+  }
+
+  /**
+   * AD-29/AD-22: unions the anonymous wishlist into the account's with
+   * `INSERT ... ON CONFLICT DO NOTHING` (200-item cap respected by trimming,
+   * never an error), then deletes the anonymous one. The anonymous row is
+   * claimed by a guarded `UPDATE ... WHERE customerId IS NULL`, so a second
+   * concurrent merge of the same cookie is a no-op. Returns true when this
+   * call consumed the anonymous wishlist.
+   */
+  async mergeAnonymousWishlist(
+    customerId: string,
+    anonWishlistId: string,
+  ): Promise<boolean> {
+    if (!UUID_RE.test(anonWishlistId)) {
+      return false;
+    }
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockAccountWishlist(tx, customerId);
+      const expiresAt = new Date(Date.now() + WISHLIST_COOKIE_TTL_MS);
+
+      const account = await tx.wishlist.findUnique({
+        where: { customerId },
+        select: { id: true },
+      });
+
+      if (!account) {
+        const assigned = await tx.$executeRaw(Prisma.sql`
+          UPDATE "Wishlists"
+          SET "customerId" = ${customerId}::uuid, "expiresAt" = ${expiresAt}, "updatedAt" = now()
+          WHERE id = ${anonWishlistId}::uuid AND "customerId" IS NULL AND "expiresAt" > now()
+        `);
+        return assigned > 0;
+      }
+
+      const claimed = await tx.$executeRaw(Prisma.sql`
+        UPDATE "Wishlists" SET "updatedAt" = now()
+        WHERE id = ${anonWishlistId}::uuid AND "customerId" IS NULL AND "expiresAt" > now()
+      `);
+      if (claimed === 0) {
+        return false;
+      }
+
+      const current = await tx.wishlistItem.count({
+        where: { wishlistId: account.id },
+      });
+      const room = Math.max(WISHLIST_MAX_ITEMS - current, 0);
+      if (room > 0) {
+        await tx.$executeRaw(Prisma.sql`
+          INSERT INTO "Wishlist_Items" ("id", "wishlistId", "productId", "createdAt")
+          SELECT gen_random_uuid(), ${account.id}::uuid, wi."productId", wi."createdAt"
+          FROM "Wishlist_Items" wi
+          JOIN "Products" p ON p.id = wi."productId" AND p."isActive"
+          WHERE wi."wishlistId" = ${anonWishlistId}::uuid
+            AND NOT EXISTS (
+              SELECT 1 FROM "Wishlist_Items" ex
+              WHERE ex."wishlistId" = ${account.id}::uuid AND ex."productId" = wi."productId")
+          ORDER BY wi."createdAt" DESC, wi.id DESC
+          LIMIT ${room}
+          ON CONFLICT ("wishlistId", "productId") DO NOTHING
+        `);
+      }
+      await tx.$executeRaw(
+        Prisma.sql`UPDATE "Wishlists" SET "expiresAt" = ${expiresAt}, "updatedAt" = now() WHERE id = ${account.id}::uuid`,
+      );
+      await tx.wishlist.deleteMany({
+        where: { id: anonWishlistId, customerId: null },
+      });
+      return true;
     });
   }
 }

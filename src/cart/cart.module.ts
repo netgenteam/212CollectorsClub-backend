@@ -13,6 +13,6 @@ import { CartService } from './cart.service.js';
 @Module({
   controllers: [CartController],
   providers: [CartService, CartCookieService],
-  exports: [CartCookieService],
+  exports: [CartCookieService, CartService],
 })
 export class CartModule {}

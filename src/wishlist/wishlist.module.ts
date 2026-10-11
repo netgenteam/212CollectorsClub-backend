@@ -10,5 +10,6 @@ import { WishlistService } from './wishlist.service.js';
   imports: [CatalogModule],
   controllers: [WishlistController],
   providers: [WishlistService, WishlistCookieService],
+  exports: [WishlistService, WishlistCookieService],
 })
 export class WishlistModule {}

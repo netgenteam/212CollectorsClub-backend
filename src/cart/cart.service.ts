@@ -1,7 +1,9 @@
 import { HttpStatus, Injectable, NotFoundException } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { ApiException } from '../common/api-exception.js';
+import { executeGuardedUpdate } from '../common/guarded-update.js';
 import { AddCartItemDto } from './dto/add-cart-item.dto.js';
 import {
   CartItemResponseDto,
@@ -53,7 +55,11 @@ export class CartService {
   async addItem(
     existingCartId: string | null,
     dto: AddCartItemDto,
+    customerId?: string | null,
   ): Promise<AddCartItemResult> {
+    if (customerId) {
+      return this.addItemForCustomer(customerId, dto);
+    }
     return this.prisma.$transaction(async (tx) => {
       const product = await tx.product.findUnique({
         where: { id: dto.productId },
@@ -66,16 +72,37 @@ export class CartService {
       const newExpiresAt = new Date(Date.now() + CART_COOKIE_TTL_MS);
       const existingCart = existingCartId
         ? await tx.cart.findFirst({
-            where: { id: existingCartId, expiresAt: { gt: new Date() } },
+            where: {
+              id: existingCartId,
+              customerId: null,
+              expiresAt: { gt: new Date() },
+            },
           })
         : null;
 
-      const cart = existingCart
-        ? await tx.cart.update({
+      // Story 12.5: a cart that a concurrent login merge just consumed
+      // (deleted) degrades to "brand new cart" instead of a P2025 500.
+      let cart = null;
+      if (existingCart) {
+        try {
+          cart = await tx.cart.update({
             where: { id: existingCart.id },
             data: { expiresAt: newExpiresAt },
-          })
-        : await tx.cart.create({ data: { expiresAt: newExpiresAt } });
+          });
+        } catch (err) {
+          if (!(
+            err instanceof Prisma.PrismaClientKnownRequestError &&
+            err.code === 'P2025'
+          )) {
+            throw err;
+          }
+        }
+      }
+      // Claimed by an account between the lookup and the update: not ours.
+      if (cart?.customerId) {
+        cart = null;
+      }
+      cart ??= await tx.cart.create({ data: { expiresAt: newExpiresAt } });
 
       const existingItem = await tx.cartItem.findUnique({
         where: {
@@ -135,9 +162,12 @@ export class CartService {
     tx: Prisma.TransactionClient,
     cartId: string,
     productId: string,
+    accountCart = false,
   ): Promise<{ id: string }> {
     const cart = await tx.cart.findFirst({
-      where: { id: cartId, expiresAt: { gt: new Date() } },
+      where: accountCart
+        ? { id: cartId }
+        : { id: cartId, customerId: null, expiresAt: { gt: new Date() } },
     });
     if (!cart) {
       throw new NotFoundException('No cart found for this request');
@@ -185,13 +215,26 @@ export class CartService {
    * and simply affects 0 rows — a silent no-op, not Prisma's P2025 "record
    * to delete does not exist" throw that `delete` would raise instead.
    */
-  async removeItem(cartId: string | null, productId: string): Promise<void> {
+  async removeItem(
+    cartId: string | null,
+    productId: string,
+    customerId?: string | null,
+  ): Promise<void> {
+    if (customerId) {
+      cartId = await this.accountCartId(customerId);
+    }
     if (!cartId) {
       throw new NotFoundException('No cart found for this request');
     }
+    const account = !!customerId;
 
     await this.prisma.$transaction(async (tx) => {
-      const cartItem = await this.findCartItemOrThrow(tx, cartId, productId);
+      const cartItem = await this.findCartItemOrThrow(
+        tx,
+        cartId,
+        productId,
+        account,
+      );
       await tx.cartItem.deleteMany({ where: { id: cartItem.id } });
     });
   }
@@ -243,13 +286,23 @@ export class CartService {
     cartId: string | null,
     productId: string,
     quantity: number,
+    customerId?: string | null,
   ): Promise<void> {
+    if (customerId) {
+      cartId = await this.accountCartId(customerId);
+    }
     if (!cartId) {
       throw new NotFoundException('No cart found for this request');
     }
+    const account = !!customerId;
 
     await this.prisma.$transaction(async (tx) => {
-      const cartItem = await this.findCartItemOrThrow(tx, cartId, productId);
+      const cartItem = await this.findCartItemOrThrow(
+        tx,
+        cartId,
+        productId,
+        account,
+      );
 
       if (quantity === 0) {
         // `deleteMany` (not `delete`) so a concurrent duplicate
@@ -306,13 +359,23 @@ export class CartService {
    * price change made directly in the DB between an add-to-cart and a
    * later `GET` is reflected immediately (FR-11's explicit AC).
    */
-  async getCart(cartId: string | null): Promise<CartResponseDto> {
-    if (!cartId) {
+  async getCart(
+    cartId: string | null,
+    customerId?: string | null,
+  ): Promise<CartResponseDto> {
+    if (!cartId && !customerId) {
       return EMPTY_CART;
     }
 
     const cart = await this.prisma.cart.findFirst({
-      where: { id: cartId, expiresAt: { gt: new Date() } },
+      // Account carts (Story 12.5) are owned, not cookie-expiring.
+      where: customerId
+        ? { customerId }
+        : {
+            id: cartId as string,
+            customerId: null,
+            expiresAt: { gt: new Date() },
+          },
       include: {
         items: {
           include: { product: { select: { name: true, priceUsd: true } } },
@@ -342,5 +405,208 @@ export class CartService {
       100;
 
     return { items, total };
+  }
+
+  // ---------------------------------------------------------------------
+  // Story 12.5 (FR-44, AD-29): account-bound cart + merge on login
+  // ---------------------------------------------------------------------
+
+  /** Id of the account's cart, or null when it has none yet. */
+  private async accountCartId(customerId: string): Promise<string | null> {
+    const cart = await this.prisma.cart.findUnique({
+      where: { customerId },
+      select: { id: true },
+    });
+    return cart?.id ?? null;
+  }
+
+  /**
+   * Serializes everything that creates/assigns THE cart of one account
+   * (account addItem vs. login merges) so the `customerId` unique index can
+   * never be hit by a race. Released at commit/rollback.
+   */
+  private async lockAccountCart(
+    tx: Prisma.TransactionClient,
+    customerId: string,
+  ): Promise<void> {
+    await tx.$executeRaw(
+      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${'cart:' + customerId}, 0))`,
+    );
+  }
+
+  /**
+   * Account variant of `addItem`: the cart is created on demand (under the
+   * account lock) and the line is written by ONE guarded statement
+   * (`INSERT ... SELECT ... WHERE stock - heldQty >= qty ON CONFLICT DO
+   * UPDATE ... WHERE <same guard>`), so it never depends on incidental row
+   * locks. 0 affected rows = genuinely insufficient stock (AD-16).
+   */
+  private async addItemForCustomer(
+    customerId: string,
+    dto: AddCartItemDto,
+  ): Promise<AddCartItemResult> {
+    return this.prisma.$transaction(async (tx) => {
+      const product = await tx.product.findUnique({
+        where: { id: dto.productId },
+        select: { id: true },
+      });
+      if (!product) {
+        throw new NotFoundException(`Product ${dto.productId} not found`);
+      }
+
+      await this.lockAccountCart(tx, customerId);
+      const expiresAt = new Date(Date.now() + CART_COOKIE_TTL_MS);
+      const cartId = await this.ensureAccountCart(tx, customerId, expiresAt);
+
+      const q = dto.quantity;
+      const affected = await executeGuardedUpdate(
+        tx,
+        Prisma.sql`
+          INSERT INTO "Cart_Items" ("id", "cartId", "productId", "quantity", "createdAt", "updatedAt")
+          SELECT ${randomUUID()}::uuid, ${cartId}::uuid, p.id, ${q}::int, now(), now()
+          FROM "Products" p
+          WHERE p.id = ${dto.productId}::uuid AND p.stock - p."heldQty" >= ${q}::int
+          ON CONFLICT ("cartId", "productId") DO UPDATE
+            SET quantity = "Cart_Items".quantity + ${q}::int, "updatedAt" = now()
+            WHERE (SELECT p2.stock - p2."heldQty" FROM "Products" p2 WHERE p2.id = ${dto.productId}::uuid)
+                  >= "Cart_Items".quantity + ${q}::int
+        `,
+      );
+
+      if (affected === 0) {
+        const fresh = await tx.product.findUnique({
+          where: { id: dto.productId },
+          select: { stock: true, heldQty: true },
+        });
+        const availableStock = Math.max(
+          (fresh?.stock ?? 0) - (fresh?.heldQty ?? 0),
+          0,
+        );
+        throw new ApiException(
+          HttpStatus.CONFLICT,
+          'INSUFFICIENT_STOCK',
+          `Only ${availableStock} unit(s) of product ${dto.productId} are currently available.`,
+          { availableStock },
+        );
+      }
+
+      return { cartId };
+    });
+  }
+
+  /** Caller must hold the account lock. */
+  private async ensureAccountCart(
+    tx: Prisma.TransactionClient,
+    customerId: string,
+    expiresAt: Date,
+  ): Promise<string> {
+    const rows = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+      INSERT INTO "Carts" ("id", "customerId", "expiresAt", "createdAt", "updatedAt")
+      VALUES (${randomUUID()}::uuid, ${customerId}::uuid, ${expiresAt}, now(), now())
+      ON CONFLICT ("customerId") DO UPDATE SET "expiresAt" = EXCLUDED."expiresAt", "updatedAt" = now()
+      RETURNING id
+    `);
+    return rows[0].id;
+  }
+
+  /**
+   * AD-29: merges the anonymous cart `anonCartId` into the account's cart,
+   * in ONE transaction. Idempotent and concurrency-safe:
+   *  - per-account advisory lock (vs. other logins / account addItem);
+   *  - the anonymous cart is "claimed" by a guarded
+   *    `UPDATE ... WHERE customerId IS NULL`; a second concurrent merge of
+   *    the same cookie blocks on that row, then finds it gone/owned (0 rows)
+   *    and is a no-op, so quantities are never doubled;
+   *  - lines are written with guarded `INSERT ... ON CONFLICT DO UPDATE`
+   *    capped at `stock - heldQty` (trims silently, never errors); inactive
+   *    products and out-of-stock lines are dropped. `heldQty` is only read.
+   * Returns true when this call consumed the anonymous cart.
+   */
+  async mergeAnonymousCart(
+    customerId: string,
+    anonCartId: string,
+  ): Promise<boolean> {
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockAccountCart(tx, customerId);
+      const expiresAt = new Date(Date.now() + CART_COOKIE_TTL_MS);
+
+      const accountCart = await tx.cart.findUnique({
+        where: { customerId },
+        select: { id: true },
+      });
+
+      if (!accountCart) {
+        const assigned = await executeGuardedUpdate(
+          tx,
+          Prisma.sql`
+            UPDATE "Carts"
+            SET "customerId" = ${customerId}::uuid, "expiresAt" = ${expiresAt}, "updatedAt" = now()
+            WHERE id = ${anonCartId}::uuid AND "customerId" IS NULL AND "expiresAt" > now()
+          `,
+        );
+        if (assigned === 0) {
+          return false;
+        }
+        await this.sanitizeCartLines(tx, anonCartId);
+        return true;
+      }
+
+      const claimed = await executeGuardedUpdate(
+        tx,
+        Prisma.sql`
+          UPDATE "Carts" SET "updatedAt" = now()
+          WHERE id = ${anonCartId}::uuid AND "customerId" IS NULL AND "expiresAt" > now()
+        `,
+      );
+      if (claimed === 0) {
+        return false;
+      }
+
+      const lines = await tx.cartItem.findMany({
+        where: { cartId: anonCartId },
+        select: { productId: true, quantity: true },
+      });
+      for (const line of lines) {
+        await tx.$executeRaw(Prisma.sql`
+          INSERT INTO "Cart_Items" ("id", "cartId", "productId", "quantity", "createdAt", "updatedAt")
+          SELECT ${randomUUID()}::uuid, ${accountCart.id}::uuid, p.id,
+                 LEAST(${line.quantity}::int, p.stock - p."heldQty"), now(), now()
+          FROM "Products" p
+          WHERE p.id = ${line.productId}::uuid AND p."isActive" AND p.stock - p."heldQty" > 0
+          ON CONFLICT ("cartId", "productId") DO UPDATE
+            SET quantity = GREATEST(
+                  "Cart_Items".quantity,
+                  LEAST("Cart_Items".quantity + ${line.quantity}::int,
+                        (SELECT p2.stock - p2."heldQty" FROM "Products" p2 WHERE p2.id = ${line.productId}::uuid))),
+                "updatedAt" = now()
+            WHERE EXISTS (SELECT 1 FROM "Products" p3 WHERE p3.id = ${line.productId}::uuid AND p3."isActive")
+        `);
+      }
+      await tx.$executeRaw(
+        Prisma.sql`UPDATE "Carts" SET "expiresAt" = ${expiresAt}, "updatedAt" = now() WHERE id = ${accountCart.id}::uuid`,
+      );
+      await tx.cart.deleteMany({
+        where: { id: anonCartId, customerId: null },
+      });
+      return true;
+    });
+  }
+
+  /** Drops inactive/out-of-stock lines and trims the rest to availability. */
+  private async sanitizeCartLines(
+    tx: Prisma.TransactionClient,
+    cartId: string,
+  ): Promise<void> {
+    await tx.$executeRaw(Prisma.sql`
+      DELETE FROM "Cart_Items" ci USING "Products" p
+      WHERE ci."cartId" = ${cartId}::uuid AND ci."productId" = p.id
+        AND (NOT p."isActive" OR p.stock - p."heldQty" <= 0)
+    `);
+    await tx.$executeRaw(Prisma.sql`
+      UPDATE "Cart_Items" ci SET quantity = p.stock - p."heldQty", "updatedAt" = now()
+      FROM "Products" p
+      WHERE ci."cartId" = ${cartId}::uuid AND ci."productId" = p.id
+        AND ci.quantity > p.stock - p."heldQty"
+    `);
   }
 }

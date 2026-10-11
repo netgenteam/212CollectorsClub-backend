@@ -102,7 +102,11 @@ describe('WishlistService', () => {
     expect(prisma.wishlistItem.deleteMany).not.toHaveBeenCalled();
     await service.removeItem(WID, PID);
     expect(prisma.wishlistItem.deleteMany).toHaveBeenCalledWith({
-      where: { wishlistId: WID, productId: PID },
+      where: {
+        wishlistId: WID,
+        productId: PID,
+        wishlist: { customerId: null },
+      },
     });
   });
 });

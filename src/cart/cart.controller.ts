@@ -11,9 +11,15 @@ import {
   Post,
   Req,
   Res,
+  UseGuards,
 } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
+import {
+  OptionalCustomer,
+  OptionalCustomerGuard,
+  type AuthenticatedCustomer,
+} from '../common/customer-auth.guard.js';
 import { CartCookieService } from './cart-cookie.service.js';
 import { CartService } from './cart.service.js';
 import { AddCartItemDto } from './dto/add-cart-item.dto.js';
@@ -21,6 +27,7 @@ import { CartResponseDto } from './dto/cart-response.dto.js';
 import { UpdateCartItemDto } from './dto/update-cart-item.dto.js';
 
 @ApiTags('cart')
+@UseGuards(OptionalCustomerGuard)
 @Controller('cart')
 export class CartController {
   constructor(
@@ -63,11 +70,18 @@ export class CartController {
     @Body() dto: AddCartItemDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
+    @OptionalCustomer() customer: AuthenticatedCustomer | null,
   ): Promise<CartResponseDto> {
     const existingCartId = this.cartCookie.readCartId(req);
-    const { cartId } = await this.cartService.addItem(existingCartId, dto);
-    this.cartCookie.writeCartId(res, cartId);
-    return this.cartService.getCart(cartId);
+    const { cartId } = await this.cartService.addItem(
+      existingCartId,
+      dto,
+      customer?.id,
+    );
+    if (!customer) {
+      this.cartCookie.writeCartId(res, cartId);
+    }
+    return this.cartService.getCart(cartId, customer?.id);
   }
 
   /**
@@ -90,9 +104,12 @@ export class CartController {
     description: 'The current cart (empty when there is no valid cart cookie).',
     type: CartResponseDto,
   })
-  getCart(@Req() req: Request): Promise<CartResponseDto> {
+  getCart(
+    @Req() req: Request,
+    @OptionalCustomer() customer: AuthenticatedCustomer | null,
+  ): Promise<CartResponseDto> {
     const cartId = this.cartCookie.readCartId(req);
-    return this.cartService.getCart(cartId);
+    return this.cartService.getCart(cartId, customer?.id);
   }
 
   /**
@@ -135,10 +152,16 @@ export class CartController {
     @Param('productId', ParseUUIDPipe) productId: string,
     @Body() dto: UpdateCartItemDto,
     @Req() req: Request,
+    @OptionalCustomer() customer: AuthenticatedCustomer | null,
   ): Promise<CartResponseDto> {
     const cartId = this.cartCookie.readCartId(req);
-    await this.cartService.updateItemQuantity(cartId, productId, dto.quantity);
-    return this.cartService.getCart(cartId);
+    await this.cartService.updateItemQuantity(
+      cartId,
+      productId,
+      dto.quantity,
+      customer?.id,
+    );
+    return this.cartService.getCart(cartId, customer?.id);
   }
 
   /**
@@ -175,9 +198,10 @@ export class CartController {
   async removeItem(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Req() req: Request,
+    @OptionalCustomer() customer: AuthenticatedCustomer | null,
   ): Promise<CartResponseDto> {
     const cartId = this.cartCookie.readCartId(req);
-    await this.cartService.removeItem(cartId, productId);
-    return this.cartService.getCart(cartId);
+    await this.cartService.removeItem(cartId, productId, customer?.id);
+    return this.cartService.getCart(cartId, customer?.id);
   }
 }

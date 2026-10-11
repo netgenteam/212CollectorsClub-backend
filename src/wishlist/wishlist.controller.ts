@@ -10,9 +10,15 @@ import {
   Post,
   Req,
   Res,
+  UseGuards,
 } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
+import {
+  OptionalCustomer,
+  OptionalCustomerGuard,
+  type AuthenticatedCustomer,
+} from '../common/customer-auth.guard.js';
 import { WishlistCookieService } from './wishlist-cookie.service.js';
 import { WishlistService } from './wishlist.service.js';
 import {
@@ -23,6 +29,7 @@ import {
 
 /** Story 11.5 (FR-36, AD-22): anonymous wishlist keyed by a signed cookie. */
 @ApiTags('wishlist')
+@UseGuards(OptionalCustomerGuard)
 @Controller('wishlist')
 export class WishlistController {
   constructor(
@@ -38,9 +45,13 @@ export class WishlistController {
       'Active saved products (newest first) plus their ids. No valid wishlist cookie returns an empty list (200), never an error.',
   })
   @ApiResponse({ status: HttpStatus.OK, type: WishlistResponseDto })
-  getWishlist(@Req() req: Request): Promise<WishlistResponseDto> {
+  getWishlist(
+    @Req() req: Request,
+    @OptionalCustomer() customer: AuthenticatedCustomer | null,
+  ): Promise<WishlistResponseDto> {
     return this.wishlistService.getWishlist(
       this.wishlistCookie.readWishlistId(req),
+      customer?.id,
     );
   }
 
@@ -68,12 +79,16 @@ export class WishlistController {
     @Body() dto: AddWishlistItemDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
+    @OptionalCustomer() customer: AuthenticatedCustomer | null,
   ): Promise<WishlistProductIdsResponseDto> {
     const { wishlistId, productIds } = await this.wishlistService.addItem(
       this.wishlistCookie.readWishlistId(req),
       dto.productId,
+      customer?.id,
     );
-    this.wishlistCookie.writeWishlistId(res, wishlistId);
+    if (!customer) {
+      this.wishlistCookie.writeWishlistId(res, wishlistId);
+    }
     return { productIds };
   }
 
@@ -93,10 +108,12 @@ export class WishlistController {
   async removeItem(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Req() req: Request,
+    @OptionalCustomer() customer: AuthenticatedCustomer | null,
   ): Promise<void> {
     await this.wishlistService.removeItem(
       this.wishlistCookie.readWishlistId(req),
       productId,
+      customer?.id,
     );
   }
 }

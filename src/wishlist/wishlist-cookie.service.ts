@@ -34,4 +34,9 @@ export class WishlistCookieService {
       maxAge: WISHLIST_COOKIE_TTL_MS,
     });
   }
+
+  /** Story 12.5: the anonymous wishlist was merged into an account's. */
+  clearWishlistId(res: Response): void {
+    res.clearCookie(WISHLIST_COOKIE_NAME, { path: '/' });
+  }
 }

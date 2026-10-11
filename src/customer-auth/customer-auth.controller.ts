@@ -18,12 +18,13 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { CUSTOMER_SESSION_COOKIE } from '../auth-core/customer-auth.factory.js';
 import {
   CustomerAuthGuard,
   type RequestWithCustomer,
 } from '../common/customer-auth.guard.js';
+import { AccountMergeService } from './account-merge.service.js';
 import { CustomerAuthService } from './customer-auth.service.js';
 import {
   CustomerResponseDto,
@@ -52,7 +53,10 @@ const THROTTLE = {
 @ApiTags('customer-auth')
 @Controller('auth')
 export class CustomerAuthController {
-  constructor(private readonly service: CustomerAuthService) {}
+  constructor(
+    private readonly service: CustomerAuthService,
+    private readonly accountMerge: AccountMergeService,
+  ) {}
 
   @Post('register')
   @UseGuards(ThrottlerGuard)
@@ -88,7 +92,7 @@ export class CustomerAuthController {
   @ApiOperation({
     summary: 'Customer login',
     description:
-      'Verifies email + password and sets the httpOnly cookie `cc_session` (7 days, 1-day sliding, sameSite=lax, secure outside dev). No token in the body. Unverified emails may log in. Rate-limited to 5 per IP per 10 minutes.',
+      'Verifies email + password and sets the httpOnly cookie `cc_session` (7 days, 1-day sliding, sameSite=lax, secure outside dev). No token in the body. Unverified emails may log in. The anonymous cart/wishlist cookies (cartId/wishlistId), if any, are merged into the account and cleared (quantities summed and capped at available stock; wishlist unioned); a failed login leaves them untouched. Rate-limited to 5 per IP per 10 minutes.',
   })
   @ApiBody({ type: LoginCustomerDto })
   @ApiResponse({ status: 200, type: CustomerResponseDto })
@@ -100,6 +104,7 @@ export class CustomerAuthController {
   @ApiResponse({ status: 429, description: 'Rate limit exceeded.' })
   async login(
     @Body(strictBody(LoginCustomerDto)) dto: Readonly<LoginCustomerDto>,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<CustomerResponseDto> {
     const { customer, setCookies } = await this.service.login(
@@ -109,6 +114,9 @@ export class CustomerAuthController {
     for (const cookie of setCookies) {
       res.append('Set-Cookie', cookie);
     }
+    // Story 12.5 (AD-29): only reached after a valid login (a failed one
+    // threw above and never touches the anonymous cookies).
+    await this.accountMerge.mergeOnLogin(customer.id, req, res);
     return customer;
   }
 
