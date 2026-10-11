@@ -182,7 +182,11 @@ export class CheckoutService {
     const result = await this.prisma.$transaction(
       async (tx): Promise<CheckoutTransactionResult> => {
         const cart = await tx.cart.findFirst({
-          where: { id: cartId, expiresAt: { gt: new Date() } },
+          where: {
+            id: cartId,
+            customerId: null,
+            expiresAt: { gt: new Date() },
+          },
           include: {
             items: {
               include: {

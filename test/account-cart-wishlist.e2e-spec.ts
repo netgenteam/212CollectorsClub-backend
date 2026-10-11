@@ -409,6 +409,37 @@ describe('Account cart and wishlist with login merge (e2e, Story 12.5)', () => {
     });
   });
 
+  describe('guest checkout ignores carts claimed by an account', () => {
+    it('a stale cartId cookie of an assigned cart is an empty cart: 422 EMPTY_CART, no order, no hold, account cart intact', async () => {
+      const email = await newCustomer('stale');
+      const anon = pair(await addCart(p1, 2), 'cartId') as string;
+      const res = await login(email, anon).expect(200);
+      expect(isCleared(res, 'cartId')).toBe(true);
+
+      const ordersBefore = await prisma.order.count();
+      const holdsBefore = await prisma.stockHold.count();
+      const out = await request(server())
+        .post('/api/v1/checkout')
+        .set('Cookie', anon)
+        .send({
+          paymentRail: 'pago_movil',
+          fulfillmentType: 'pickup',
+          recipientName: 'Maria Perez',
+          recipientPhone: '0412-1234567',
+        })
+        .expect(422);
+      expect((out.body as { errorCode: string }).errorCode).toBe('EMPTY_CART');
+
+      expect(await prisma.order.count()).toBe(ordersBefore);
+      expect(await prisma.stockHold.count()).toBe(holdsBefore);
+      const prod = await prisma.product.findUniqueOrThrow({
+        where: { id: p1 },
+      });
+      expect(prod.heldQty).toBe(0);
+      expect(qty((await getCart(session(res))).body as CartBody, p1)).toBe(2);
+    });
+  });
+
   describe('AC7: concurrency', () => {
     it('two simultaneous logins with the same anonymous cookies merge exactly once (account has a cart)', async () => {
       const { email, s } = await loggedIn('conc');
