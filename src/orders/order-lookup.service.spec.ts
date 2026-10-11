@@ -183,3 +183,71 @@ describe('OrderLookupService', () => {
     });
   });
 });
+
+/** Story 12.6 (FR-45): "mis pedidos" queries filter by owner in the WHERE. */
+describe('OrderLookupService (customer orders)', () => {
+  const order = buildOrderWithLines();
+
+  it('listForCustomer: WHERE customerId, newest first, catalog-style meta', async () => {
+    const prisma = {
+      order: {
+        count: vi.fn().mockResolvedValue(45),
+        findMany: vi.fn().mockResolvedValue([order]),
+      },
+    };
+    const service = new OrderLookupService(prisma as never);
+    const res = await service.listForCustomer('c1', 2, 20);
+    expect(prisma.order.count).toHaveBeenCalledWith({
+      where: { customerId: 'c1' },
+    });
+    expect(prisma.order.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { customerId: 'c1' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip: 20,
+        take: 20,
+      }),
+    );
+    expect(res.meta).toEqual({ page: 2, limit: 20, total: 45, totalPages: 3 });
+    expect(res.data[0].orderId).toBe('order-1');
+  });
+
+  it('getDetailForCustomer: filters id AND customerId in one query; no match -> 404', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const service = new OrderLookupService({ order: { findFirst } } as never);
+    await expect(
+      service.getDetailForCustomer('c1', 'o1'),
+    ).rejects.toMatchObject({
+      status: 404,
+      response: { errorCode: 'ORDER_NOT_FOUND' },
+    });
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'o1', customerId: 'c1' } }),
+    );
+  });
+
+  it('getDetailForCustomer: same shape as lookup plus statusHistory', async () => {
+    const findFirst = vi.fn().mockResolvedValue({
+      ...order,
+      statusHistory: [
+        {
+          fromStatus: null,
+          toStatus: OrderStatus.PENDING_VERIFICATION,
+          actorType: OrderActorType.SYSTEM,
+          createdAt: new Date('2026-09-24T17:41:08.000Z'),
+        },
+      ],
+    });
+    const service = new OrderLookupService({ order: { findFirst } } as never);
+    const res = await service.getDetailForCustomer('c1', 'order-1');
+    expect(res.statusHistory).toEqual([
+      {
+        fromStatus: null,
+        toStatus: 'pending_verification',
+        actorType: 'system',
+        createdAt: '2026-09-24T17:41:08.000Z',
+      },
+    ]);
+    expect(res.lines).toHaveLength(1);
+  });
+});

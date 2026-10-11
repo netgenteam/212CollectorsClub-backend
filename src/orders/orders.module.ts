@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { PassportModule } from '@nestjs/passport';
 import { ProofOfPaymentController } from './proof-of-payment.controller.js';
 import { ProofOfPaymentService } from './proof-of-payment.service.js';
+import { CustomerOrdersController } from './customer-orders.controller.js';
 import { OrderLookupController } from './order-lookup.controller.js';
 import { OrderLookupService } from './order-lookup.service.js';
 import { OrderAccessTokenGuard } from './order-access-token.guard.js';
@@ -59,6 +60,7 @@ import { AdminOrderFulfillmentService } from './admin-order-fulfillment.service.
   controllers: [
     ProofOfPaymentController,
     OrderLookupController,
+    CustomerOrdersController,
     AdminOrdersController,
   ],
   providers: [

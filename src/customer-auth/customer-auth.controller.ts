@@ -34,6 +34,7 @@ import {
 import { ForgotPasswordDto } from './dto/forgot-password.dto.js';
 import { LoginCustomerDto } from './dto/login-customer.dto.js';
 import { RegisterCustomerDto } from './dto/register-customer.dto.js';
+import { ResendVerificationDto } from './dto/resend-verification.dto.js';
 import { ResetPasswordDto } from './dto/reset-password.dto.js';
 import { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto.js';
 import { VerifyEmailDto } from './dto/verify-email.dto.js';
@@ -142,6 +143,30 @@ export class CustomerAuthController {
   ): Promise<MessageResponseDto> {
     await this.service.verifyEmail(dto.token);
     return { message: 'Email verified.' };
+  }
+
+  @Post('resend-verification')
+  @UseGuards(ThrottlerGuard)
+  @Throttle(THROTTLE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Resend the email verification link',
+    description:
+      "Always 200 with the same generic body, whether the email is unknown, already verified or unverified (anti-enumeration, equal-cost branches). Only an existing unverified account receives a new email; issuing it invalidates that customer's previous unused verification tokens. Rate-limited like login (5 per IP per 10 minutes, shared with the other /auth mutation endpoints).",
+  })
+  @ApiBody({ type: ResendVerificationDto })
+  @ApiResponse({ status: 200, type: MessageResponseDto })
+  @ApiResponse({ status: 400, description: 'Invalid email or unknown field.' })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded.' })
+  async resendVerification(
+    @Body(strictBody(ResendVerificationDto))
+    dto: Readonly<ResendVerificationDto>,
+  ): Promise<MessageResponseDto> {
+    await this.service.resendVerification(dto.email);
+    return {
+      message:
+        'If this email belongs to an unverified account, a new verification link has been sent.',
+    };
   }
 
   @Post('forgot-password')

@@ -157,17 +157,57 @@ export class CustomerAuthService {
   /**
    * One-time token: only its SHA-256 is stored (a DB leak yields no usable
    * link). Row lives in `Customer_Verifications`; consuming deletes it.
+   * Story 12.6: issuing a new one invalidates the customer's previous unused
+   * verification tokens (same transaction; an advisory lock serializes
+   * concurrent issuers so exactly one live token remains).
    */
   private async issueVerificationToken(customerId: string): Promise<string> {
     const token = randomBytes(32).toString('base64url');
-    await this.prisma.customerVerification.create({
-      data: {
-        identifier: VERIFICATION_PREFIX + sha256(token),
-        value: customerId,
-        expiresAt: new Date(Date.now() + VERIFICATION_TTL_MS),
-      },
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'verify:' + customerId}, 0))`;
+      await tx.customerVerification.deleteMany({
+        where: {
+          value: customerId,
+          identifier: { startsWith: VERIFICATION_PREFIX },
+        },
+      });
+      await tx.customerVerification.create({
+        data: {
+          identifier: VERIFICATION_PREFIX + sha256(token),
+          value: customerId,
+          expiresAt: new Date(Date.now() + VERIFICATION_TTL_MS),
+        },
+      });
     });
     return token;
+  }
+
+  /**
+   * Story 12.6 (AC11, FR-43). Always resolves the same way. The three
+   * branches (unknown / already verified / unverified) await exactly ONE
+   * identical lookup; token issuance and mail run in the background for the
+   * unverified one only (same equal-cost pattern as 12.4), so neither the
+   * response nor its timing reveals which branch ran.
+   */
+  async resendVerification(email: string): Promise<void> {
+    const customer = await this.prisma.customer.findUnique({
+      where: { email },
+      select: { id: true, name: true, emailVerified: true },
+    });
+    if (!customer || customer.emailVerified) {
+      return;
+    }
+    void this.issueVerificationToken(customer.id)
+      .then((token) =>
+        this.sendBestEffort(
+          verificationEmail(email, customer.name, this.frontendUrl, token),
+        ),
+      )
+      .catch((err: unknown) => {
+        this.logger.error(
+          `Verification resend failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 
   /** Uniform 400 INVALID_VERIFICATION_TOKEN for unknown/used/expired/tampered. */

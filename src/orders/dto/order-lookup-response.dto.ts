@@ -158,3 +158,12 @@ export class OrderStatusHistoryEntryDto {
   @ApiProperty({ example: '2026-09-24T17:45:12.000Z' })
   createdAt: string;
 }
+
+/**
+ * Story 12.6 (FR-45): `GET /api/v1/auth/orders/{orderId}` — the exact
+ * lookup detail shape plus the full status history (oldest first).
+ */
+export class CustomerOrderDetailResponseDto extends OrderDetailResponseDto {
+  @ApiProperty({ type: [OrderStatusHistoryEntryDto] })
+  statusHistory: OrderStatusHistoryEntryDto[];
+}

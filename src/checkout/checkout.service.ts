@@ -15,6 +15,8 @@ import {
   guardedOrderStatusTransition,
   recordInitialOrderStatus,
 } from '../common/order-status-transition.js';
+import { invalidCustomerTokenException } from '../common/customer-auth.guard.js';
+import type { AuthenticatedCustomer } from '../common/customer-auth.guard.js';
 import { PAYPAL_CLIENT } from '../payments-paypal/paypal-client.interface.js';
 import type {
   CreatePaypalOrderResult,
@@ -50,6 +52,15 @@ function insufficientStockException(items: StockLineIssue[]): ApiException {
     'INSUFFICIENT_STOCK',
     'One or more cart lines no longer have enough stock available.',
     { items },
+  );
+}
+
+/** Story 12.6 (FR-43, AD-28): account checkout requires a verified email. */
+function emailNotVerifiedException(): ApiException {
+  return new ApiException(
+    HttpStatus.CONFLICT,
+    'EMAIL_NOT_VERIFIED',
+    'Verify your email address before checking out with your account.',
   );
 }
 
@@ -171,8 +182,23 @@ export class CheckoutService {
   async checkout(
     cartId: string | null,
     dto: CheckoutDto,
+    customer: Pick<AuthenticatedCustomer, 'id'> | null = null,
   ): Promise<CheckoutResponseDto> {
-    if (!cartId) {
+    // Story 12.6 (AD-31): with a session the cart is the ACCOUNT's cart
+    // (the anonymous cookie is ignored); without one nothing changes.
+    if (customer) {
+      // Read from the DB, not from the session snapshot: no stale "verified".
+      const account = await this.prisma.customer.findUnique({
+        where: { id: customer.id },
+        select: { emailVerified: true },
+      });
+      if (!account) {
+        throw invalidCustomerTokenException();
+      }
+      if (!account.emailVerified) {
+        throw emailNotVerifiedException();
+      }
+    } else if (!cartId) {
       throw this.emptyCartException();
     }
 
@@ -182,11 +208,13 @@ export class CheckoutService {
     const result = await this.prisma.$transaction(
       async (tx): Promise<CheckoutTransactionResult> => {
         const cart = await tx.cart.findFirst({
-          where: {
-            id: cartId,
-            customerId: null,
-            expiresAt: { gt: new Date() },
-          },
+          where: customer
+            ? { customerId: customer.id }
+            : {
+                id: cartId as string,
+                customerId: null,
+                expiresAt: { gt: new Date() },
+              },
           include: {
             items: {
               include: {
@@ -310,6 +338,7 @@ export class CheckoutService {
             fxRateVesPerUsd: fxRate?.vesPerUsd ?? null,
             totalVes,
             accessTokenHash: tokenHash,
+            customerId: customer?.id ?? null,
             lines: { createMany: { data: lineCreates } },
           },
         });
@@ -386,7 +415,19 @@ export class CheckoutService {
         // cart's contents, so there is nothing left for the buyer to edit
         // while they finish paying (whether that's off at PayPal, or by
         // Pago Móvil transfer).
-        await tx.cart.delete({ where: { id: cart.id } });
+        // Of two concurrent checkouts of the SAME cart only one removes the
+        // row; the other rolls back as an empty cart (P2025) instead of a 500.
+        try {
+          await tx.cart.delete({ where: { id: cart.id } });
+        } catch (err) {
+          if (
+            err instanceof Prisma.PrismaClientKnownRequestError &&
+            err.code === 'P2025'
+          ) {
+            throw this.emptyCartException();
+          }
+          throw err;
+        }
 
         return {
           orderId: order.id,

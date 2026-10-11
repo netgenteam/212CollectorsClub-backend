@@ -23,6 +23,7 @@ describe('CustomerAuthService', () => {
   let requestPasswordReset: ReturnType<typeof vi.fn>;
   let prisma: {
     customerVerification?: unknown;
+    $transaction?: ReturnType<typeof vi.fn>;
     customer: {
       updateMany?: ReturnType<typeof vi.fn>;
       findUnique: ReturnType<typeof vi.fn>;
@@ -48,6 +49,9 @@ describe('CustomerAuthService', () => {
       deleteMany: vi.fn(),
     };
     prisma.customerVerification = verification;
+    prisma.$transaction = vi.fn((cb: (tx: unknown) => Promise<unknown>) =>
+      cb({ $executeRaw: vi.fn(), customerVerification: verification }),
+    );
     prisma.customer.updateMany = vi.fn();
     resetPassword = vi.fn();
     requestPasswordReset = vi.fn().mockResolvedValue(undefined);
@@ -306,6 +310,76 @@ describe('CustomerAuthService', () => {
       expect(fresh).toBeLessThan(SLOW / 2);
       expect(dup).toBeLessThan(SLOW / 2);
       expect(prisma.customer.count).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('resendVerification (Story 12.6, AC11)', () => {
+    const SAMPLES = 40;
+    const LOOKUP_MS = 2;
+    const SLOW = 150;
+    const slow = () => new Promise((r) => setTimeout(() => r({}), SLOW));
+    const lookup = (row: unknown) => {
+      const delayed = () =>
+        new Promise((r) => setTimeout(() => r(row), LOOKUP_MS));
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
+      prisma.customer.findUnique.mockImplementation(delayed);
+    };
+    const UNVERIFIED = { id: 'u1', name: 'A', emailVerified: false };
+
+    it('unverified: invalidates previous tokens, issues a new one and mails it', async () => {
+      lookup(UNVERIFIED);
+      await expect(
+        service.resendVerification('a@b.co'),
+      ).resolves.toBeUndefined();
+      await vi.waitFor(() => expect(sendMail).toHaveBeenCalledTimes(1));
+      expect(verification.deleteMany).toHaveBeenCalledWith({
+        where: {
+          value: 'u1',
+          identifier: { startsWith: 'email-verification:' },
+        },
+      });
+      expect(verification.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('unknown and already-verified: no token, no mail, same resolution', async () => {
+      lookup(null);
+      await expect(
+        service.resendVerification('a@b.co'),
+      ).resolves.toBeUndefined();
+      lookup({ ...UNVERIFIED, emailVerified: true });
+      await expect(
+        service.resendVerification('a@b.co'),
+      ).resolves.toBeUndefined();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(verification.create).not.toHaveBeenCalled();
+      expect(sendMail).not.toHaveBeenCalled();
+    });
+
+    it('timing: >=40 samples per branch, none awaits token creation or mail', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
+      verification.create.mockImplementation(() => slow());
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
+      sendMail.mockImplementation(() => slow());
+      const branches: Record<string, unknown> = {
+        unknown: null,
+        verified: { ...UNVERIFIED, emailVerified: true },
+        unverified: UNVERIFIED,
+      };
+      const medians: Record<string, number> = {};
+      for (const [name, row] of Object.entries(branches)) {
+        lookup(row);
+        const times: number[] = [];
+        for (let i = 0; i < SAMPLES; i++) {
+          const t = performance.now();
+          await service.resendVerification('a@b.co');
+          times.push(performance.now() - t);
+        }
+        times.sort((a, b) => a - b);
+        medians[name] = times[SAMPLES / 2];
+        expect(times[SAMPLES - 1]).toBeLessThan(SLOW / 2);
+      }
+      const all = Object.values(medians);
+      expect(Math.max(...all) - Math.min(...all)).toBeLessThan(5);
     });
   });
 });

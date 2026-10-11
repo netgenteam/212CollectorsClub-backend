@@ -407,6 +407,11 @@ model Order {
   /// indexed lookup, never a scan.
   paypalOrderId String? @unique
 
+  /// Story 12.6 (AD-31): owner account; null = guest order. SetNull keeps
+  /// the order (and its access-token flows) if the account is ever deleted.
+  customerId String?   @db.Uuid
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -422,6 +427,7 @@ model Order {
   /// list non-empty" — see ProofOfPaymentService.
   proofOfPayments ProofOfPayment[]
 
+  @@index([customerId, createdAt])
   @@map("Orders")
 }
 
@@ -795,6 +801,7 @@ model Customer {
   customeraccounts CustomerAccount[]
   carts            Cart[]
   wishlists        Wishlist[]
+  orders           Order[]
 
   @@map("Customers")
 }

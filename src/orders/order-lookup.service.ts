@@ -1,11 +1,14 @@
-import { Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable } from '@nestjs/common';
+import { ApiException } from '../common/api-exception.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type {
   Order,
   OrderLine,
   OrderStatusHistory,
 } from '../generated/prisma/client.js';
+import type { PaginatedCustomerOrdersResponseDto } from './dto/paginated-customer-orders-response.dto.js';
 import {
+  CustomerOrderDetailResponseDto,
   OrderDetailResponseDto,
   OrderFulfillmentDto,
   OrderLookupLineDto,
@@ -66,6 +69,65 @@ export class OrderLookupService {
       orderBy: { createdAt: 'asc' },
     });
     return rows.map((row) => this.toHistoryDto(row));
+  }
+
+  /**
+   * Story 12.6 (FR-45, AD-31): the customer's own orders, newest first.
+   * Ownership is part of the SQL `WHERE` (never fetch-then-compare).
+   */
+  async listForCustomer(
+    customerId: string,
+    page: number,
+    limit: number,
+  ): Promise<PaginatedCustomerOrdersResponseDto> {
+    const where = { customerId };
+    const [total, rows] = await Promise.all([
+      this.prisma.order.count({ where }),
+      this.prisma.order.findMany({
+        where,
+        include: { lines: { orderBy: { createdAt: 'asc' } } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
+    return {
+      data: rows.map((row) => this.toDetailDto(row)),
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: total === 0 ? 0 : Math.ceil(total / limit),
+      },
+    };
+  }
+
+  /**
+   * Story 12.6: a foreign order, a guest order and an unknown id are the
+   * SAME 404 (no enumeration) — one query filtered by id AND customerId.
+   */
+  async getDetailForCustomer(
+    customerId: string,
+    orderId: string,
+  ): Promise<CustomerOrderDetailResponseDto> {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, customerId },
+      include: {
+        lines: { orderBy: { createdAt: 'asc' } },
+        statusHistory: { orderBy: { createdAt: 'asc' } },
+      },
+    });
+    if (!order) {
+      throw new ApiException(
+        HttpStatus.NOT_FOUND,
+        'ORDER_NOT_FOUND',
+        'Order not found.',
+      );
+    }
+    return {
+      ...this.toDetailDto(order),
+      statusHistory: order.statusHistory.map((row) => this.toHistoryDto(row)),
+    };
   }
 
   private toDetailDto(
