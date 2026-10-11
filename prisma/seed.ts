@@ -562,10 +562,26 @@ async function seedAdminUser(): Promise<void> {
 
   console.log(`Seeding initial AdminUser (username="${username}")...`);
   const passwordHash = await argon2.hash(password, { type: argon2.argon2id });
-  await prisma.adminUser.upsert({
+  const admin = await prisma.adminUser.upsert({
     where: { username },
     create: { username, email, passwordHash },
     update: { email, passwordHash },
+  });
+  // Story 12.2 (AD-26): the BetterAuth credential account is the source of
+  // truth for the password; keep it in sync with the (deprecated)
+  // `passwordHash`. BetterAuth's credential lookup requires
+  // `accountId === user.id`.
+  await prisma.adminAccount.upsert({
+    where: {
+      providerId_accountId: { providerId: 'credential', accountId: admin.id },
+    },
+    create: {
+      userId: admin.id,
+      accountId: admin.id,
+      providerId: 'credential',
+      password: passwordHash,
+    },
+    update: { password: passwordHash },
   });
 }
 

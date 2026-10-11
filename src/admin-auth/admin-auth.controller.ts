@@ -14,9 +14,9 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { ExtractJwt } from 'passport-jwt';
 import { AdminAuthGuard } from '../common/admin-auth.guard.js';
 import type { RequestWithAdminUser } from '../common/admin-auth.guard.js';
+import { extractBearerToken } from './admin-jwt.strategy.js';
 import { AdminAuthService } from './admin-auth.service.js';
 import { AdminLoginDto } from './dto/admin-login.dto.js';
 import { AdminLoginResponseDto } from './dto/admin-login-response.dto.js';
@@ -52,7 +52,7 @@ export class AdminAuthController {
   @ApiOperation({
     summary: 'Admin login',
     description:
-      'Verifies username-or-email + password (Argon2id) and issues an 8h Admin JWT. Wrong username, wrong email, and wrong password for a real user all produce the exact same 401 — this endpoint never reveals which one it was (AC2).',
+      'Verifies username-or-email + password (Argon2id) and issues an 8h Admin session token (BetterAuth bearer, opaque). Wrong username, wrong email, and wrong password for a real user all produce the exact same 401 — this endpoint never reveals which one it was (AC2).',
   })
   @ApiResponse({ status: 200, type: AdminLoginResponseDto })
   @ApiResponse({
@@ -70,7 +70,7 @@ export class AdminAuthController {
   @ApiOperation({
     summary: 'Get the currently authenticated Admin',
     description:
-      'Proves AdminAuthGuard is wired and working (AC3) — returns the AdminUser attached to the request by the guard, from the validated JWT. Never includes passwordHash (see AdminUserResponseDto).',
+      'Proves AdminAuthGuard is wired and working (AC3) — returns the AdminUser attached to the request by the guard, from the validated session. Never includes passwordHash (see AdminUserResponseDto).',
   })
   @ApiResponse({ status: 200, type: AdminUserResponseDto })
   @ApiResponse({
@@ -89,7 +89,7 @@ export class AdminAuthController {
   @ApiOperation({
     summary: 'Log out the current Admin session',
     description:
-      'Revokes the presented JWT (AD-11): its jti is inserted into the persisted Postgres RevokedToken table, so any subsequent request bearing this same token — including a repeat call to this same endpoint — is rejected with 401 INVALID_ADMIN_TOKEN from then on, even before its 8h expiry, and even across an app restart (the denylist lives in Postgres, not memory, so it survives a redeploy).',
+      'Revokes the presented session (AD-27): its AdminSession row is deleted from Postgres, so any subsequent request bearing this same token — including a repeat call to this same endpoint — is rejected with 401 INVALID_ADMIN_TOKEN from then on, even before its 8h expiry, and even across an app restart (the session lives in Postgres, not memory, so it survives a redeploy).',
   })
   @ApiResponse({ status: 204, description: 'Token revoked. No response body.' })
   @ApiResponse({
@@ -100,11 +100,9 @@ export class AdminAuthController {
   logout(@Req() request: RequestWithAdminUser): Promise<void> {
     // AdminAuthGuard already required a well-formed, verified Bearer token
     // to reach this handler at all, so this extraction cannot fail here —
-    // reusing the same passport-jwt extractor AdminJwtStrategy itself uses
+    // reusing the same extractor AdminJwtStrategy itself uses
     // rather than hand-parsing the header a second, slightly-different way.
-    const rawToken = ExtractJwt.fromAuthHeaderAsBearerToken()(
-      request,
-    ) as string;
+    const rawToken = extractBearerToken(request) as string;
     return this.adminAuthService.logout(rawToken);
   }
 }

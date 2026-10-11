@@ -1,8 +1,6 @@
-import { randomUUID } from 'node:crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
 import * as argon2 from 'argon2';
@@ -38,6 +36,18 @@ const TEST_EMAIL = 'e2e-admin-story-7-1@212collectorsclub.test';
 const TEST_PASSWORD = 'correct-horse-battery-staple-9f2c';
 
 /**
+ * Story 12.2: the accessToken is now BetterAuth's opaque signed session
+ * token (`<sessionToken>.<signature>`, possibly URL-encoded). Returns the
+ * raw session token, i.e. the `Admin_Sessions.token` column value.
+ */
+function sessionTokenOf(accessToken: string): string {
+  const decoded = accessToken.includes('%')
+    ? decodeURIComponent(accessToken)
+    : accessToken;
+  return decoded.split('.')[0];
+}
+
+/**
  * Story 7.1 (AD-11) e2e suite. Creates its own dedicated AdminUser fixture
  * directly via Prisma (Argon2id-hashed with the real `argon2` package,
  * same as `AdminAuthService`/`prisma/seed.ts` do) rather than depending on
@@ -50,7 +60,6 @@ const TEST_PASSWORD = 'correct-horse-battery-staple-9f2c';
 describe('AdminAuthController (e2e)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
-  let jwtService: JwtService;
   let adminId: string;
 
   beforeEach(async () => {
@@ -71,14 +80,6 @@ describe('AdminAuthController (e2e)', () => {
 
     await app.init();
     prisma = app.get(PrismaService);
-
-    // Same secret the running app itself uses (ADMIN_JWT_SECRET) — lets
-    // this suite hand-craft an expired/tampered token that the app's own
-    // AdminJwtStrategy will genuinely reject, and decode a real login
-    // response's token without re-verifying it.
-    jwtService = new JwtService({
-      secret: configService.getOrThrow<string>('ADMIN_JWT_SECRET'),
-    });
 
     const passwordHash = await argon2.hash(TEST_PASSWORD, {
       type: argon2.argon2id,
@@ -103,19 +104,16 @@ describe('AdminAuthController (e2e)', () => {
   });
 
   describe('POST /api/v1/admin/auth/login', () => {
-    it('correct username + correct password: 200 with a valid, never-passwordHash-leaking JWT', async () => {
+    it('correct username + correct password: 200 with a valid opaque session token, the identical body shape and an 8h session, never leaking passwordHash', async () => {
       const res = await request(app.getHttpServer())
         .post('/api/v1/admin/auth/login')
         .send({ usernameOrEmail: TEST_USERNAME, password: TEST_PASSWORD })
         .expect(200);
 
       const body = res.body as AdminLoginResponse;
-      if (
-        typeof body.accessToken !== 'string' ||
-        body.accessToken.split('.').length !== 3
-      ) {
+      if (typeof body.accessToken !== 'string' || !body.accessToken) {
         throw new Error(
-          `Expected a JWT-shaped accessToken, got: ${JSON.stringify(body)}`,
+          `Expected a non-empty string accessToken, got: ${JSON.stringify(body)}`,
         );
       }
       if (body.tokenType !== 'Bearer' || body.expiresIn !== 28800) {
@@ -124,20 +122,26 @@ describe('AdminAuthController (e2e)', () => {
       if ('passwordHash' in body) {
         throw new Error('Login response must never include passwordHash');
       }
+      const keys = Object.keys(body).sort().join(',');
+      if (keys !== 'accessToken,expiresIn,tokenType') {
+        throw new Error(`Unexpected login response shape: ${keys}`);
+      }
 
-      const decoded = jwtService.decode<{
-        sub: string;
-        iat: number;
-        exp: number;
-      }>(body.accessToken);
-      if (decoded.sub !== adminId) {
+      // Equivalent of the old "sub matches" + "exp - iat === 28800" JWT
+      // asserts: the session row belongs to this admin and expires in 8h.
+      const session = await prisma.adminSession.findUnique({
+        where: { token: sessionTokenOf(body.accessToken) },
+      });
+      if (!session || session.userId !== adminId) {
         throw new Error(
-          `JWT sub does not match the AdminUser id: ${JSON.stringify(decoded)}`,
+          `Expected an AdminSession row for the AdminUser: ${JSON.stringify(session)}`,
         );
       }
-      if (decoded.exp - decoded.iat !== 28800) {
+      const remainingSeconds =
+        (session.expiresAt.getTime() - Date.now()) / 1000;
+      if (remainingSeconds < 28800 - 60 || remainingSeconds > 28800 + 5) {
         throw new Error(
-          `Expected an 8h (28800s) JWT max-age, got ${decoded.exp - decoded.iat}s`,
+          `Expected the session to expire in ~8h (28800s), got ${remainingSeconds}s`,
         );
       }
     });
@@ -222,14 +226,18 @@ describe('AdminAuthController (e2e)', () => {
         });
     });
 
-    it('an EXPIRED token (well-signed, but past its exp): 401 INVALID_ADMIN_TOKEN', async () => {
-      const expiredToken = jwtService.sign(
-        { sub: adminId },
-        { expiresIn: '-1s' },
-      );
+    async function loginToken(): Promise<string> {
+      const loginRes = await request(app.getHttpServer())
+        .post('/api/v1/admin/auth/login')
+        .send({ usernameOrEmail: TEST_USERNAME, password: TEST_PASSWORD })
+        .expect(200);
+      return (loginRes.body as AdminLoginResponse).accessToken;
+    }
+
+    async function expectInvalidToken(token: string): Promise<void> {
       await request(app.getHttpServer())
         .get('/api/v1/admin/auth/me')
-        .set('Authorization', `Bearer ${expiredToken}`)
+        .set('Authorization', `Bearer ${token}`)
         .expect(401)
         .expect((res) => {
           const body = res.body as ApiErrorBody;
@@ -237,46 +245,37 @@ describe('AdminAuthController (e2e)', () => {
             throw new Error(`Unexpected body: ${JSON.stringify(body)}`);
           }
         });
+    }
+
+    it('an EXPIRED token (a real session whose expiresAt is in the past): 401 INVALID_ADMIN_TOKEN', async () => {
+      const token = await loginToken();
+      await request(app.getHttpServer())
+        .get('/api/v1/admin/auth/me')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      await prisma.adminSession.updateMany({
+        where: { token: sessionTokenOf(token) },
+        data: { expiresAt: new Date(Date.now() - 1000) },
+      });
+      await expectInvalidToken(token);
     });
 
     it('a TAMPERED token (valid shape, corrupted signature): 401 INVALID_ADMIN_TOKEN', async () => {
-      const validToken = jwtService.sign({ sub: adminId });
-      const parts = validToken.split('.');
+      const token = await loginToken();
+      const decoded = token.includes('%') ? decodeURIComponent(token) : token;
+      const [sessionToken, signature] = decoded.split('.');
       const tamperedSignature =
-        parts[2].slice(0, -4) +
-        (parts[2].slice(-4) === 'AAAA' ? 'BBBB' : 'AAAA');
-      const tamperedToken = `${parts[0]}.${parts[1]}.${tamperedSignature}`;
-
-      await request(app.getHttpServer())
-        .get('/api/v1/admin/auth/me')
-        .set('Authorization', `Bearer ${tamperedToken}`)
-        .expect(401)
-        .expect((res) => {
-          const body = res.body as ApiErrorBody;
-          if (body.errorCode !== 'INVALID_ADMIN_TOKEN') {
-            throw new Error(`Unexpected body: ${JSON.stringify(body)}`);
-          }
-        });
+        signature.slice(0, -4) +
+        (signature.slice(-4) === 'AAAA' ? 'BBBB' : 'AAAA');
+      await expectInvalidToken(`${sessionToken}.${tamperedSignature}`);
+      // A different, unsigned raw session token must not work either.
+      await expectInvalidToken(sessionToken);
     });
 
-    it('a token for an AdminUser id that no longer exists: 401 INVALID_ADMIN_TOKEN', async () => {
-      const orphanToken = jwtService.sign({
-        sub: '99999999-9999-4999-8999-999999999999',
-        // Story 7.2: every real token carries a jti from this point on —
-        // included here so this test genuinely exercises the "admin not
-        // found" 401 path, not the separate "missing jti" 401 path.
-        jti: randomUUID(),
-      });
-      await request(app.getHttpServer())
-        .get('/api/v1/admin/auth/me')
-        .set('Authorization', `Bearer ${orphanToken}`)
-        .expect(401)
-        .expect((res) => {
-          const body = res.body as ApiErrorBody;
-          if (body.errorCode !== 'INVALID_ADMIN_TOKEN') {
-            throw new Error(`Unexpected body: ${JSON.stringify(body)}`);
-          }
-        });
+    it('a token whose AdminUser no longer exists: 401 INVALID_ADMIN_TOKEN', async () => {
+      const token = await loginToken();
+      await prisma.adminUser.delete({ where: { id: adminId } });
+      await expectInvalidToken(token);
     });
 
     it('a genuinely valid token (from a real login): 200 with the AdminUser, NEVER passwordHash', async () => {
@@ -367,7 +366,7 @@ describe('AdminAuthController (e2e)', () => {
         .set('Authorization', `Bearer ${accessToken}`)
         .expect(204);
 
-      // Same token, same still-unexpired JWT — now rejected everywhere.
+      // Same token, same still-unexpired session window — now rejected everywhere.
       const rejectedRes = await request(app.getHttpServer())
         .get('/api/v1/admin/auth/me')
         .set('Authorization', `Bearer ${accessToken}`)
@@ -377,16 +376,14 @@ describe('AdminAuthController (e2e)', () => {
         throw new Error(`Unexpected body: ${JSON.stringify(body)}`);
       }
 
-      // Confirm the row really landed in Postgres (not just "the request
-      // got rejected for some other reason").
-      const decoded = jwtService.decode<{ jti: string }>(accessToken);
-      const revokedRow = await prisma.revokedToken.findUnique({
-        where: { jti: decoded.jti },
+      // Confirm the session row really was deleted in Postgres (not just
+      // "the request got rejected for some other reason").
+      const sessionRow = await prisma.adminSession.findUnique({
+        where: { token: sessionTokenOf(accessToken) },
       });
-      if (!revokedRow) {
-        throw new Error('Expected a RevokedToken row for the logged-out jti');
+      if (sessionRow) {
+        throw new Error('Expected the AdminSession row to be deleted');
       }
-      await prisma.revokedToken.delete({ where: { jti: decoded.jti } });
     });
 
     it('double logout of the same token: the second call also gets 401 INVALID_ADMIN_TOKEN (it never reaches the logout handler a second time — same guard, same revocation check as any other route)', async () => {
@@ -409,21 +406,16 @@ describe('AdminAuthController (e2e)', () => {
       if (body.errorCode !== 'INVALID_ADMIN_TOKEN') {
         throw new Error(`Unexpected body: ${JSON.stringify(body)}`);
       }
-
-      const decoded = jwtService.decode<{ jti: string }>(accessToken);
-      await prisma.revokedToken
-        .delete({ where: { jti: decoded.jti } })
-        .catch(() => undefined);
     });
 
-    it('TRUE concurrent double logout (Promise.all, NOT sequential awaits) of the SAME freshly-issued token: neither request ever surfaces a raw 500, the jti ends up revoked exactly once in Postgres, and the whole race is repeated with a fresh token many times over to rule out intermittency — regression test for the QA-found bug where `revokedToken.upsert` is NOT atomic against a second truly-concurrent upsert for the same PK under Prisma 7.10.0 + @prisma/adapter-pg (both requests can see "no row yet" and both attempt `create`; the loser used to get an uncaught P2002 that fell through to a raw 500 — AdminAuthService.logout now catches that P2002 and treats it as a successful no-op)', async () => {
+    it('TRUE concurrent double logout (Promise.all, NOT sequential awaits) of the SAME freshly-issued token: neither request ever surfaces a raw 500, the AdminSession row ends up deleted, and the whole race is repeated with a fresh token many times over to rule out intermittency — regression test for the QA-found 7.2 bug (a concurrent double logout used to surface a raw 500); since Story 12.2 logout is an idempotent deleteMany of the session row', async () => {
       // What counts as "handled cleanly" here (documented since the Dev
       // brief left this to judgement): in a genuine race, BOTH concurrent
       // requests can pass AdminAuthGuard's revocation check (which reads
-      // RevokedToken by jti) before EITHER write commits — that shared
+      // the session row) before EITHER delete commits — that shared
       // window is the race itself — so BOTH reach
-      // AdminAuthService.logout() and BOTH should resolve 204 (the fix
-      // catches the loser's P2002 and swallows it as success). Depending
+      // AdminAuthService.logout() and BOTH should resolve 204 (the
+      // deleteMany of an already-deleted row is a no-op, not an error). Depending
       // on real scheduling/DB round-trip timing, it is also possible for
       // one request's guard check to land AFTER the other request's row
       // has already committed; that request is correctly rejected at the
@@ -487,24 +479,20 @@ describe('AdminAuthController (e2e)', () => {
           );
         }
 
-        // Exactly one RevokedToken row for this jti — never duplicated by
-        // the race, never missing either, even though two concurrent
-        // writes contended for the exact same primary key.
-        const decoded = jwtService.decode<{ jti: string }>(accessToken);
-        const revokedRows = await prisma.revokedToken.findMany({
-          where: { jti: decoded.jti },
+        // The session row is gone — never left behind by the race, never an
+        // error from two concurrent deletes of the same row.
+        const sessionRow = await prisma.adminSession.findUnique({
+          where: { token: sessionTokenOf(accessToken) },
         });
-        if (revokedRows.length !== 1) {
+        if (sessionRow) {
           throw new Error(
-            `iteration ${i}: expected exactly 1 RevokedToken row for jti ${decoded.jti}, found ${revokedRows.length}`,
+            `iteration ${i}: expected the AdminSession row to be deleted after the concurrent logouts`,
           );
         }
-
-        await prisma.revokedToken.delete({ where: { jti: decoded.jti } });
       }
     }, 30_000);
 
-    it('a revoked token is STILL rejected against a brand-new app instance (simulates surviving a real process restart — the denylist is Postgres, never in-memory)', async () => {
+    it('a logged-out token is STILL rejected against a brand-new app instance (simulates surviving a real process restart — the session lives in Postgres, never in-memory)', async () => {
       const loginRes = await request(app.getHttpServer())
         .post('/api/v1/admin/auth/login')
         .send({ usernameOrEmail: TEST_USERNAME, password: TEST_PASSWORD })
@@ -531,11 +519,6 @@ describe('AdminAuthController (e2e)', () => {
       } finally {
         await restartedApp.close();
       }
-
-      const decoded = jwtService.decode<{ jti: string }>(accessToken);
-      await prisma.revokedToken
-        .delete({ where: { jti: decoded.jti } })
-        .catch(() => undefined);
     });
   });
 });

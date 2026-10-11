@@ -1,12 +1,15 @@
-import { randomUUID } from 'node:crypto';
-import { HttpStatus, Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
+import { HttpStatus, Inject, Injectable } from '@nestjs/common';
 import * as argon2 from 'argon2';
+import { APIError } from 'better-auth/api';
+import type { AdminAuth } from '../auth-core/admin-auth.factory.js';
+import {
+  ADMIN_SESSION_EXPIRES_IN_SECONDS,
+  sessionTokenFromBearer,
+} from '../auth-core/admin-auth.factory.js';
+import { ADMIN_AUTH } from '../auth-core/auth-core.constants.js';
 import { ApiException } from '../common/api-exception.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
-import type { AdminJwtPayload } from './admin-jwt.strategy.js';
 import type { AdminLoginResponseDto } from './dto/admin-login-response.dto.js';
 
 function invalidAdminTokenException(): ApiException {
@@ -16,11 +19,6 @@ function invalidAdminTokenException(): ApiException {
     'This route requires a valid Admin session, sent as "Authorization: Bearer <token>" from POST /api/v1/admin/auth/login.',
   );
 }
-
-/** 8h, matching AD-11's JWT max-age exactly — expressed once here (both as
- * the `@nestjs/jwt` sign option and the `expiresIn` echoed in the login
- * response) instead of two independently-maintained literals. */
-const ADMIN_JWT_EXPIRES_IN_SECONDS = 8 * 60 * 60;
 
 /**
  * Story 7.1 (AD-11, NFR-4). `login` is the only place this codebase ever
@@ -55,12 +53,27 @@ function invalidCredentialsException(): ApiException {
   );
 }
 
+const CREDENTIAL_PROVIDER_ID = 'credential';
+
+/**
+ * Story 7.1 / 12.2 (AD-11, AD-27, NFR-4): facade over the BetterAuth admin
+ * instance that keeps the exact HTTP contract of `/admin/auth/*`.
+ *
+ * **Non-enumeration**: unknown user and wrong password both throw the same
+ * `invalidCredentialsException()`. For an unknown user a dummy Argon2id
+ * verify runs so both branches cost about the same (BetterAuth performs the
+ * real verify for existing users).
+ *
+ * **Lazy provisioning**: an admin that has a legacy `passwordHash` but no
+ * credential `AdminAccount` with a password (fixtures, admins created after
+ * the migration backfill) gets one copied from `passwordHash` before the
+ * sign-in. Idempotent and race-safe (P2002 = someone else created it).
+ */
 @Injectable()
 export class AdminAuthService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly jwtService: JwtService,
-    private readonly configService: ConfigService,
+    @Inject(ADMIN_AUTH) private readonly adminAuth: AdminAuth,
   ) {}
 
   async login(
@@ -71,111 +84,92 @@ export class AdminAuthService {
       where: {
         OR: [{ username: usernameOrEmail }, { email: usernameOrEmail }],
       },
-      select: { id: true, passwordHash: true },
+      select: { id: true, email: true, passwordHash: true },
     });
 
-    // Always run a real Argon2id verify — against the real hash when the
-    // AdminUser exists, against the fixed dummy hash when it doesn't — so
-    // both branches below reject on the exact same code path with the
-    // exact same latency profile. See this class's own doc comment.
-    const passwordMatches = await argon2.verify(
-      admin ? admin.passwordHash : DUMMY_PASSWORD_HASH,
-      password,
-    );
-
-    if (!admin || !passwordMatches) {
+    if (!admin) {
+      await argon2.verify(DUMMY_PASSWORD_HASH, password);
       throw invalidCredentialsException();
     }
 
-    // Story 7.2 (AD-11): a fresh, random jti per issued token — this
-    // token's own revocable identity, independent of `sub` (see
-    // `AdminJwtPayload`'s own doc comment for why).
-    const payload: AdminJwtPayload = { sub: admin.id, jti: randomUUID() };
-    const accessToken = await this.jwtService.signAsync(payload, {
-      secret: this.configService.getOrThrow<string>('ADMIN_JWT_SECRET'),
-      expiresIn: ADMIN_JWT_EXPIRES_IN_SECONDS,
-    });
+    await this.ensureCredentialAccount(admin.id, admin.passwordHash);
+
+    let accessToken: string | null;
+    try {
+      const { headers } = await this.adminAuth.api.signInEmail({
+        body: { email: admin.email, password },
+        returnHeaders: true,
+      });
+      accessToken = headers.get('set-auth-token');
+    } catch (err) {
+      if (err instanceof APIError) {
+        throw invalidCredentialsException();
+      }
+      throw err;
+    }
+    if (!accessToken) {
+      throw invalidCredentialsException();
+    }
 
     return {
       accessToken,
       tokenType: 'Bearer',
-      expiresIn: ADMIN_JWT_EXPIRES_IN_SECONDS,
+      expiresIn: ADMIN_SESSION_EXPIRES_IN_SECONDS,
     };
   }
 
   /**
-   * Story 7.2 (AD-11, FR-21). `rawToken` is the exact Bearer token string
-   * `POST /admin/auth/logout` was called with — by the time this runs,
-   * `AdminAuthGuard` has already verified its signature and expiry (this
-   * route is itself guard-gated, see `AdminAuthController`), so this only
-   * needs to `decode` it (no secret, no re-verification) to recover the
-   * `jti`/`exp` claims to persist.
-   *
-   * **Double-logout decision**: a second logout call for the SAME token,
-   * in the normal sequential case, never reaches this method at all — once
-   * the first call's `RevokedToken` row exists, `AdminJwtStrategy`
-   * rejects the token at the guard with the same 401 `INVALID_ADMIN_TOKEN`
-   * every other revoked/expired/malformed token gets (no special
-   * "already logged out" status — consistent with this module's existing
-   * non-enumeration posture: the caller never learns *why* their token
-   * was rejected). `upsert` (not `create`) exists for the genuine race —
-   * two requests for the same still-valid token landing concurrently
-   * before either write commits, both passing the guard's revocation check.
-   *
-   * **QA fix (Story 7.2, 2nd review pass)**: `upsert` alone does NOT make
-   * that race safe. Under Prisma 7.10.0 + `@prisma/adapter-pg`, `upsert`
-   * is not atomic against another truly-concurrent `upsert`/`create` for
-   * the same PK — both requests can read "no row exists" before either
-   * commits, so both take the `create` branch; the DB's own unique
-   * constraint (correctly) allows only one to land, and the loser gets a
-   * `PrismaClientKnownRequestError` (code `P2002`) instead of silently
-   * resolving. QA reproduced this with genuinely parallel (not sequential)
-   * curl logout pairs and saw a raw 500 on the losing request 4/5 times.
-   * The `catch` below is what actually makes the race a no-op: a P2002
-   * here means "another concurrent request already revoked this exact
-   * jti" (the winning write's data is what we wanted anyway — the row
-   * exists, this jti is revoked, mission accomplished), so it's swallowed
-   * and treated as success. `upsert` is kept (not swapped for a plain
-   * `create`) since it's still the right shape for the common case where
-   * the row doesn't exist yet, and it's harmless — the `catch` is the only
-   * piece that was actually missing. Any other error (bad connection,
-   * schema drift, a different constraint) still propagates untouched.
+   * Deletes the session behind the (already guard-verified) bearer token.
+   * `deleteMany` makes it idempotent: a concurrent logout that already
+   * removed the row is not an error (never a 500).
    */
   async logout(rawToken: string): Promise<void> {
-    const decoded = this.jwtService.decode<
-      (AdminJwtPayload & { exp?: number }) | null
-    >(rawToken);
-
-    // Unreachable in practice — AdminAuthGuard already verified this exact
-    // token before this method is ever called — but guarded anyway so a
-    // future refactor that loosens that guarantee fails closed instead of
-    // writing a garbage RevokedToken row.
-    if (
-      !decoded ||
-      typeof decoded.jti !== 'string' ||
-      decoded.jti.length === 0 ||
-      typeof decoded.exp !== 'number'
-    ) {
+    const sessionToken = sessionTokenFromBearer(rawToken);
+    if (!sessionToken) {
       throw invalidAdminTokenException();
     }
+    await this.prisma.adminSession.deleteMany({
+      where: { token: sessionToken },
+    });
+  }
 
+  private async ensureCredentialAccount(
+    userId: string,
+    passwordHash: string,
+  ): Promise<void> {
+    const existing = await this.prisma.adminAccount.findFirst({
+      where: { userId, providerId: CREDENTIAL_PROVIDER_ID },
+      select: { password: true },
+    });
+    if (existing?.password) {
+      return;
+    }
     try {
-      await this.prisma.revokedToken.upsert({
-        where: { jti: decoded.jti },
-        create: { jti: decoded.jti, expiresAt: new Date(decoded.exp * 1000) },
-        update: {},
-      });
+      if (existing) {
+        await this.prisma.adminAccount.updateMany({
+          where: {
+            userId,
+            providerId: CREDENTIAL_PROVIDER_ID,
+            password: null,
+          },
+          data: { password: passwordHash },
+        });
+      } else {
+        await this.prisma.adminAccount.create({
+          data: {
+            userId,
+            accountId: userId,
+            providerId: CREDENTIAL_PROVIDER_ID,
+            password: passwordHash,
+          },
+        });
+      }
     } catch (err) {
-      // P2002 = unique constraint violation on `jti` (the PK): a genuinely
-      // concurrent logout for this same token already won the race and
-      // inserted the row first. That's the exact outcome we want (jti is
-      // revoked either way), so treat it as success. Anything else
-      // (connection errors, unexpected schema issues, etc.) is a real
-      // failure and must keep propagating.
-      const isConcurrentDuplicateRevoke =
+      // P2002: a concurrent login provisioned it first — same outcome.
+      const isRace =
         err instanceof Prisma.PrismaClientKnownRequestError &&
         err.code === 'P2002';
-      if (!isConcurrentDuplicateRevoke) {
+      if (!isRace) {
         throw err;
       }
     }

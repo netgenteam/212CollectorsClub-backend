@@ -503,7 +503,17 @@ model AdminUser {
   /// this model that can reach an HTTP response uses an explicit Prisma
   /// `select` that omits this column entirely, so there is no field to
   /// accidentally forget to strip.
+  ///
+  /// DEPRECATED (Story 12.2, AD-26): the source of truth for the password is
+  /// now `AdminAccount.password` (BetterAuth). This column is kept only as a
+  /// rollback path and as the lazy-provisioning source at login for admins
+  /// that still have no `AdminAccount` row; a later migration drops it.
   passwordHash String
+
+  /// Story 12.2 (BetterAuth user fields). Admins have no email verification
+  /// flow, hence the `true` default.
+  emailVerified Boolean @default(true)
+  image         String?
 
   /// Nullable, unused hook for a future staff-role split (PRD OQ10,
   /// AD-11) — no code anywhere reads this column yet, and this story adds
@@ -527,7 +537,56 @@ model AdminUser {
   /// nullable-FK pattern as `orderStatusHistoryRows` above.
   landingConfigEntries LandingConfigEntry[]
 
+  /// Story 12.2: BetterAuth session/account rows (AD-26). The all-lowercase
+  /// names are mandatory: the BetterAuth Prisma adapter joins through
+  /// `<lowercased modelName>s` (e.g. `adminaccounts`).
+  adminsessions AdminSession[]
+  adminaccounts AdminAccount[]
+
   @@map("Admin_Users")
+}
+
+/// Story 12.2 (AD-26/AD-27): BetterAuth session of the admin instance. The
+/// row IS the revocable admin login: logout deletes it. `expiresAt` is
+/// created+8h and never refreshed.
+model AdminSession {
+  id        String   @id @default(uuid()) @db.Uuid
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("Admin_Sessions")
+}
+
+/// Story 12.2 (AD-26): BetterAuth credential account of an admin
+/// (`providerId = 'credential'`, `password` = Argon2id digest).
+model AdminAccount {
+  id                    String    @id @default(uuid()) @db.Uuid
+  accountId             String
+  providerId            String
+  userId                String    @db.Uuid
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("Admin_Accounts")
 }
 
 /// Story 7.2 (AD-11, FR-21): persisted denylist of revoked Admin JWTs,
@@ -546,6 +605,9 @@ model AdminUser {
 /// since a revoked-but-unpruned row is harmless (the JWT itself would
 /// already be rejected as expired by then regardless of this table) and no
 /// story requires the cleanup job yet.
+///
+/// DEPRECATED (Story 12.2): no longer read nor written; admin logout now
+/// deletes the `AdminSession` row. Kept (rollback) until a later migration.
 model RevokedToken {
   jti       String   @id @db.Uuid
   expiresAt DateTime

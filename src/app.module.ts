@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
+import { AuthCoreModule } from './auth-core/auth-core.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { CatalogModule } from './catalog/catalog.module.js';
 import { CartModule } from './cart/cart.module.js';
@@ -28,6 +29,7 @@ import { WishlistModule } from './wishlist/wishlist.module.js';
     // second time by any feature module.
     ScheduleModule.forRoot(),
     PrismaModule,
+    AuthCoreModule,
     CatalogModule,
     CartModule,
     ContactModule,
