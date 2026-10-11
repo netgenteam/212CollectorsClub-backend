@@ -1,6 +1,6 @@
+import { createHmac } from 'node:crypto';
 import { HttpStatus, Inject, Injectable } from '@nestjs/common';
 import * as argon2 from 'argon2';
-import { APIError } from 'better-auth/api';
 import type { AdminAuth } from '../auth-core/admin-auth.factory.js';
 import {
   ADMIN_SESSION_EXPIRES_IN_SECONDS,
@@ -61,8 +61,8 @@ const CREDENTIAL_PROVIDER_ID = 'credential';
  *
  * **Non-enumeration**: unknown user and wrong password both throw the same
  * `invalidCredentialsException()`. For an unknown user a dummy Argon2id
- * verify runs so both branches cost about the same (BetterAuth performs the
- * real verify for existing users).
+ * verify runs so both branches cost about the same (existing users get the
+ * real verify against their stored digest).
  *
  * **Lazy provisioning**: an admin that has a legacy `passwordHash` but no
  * credential `AdminAccount` with a password (fixtures, admins created after
@@ -84,7 +84,7 @@ export class AdminAuthService {
       where: {
         OR: [{ username: usernameOrEmail }, { email: usernameOrEmail }],
       },
-      select: { id: true, email: true, passwordHash: true },
+      select: { id: true, passwordHash: true },
     });
 
     if (!admin) {
@@ -92,24 +92,27 @@ export class AdminAuthService {
       throw invalidCredentialsException();
     }
 
-    await this.ensureCredentialAccount(admin.id, admin.passwordHash);
+    const storedHash = await this.ensureCredentialAccount(
+      admin.id,
+      admin.passwordHash,
+    );
 
-    let accessToken: string | null;
-    try {
-      const { headers } = await this.adminAuth.api.signInEmail({
-        body: { email: admin.email, password },
-        returnHeaders: true,
-      });
-      accessToken = headers.get('set-auth-token');
-    } catch (err) {
-      if (err instanceof APIError) {
-        throw invalidCredentialsException();
-      }
-      throw err;
-    }
-    if (!accessToken) {
+    // The user was resolved above with the exact username-OR-email lookup of
+    // Story 7.1. `signInEmail` is NOT used because BetterAuth lowercases the
+    // email and re-queries it, which would reject admins whose stored email
+    // has uppercase characters. Instead: verify the Argon2id digest here and
+    // create the BetterAuth session directly, signing the token exactly as
+    // the bearer plugin / `set-auth-token` does (`<token>.<base64 HMAC>`).
+    const passwordMatches = await argon2.verify(storedHash, password);
+    if (!passwordMatches) {
       throw invalidCredentialsException();
     }
+    const ctx = await this.adminAuth.$context;
+    const session = await ctx.internalAdapter.createSession(admin.id);
+    const signature = createHmac('sha256', ctx.secret)
+      .update(session.token)
+      .digest('base64');
+    const accessToken = `${session.token}.${signature}`;
 
     return {
       accessToken,
@@ -136,13 +139,13 @@ export class AdminAuthService {
   private async ensureCredentialAccount(
     userId: string,
     passwordHash: string,
-  ): Promise<void> {
+  ): Promise<string> {
     const existing = await this.prisma.adminAccount.findFirst({
       where: { userId, providerId: CREDENTIAL_PROVIDER_ID },
       select: { password: true },
     });
     if (existing?.password) {
-      return;
+      return existing.password;
     }
     try {
       if (existing) {
@@ -173,5 +176,6 @@ export class AdminAuthService {
         throw err;
       }
     }
+    return passwordHash;
   }
 }

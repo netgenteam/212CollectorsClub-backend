@@ -1,4 +1,4 @@
-import { APIError } from 'better-auth/api';
+import { createHmac } from 'node:crypto';
 import * as argon2 from 'argon2';
 import { Prisma } from '../generated/prisma/client.js';
 import { AdminAuthService } from './admin-auth.service.js';
@@ -29,7 +29,8 @@ describe('AdminAuthService', () => {
     };
     adminSession: { deleteMany: ReturnType<typeof vi.fn> };
   };
-  let adminAuth: { api: { signInEmail: ReturnType<typeof vi.fn> } };
+  let createSession: ReturnType<typeof vi.fn>;
+  let adminAuth: { $context: Promise<unknown> };
   let service: AdminAuthService;
   let realPasswordHash: string;
 
@@ -43,18 +44,18 @@ describe('AdminAuthService', () => {
     prisma = {
       adminUser: { findFirst: vi.fn() },
       adminAccount: {
-        findFirst: vi.fn().mockResolvedValue({ password: 'x' }),
+        findFirst: vi.fn().mockResolvedValue({ password: realPasswordHash }),
         create: vi.fn().mockResolvedValue(undefined),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       adminSession: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
     };
+    createSession = vi.fn().mockResolvedValue({ token: 'session-token' });
     adminAuth = {
-      api: {
-        signInEmail: vi.fn().mockResolvedValue({
-          headers: new Headers({ 'set-auth-token': 'session.signature' }),
-        }),
-      },
+      $context: Promise.resolve({
+        secret: 'unit-secret',
+        internalAdapter: { createSession },
+      }),
     };
     service = new AdminAuthService(prisma as never, adminAuth as never);
   });
@@ -80,14 +81,11 @@ describe('AdminAuthService', () => {
       },
     });
     expect(verifySpy).toHaveBeenCalledTimes(1);
-    expect(adminAuth.api.signInEmail).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
   });
 
-  it('rejects with the EXACT SAME error when BetterAuth refuses the password', async () => {
+  it('rejects with the EXACT SAME error when the password is wrong, creating no session', async () => {
     prisma.adminUser.findFirst.mockResolvedValue(existingAdmin());
-    adminAuth.api.signInEmail.mockRejectedValue(
-      new APIError('UNAUTHORIZED', { message: 'Invalid email or password' }),
-    );
 
     await expect(
       service.login('admin', 'the-wrong-password'),
@@ -98,39 +96,28 @@ describe('AdminAuthService', () => {
         message: 'Incorrect username/email or password.',
       },
     });
+    expect(createSession).not.toHaveBeenCalled();
   });
 
-  it('does not swallow unexpected (non-APIError) failures as bad credentials', async () => {
-    prisma.adminUser.findFirst.mockResolvedValue(existingAdmin());
-    adminAuth.api.signInEmail.mockRejectedValue(new Error('db down'));
-
-    await expect(service.login('admin', REAL_PASSWORD)).rejects.toThrow(
-      'db down',
-    );
-  });
-
-  it('looks up the AdminUser by EITHER username or email and signs in with the stored email', async () => {
+  it('looks up the AdminUser by EITHER username or email (exact match) and creates the session for its id', async () => {
     prisma.adminUser.findFirst.mockResolvedValue(existingAdmin());
 
     await service.login(ADMIN_EMAIL, REAL_PASSWORD);
 
     expect(prisma.adminUser.findFirst).toHaveBeenCalledWith({
       where: { OR: [{ username: ADMIN_EMAIL }, { email: ADMIN_EMAIL }] },
-      select: { id: true, email: true, passwordHash: true },
+      select: { id: true, passwordHash: true },
     });
-    expect(adminAuth.api.signInEmail).toHaveBeenCalledWith({
-      body: { email: ADMIN_EMAIL, password: REAL_PASSWORD },
-      returnHeaders: true,
-    });
+    expect(createSession).toHaveBeenCalledWith(ADMIN_ID);
   });
 
-  it('returns the exact set-auth-token value with the unchanged 8h body shape', async () => {
+  it('returns the signed session token (<token>.<base64 HMAC>) with the unchanged 8h body shape', async () => {
     prisma.adminUser.findFirst.mockResolvedValue(existingAdmin());
 
     const result = await service.login('admin', REAL_PASSWORD);
 
     expect(result).toEqual({
-      accessToken: 'session.signature',
+      accessToken: `session-token.${createHmac('sha256', 'unit-secret').update('session-token').digest('base64')}`,
       tokenType: 'Bearer',
       expiresIn: 28800,
     });

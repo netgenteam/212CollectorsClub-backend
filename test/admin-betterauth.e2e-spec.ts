@@ -226,6 +226,40 @@ describe('Admin auth on BetterAuth (Story 12.2, e2e)', () => {
     }
   });
 
+  it('login lookup is the exact username-OR-email match of 7.1: an email stored with uppercase works by username and by exact email; other casings stay 401', async () => {
+    const mixedEmail = 'E2E.Mixed-12-2@212CollectorsClub.test';
+    const mixed = await prisma.adminUser.create({
+      data: {
+        username: 'e2e-mixed-12-2',
+        email: mixedEmail,
+        passwordHash,
+      },
+    });
+    try {
+      const attempt = (usernameOrEmail: string) =>
+        request(app.getHttpServer())
+          .post('/api/v1/admin/auth/login')
+          .send({ usernameOrEmail, password: TEST_PASSWORD });
+
+      for (const id of [mixed.username, mixedEmail]) {
+        const res = await attempt(id).expect(200);
+        const token = (res.body as { accessToken: string }).accessToken;
+        await request(app.getHttpServer())
+          .get('/api/v1/admin/auth/me')
+          .set('Authorization', `Bearer ${token}`)
+          .expect(200);
+      }
+      for (const id of [mixedEmail.toLowerCase(), mixedEmail.toUpperCase()]) {
+        const res = await attempt(id).expect(401);
+        expect((res.body as { errorCode: string }).errorCode).toBe(
+          'INVALID_ADMIN_CREDENTIALS',
+        );
+      }
+    } finally {
+      await prisma.adminUser.delete({ where: { id: mixed.id } });
+    }
+  });
+
   it('AC9: no BetterAuth HTTP handler is mounted (404 on its routes)', async () => {
     const server = app.getHttpServer();
     await request(server)
