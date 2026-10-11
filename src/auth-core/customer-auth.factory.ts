@@ -22,13 +22,23 @@ export const CUSTOMER_SESSION_UPDATE_AGE_SECONDS = 24 * 60 * 60;
  *   admin token and the guest `orderAccessToken`. The session travels only
  *   in the httpOnly cookie `cc_session`.
  * - `autoSignIn:false`: registering never starts a session.
- * - `emailVerification` / `sendResetPassword` are wired as no-ops; Story
- *   12.4 fills them in.
+ * - Password reset (Story 12.4): BetterAuth's one-time token (row in
+ *   `Customer_Verifications`, 1 h, deleted on use) and
+ *   `revokeSessionsOnPasswordReset`. Email verification is NOT BetterAuth's
+ *   stateless JWT (it could not be single-use): it is ours, see
+ *   `CustomerAuthService`.
  */
 export function createCustomerAuth(
   prisma: PrismaService,
   secret: string,
-  options: { secureCookies: boolean },
+  options: {
+    secureCookies: boolean;
+    /** Story 12.4: best-effort reset email (must never throw/await long). */
+    sendResetPassword: (
+      user: { email: string; name: string },
+      token: string,
+    ) => void;
+  },
 ) {
   return betterAuth({
     appName: '212CollectorsClub',
@@ -48,18 +58,18 @@ export function createCustomerAuth(
     },
     account: { modelName: 'customerAccount' },
     verification: { modelName: 'customerVerification' },
-    emailVerification: {
-      // Story 12.4 sends the email; no-op until then.
-      sendVerificationEmail: () => Promise.resolve(),
-    },
     emailAndPassword: {
       enabled: true,
       autoSignIn: false,
       requireEmailVerification: false,
       minPasswordLength: 8,
       maxPasswordLength: 128,
-      // Story 12.4 sends the email; no-op until then.
-      sendResetPassword: () => Promise.resolve(),
+      resetPasswordTokenExpiresIn: 3600,
+      revokeSessionsOnPasswordReset: true,
+      sendResetPassword: ({ user, token }) => {
+        options.sendResetPassword(user, token);
+        return Promise.resolve();
+      },
       password: {
         hash: (password: string) =>
           argon2.hash(password, { type: argon2.argon2id }),

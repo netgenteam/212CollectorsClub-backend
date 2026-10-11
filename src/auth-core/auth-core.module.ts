@@ -3,6 +3,10 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { createAdminAuth } from './admin-auth.factory.js';
 import { createCustomerAuth } from './customer-auth.factory.js';
+import { Logger } from '@nestjs/common';
+import { MailerModule } from '../common/mailer/mailer.module.js';
+import { MailerService } from '../common/mailer/mailer.service.js';
+import { DEFAULT_FRONTEND_URL, resetPasswordEmail } from './customer-mail.js';
 import { ADMIN_AUTH, CUSTOMER_AUTH } from './auth-core.constants.js';
 
 /**
@@ -14,7 +18,7 @@ import { ADMIN_AUTH, CUSTOMER_AUTH } from './auth-core.constants.js';
  */
 @Global()
 @Module({
-  imports: [ConfigModule],
+  imports: [ConfigModule, MailerModule],
   providers: [
     {
       provide: ADMIN_AUTH,
@@ -28,12 +32,33 @@ import { ADMIN_AUTH, CUSTOMER_AUTH } from './auth-core.constants.js';
     },
     {
       provide: CUSTOMER_AUTH,
-      inject: [PrismaService, ConfigService],
-      useFactory: (prisma: PrismaService, config: ConfigService) =>
+      inject: [PrismaService, ConfigService, MailerService],
+      useFactory: (
+        prisma: PrismaService,
+        config: ConfigService,
+        mailer: MailerService,
+      ) =>
         createCustomerAuth(
           prisma,
           config.getOrThrow<string>('CUSTOMER_AUTH_SECRET'),
           {
+            // Fire-and-forget: the response must not depend on (nor leak
+            // through its timing) whether the email exists or SMTP is slow.
+            sendResetPassword: (user, token) => {
+              const frontendUrl = config.get<string>(
+                'FRONTEND_URL',
+                DEFAULT_FRONTEND_URL,
+              );
+              mailer
+                .sendMail(
+                  resetPasswordEmail(user.email, user.name, frontendUrl, token),
+                )
+                .catch((err: unknown) =>
+                  new Logger('CustomerMail').error(
+                    `Reset-password email failed: ${err instanceof Error ? err.message : String(err)}`,
+                  ),
+                );
+            },
             secureCookies:
               config.get<string>('NODE_ENV', 'development') !== 'development' &&
               config.get<string>('NODE_ENV', 'development') !== 'test',

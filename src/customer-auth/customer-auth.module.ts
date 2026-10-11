@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { MailerModule } from '../common/mailer/mailer.module.js';
 import { CustomerAuthController } from './customer-auth.controller.js';
 import { CustomerAuthService } from './customer-auth.service.js';
 
@@ -8,6 +9,7 @@ import { CustomerAuthService } from './customer-auth.service.js';
  * `ThrottlerModule.forRoot` that `ContactModule` already registers (global).
  */
 @Module({
+  imports: [MailerModule],
   controllers: [CustomerAuthController],
   providers: [CustomerAuthService],
 })

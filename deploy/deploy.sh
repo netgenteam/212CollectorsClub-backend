@@ -67,6 +67,15 @@ log "environment=$ENVIRONMENT app_dir=$APP_DIR service=$SERVICE_NAME ref=$GIT_RE
 [ -d "$APP_DIR/.git" ] || fail "$APP_DIR is not a git checkout — see docs/deployment.md provisioning steps"
 [ -f "$ENV_FILE" ] || fail "$ENV_FILE not found — create it per docs/deployment.md before deploying"
 
+# Epic 12: the service does not boot without CUSTOMER_AUTH_SECRET; fail the
+# deploy early instead of crash-looping after the restart.
+for var in CUSTOMER_AUTH_SECRET; do
+  grep -Eq "^${var}=.+" "$ENV_FILE" || fail "$var is missing in $ENV_FILE — see docs/deployment.md §1.5"
+done
+for var in ADMIN_AUTH_SECRET FRONTEND_URL; do
+  grep -Eq "^${var}=.+" "$ENV_FILE" || log "WARNING: $var is not set in $ENV_FILE — see docs/deployment.md §1.5"
+done
+
 cd "$APP_DIR"
 
 log "fetching and checking out $GIT_REF"

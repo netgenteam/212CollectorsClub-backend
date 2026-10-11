@@ -66,11 +66,23 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # Story 12.4: e2e reads the verification/reset emails from MailHog's API.
+      mailhog:
+        image: mailhog/mailhog:v1.0.1
+        ports:
+          - 1025:1025
+          - 8025:8025
     env:
       NODE_ENV: test
       COOKIE_SECRET: ci-only-cookie-secret
       ADMIN_AUTH_SECRET: ci-only-admin-auth-secret
       CUSTOMER_AUTH_SECRET: ci-only-customer-auth-secret
+      FRONTEND_URL: http://localhost:5173
+      SMTP_HOST: localhost
+      SMTP_PORT: '1025'
+      SMTP_SECURE: 'false'
+      SMTP_FROM: 212CollectorsClub <no-reply@212collectorsclub.test>
+      ADMIN_CONTACT_EMAIL: admin@212collectorsclub.test
       DATABASE_URL: postgresql://collectorsclub_ci:collectorsclub_ci_password@localhost:5432/collectorsclub_ci?schema=public
     steps:
       - name: Checkout

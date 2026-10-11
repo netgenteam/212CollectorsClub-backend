@@ -114,6 +114,22 @@ PORT=3000
 DATABASE_URL="postgresql://collectorsclub_production:REPLACE_ME_PRODUCTION@localhost:5432/collectorsclub_production?schema=public"
 ```
 
+Both files must also define the auth secrets and the storefront URL (the
+service refuses to boot without `CUSTOMER_AUTH_SECRET`):
+
+```env
+# Signs admin sessions (Story 12.2). Falls back to the legacy
+# ADMIN_JWT_SECRET if unset. Use `openssl rand -hex 32`.
+ADMIN_AUTH_SECRET=REPLACE_ME
+# Signs the customer cookie `cc_session` (Story 12.3). REQUIRED, no fallback,
+# and it MUST differ from ADMIN_AUTH_SECRET and COOKIE_SECRET (admin and
+# customer sessions are strictly separated, FR-41).
+CUSTOMER_AUTH_SECRET=REPLACE_ME
+# Public storefront URL used in verification / password-reset email links
+# (Story 12.4), e.g. https://212collectorsclub.com (staging: its own URL).
+FRONTEND_URL=https://REPLACE_ME
+```
+
 Set ownership/permissions so only the matching service user (and root) can
 read them: `chown cc212-staging:cc212-staging /opt/212cc/staging/shared/.env && chmod 600 ...` (same pattern for production).
 

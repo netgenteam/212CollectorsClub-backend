@@ -25,3 +25,8 @@ export class RegisterCustomerResponseDto {
   })
   message: string;
 }
+
+export class MessageResponseDto {
+  @ApiProperty({ example: 'Email verified.' })
+  message: string;
+}

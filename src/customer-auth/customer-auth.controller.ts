@@ -27,11 +27,15 @@ import {
 import { CustomerAuthService } from './customer-auth.service.js';
 import {
   CustomerResponseDto,
+  MessageResponseDto,
   RegisterCustomerResponseDto,
 } from './dto/customer-response.dto.js';
+import { ForgotPasswordDto } from './dto/forgot-password.dto.js';
 import { LoginCustomerDto } from './dto/login-customer.dto.js';
 import { RegisterCustomerDto } from './dto/register-customer.dto.js';
+import { ResetPasswordDto } from './dto/reset-password.dto.js';
 import { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto.js';
+import { VerifyEmailDto } from './dto/verify-email.dto.js';
 import { strictBody } from './strict-body.pipe.js';
 
 // Same per-IP mechanism and budget as POST /contact (Story 6.1).
@@ -106,6 +110,77 @@ export class CustomerAuthController {
       res.append('Set-Cookie', cookie);
     }
     return customer;
+  }
+
+  @Post('verify-email')
+  @UseGuards(ThrottlerGuard)
+  @Throttle(THROTTLE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Verify the email with the token from the email link',
+    description:
+      'One-time token (24 h). Sets emailVerified=true. Rate-limited like login.',
+  })
+  @ApiBody({ type: VerifyEmailDto })
+  @ApiResponse({ status: 200, type: MessageResponseDto })
+  @ApiResponse({
+    status: 400,
+    description:
+      'errorCode INVALID_VERIFICATION_TOKEN - unknown, tampered, expired or already used token (uniform).',
+  })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded.' })
+  async verifyEmail(
+    @Body(strictBody(VerifyEmailDto)) dto: Readonly<VerifyEmailDto>,
+  ): Promise<MessageResponseDto> {
+    await this.service.verifyEmail(dto.token);
+    return { message: 'Email verified.' };
+  }
+
+  @Post('forgot-password')
+  @UseGuards(ThrottlerGuard)
+  @Throttle(THROTTLE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Request a password reset email',
+    description:
+      'Always 200 with the same body, whether or not the email has an account (anti-enumeration); only an existing account gets the email with a one-hour one-time link. Rate-limited like login.',
+  })
+  @ApiBody({ type: ForgotPasswordDto })
+  @ApiResponse({ status: 200, type: MessageResponseDto })
+  @ApiResponse({ status: 400, description: 'Invalid email or unknown field.' })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded.' })
+  async forgotPassword(
+    @Body(strictBody(ForgotPasswordDto)) dto: Readonly<ForgotPasswordDto>,
+  ): Promise<MessageResponseDto> {
+    await this.service.forgotPassword(dto.email);
+    return {
+      message:
+        'If an account exists for this email, a password reset link has been sent.',
+    };
+  }
+
+  @Post('reset-password')
+  @UseGuards(ThrottlerGuard)
+  @Throttle(THROTTLE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Set a new password with the reset token',
+    description:
+      'One-time token valid for 1 hour. Changes the password (Argon2id) and revokes ALL the customer sessions. A too-short password is a 400 and does not consume the token. Rate-limited like login.',
+  })
+  @ApiBody({ type: ResetPasswordDto })
+  @ApiResponse({ status: 200, type: MessageResponseDto })
+  @ApiResponse({
+    status: 400,
+    description:
+      'errorCode INVALID_RESET_TOKEN (unknown, expired or used token), or a validation error (password < 8 chars).',
+  })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded.' })
+  async resetPassword(
+    @Body(strictBody(ResetPasswordDto)) dto: Readonly<ResetPasswordDto>,
+  ): Promise<MessageResponseDto> {
+    await this.service.resetPassword(dto.token, dto.password);
+    return { message: 'Password updated. You can now log in.' };
   }
 
   @Get('me')
