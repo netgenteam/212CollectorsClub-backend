@@ -99,6 +99,22 @@ export class CustomerAuthService {
    * "you already have an account" email (Story 12.4), both best-effort.
    */
   async register(dto: RegisterCustomerDto): Promise<void> {
+    // Constant-time floor: a real signup writes user+account rows that the
+    // duplicate branch skips (~10 ms). Padding both to a common minimum hides
+    // that residue; the floor sits well above the Argon2id cost.
+    const floor = this.config.get<number>('REGISTER_MIN_DURATION_MS', 300);
+    const startedAt = performance.now();
+    try {
+      await this.registerInner(dto);
+    } finally {
+      const wait = floor - (performance.now() - startedAt);
+      if (wait > 0) {
+        await new Promise((resolve) => setTimeout(resolve, wait));
+      }
+    }
+  }
+
+  private async registerInner(dto: RegisterCustomerDto): Promise<void> {
     let created;
     try {
       created = await this.customerAuth.api.signUpEmail({
@@ -122,17 +138,20 @@ export class CustomerAuthService {
       this.sendBestEffort(alreadyRegisteredEmail(dto.email, this.frontendUrl));
       return;
     }
-    // Account committed: a failure here must not alter the 201 (AC1).
-    try {
-      const token = await this.issueVerificationToken(created.user.id);
-      this.sendBestEffort(
-        verificationEmail(dto.email, dto.name, this.frontendUrl, token),
-      );
-    } catch (err) {
-      this.logger.error(
-        `Verification token for new customer failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    // Account committed. Token + email run in the background so this branch
+    // awaits exactly what the duplicate branch awaits (no timing oracle) and
+    // a failure here never alters the 201 (AC1).
+    void this.issueVerificationToken(created.user.id)
+      .then((token) =>
+        this.sendBestEffort(
+          verificationEmail(dto.email, dto.name, this.frontendUrl, token),
+        ),
+      )
+      .catch((err: unknown) => {
+        this.logger.error(
+          `Verification token for new customer failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 
   /**
@@ -182,13 +201,15 @@ export class CustomerAuthService {
     if (exists === 0) {
       return;
     }
-    try {
-      await this.customerAuth.api.requestPasswordReset({ body: { email } });
-    } catch (err) {
-      this.logger.error(
-        `Password reset request failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    // Background (not awaited): both branches return after the same single
+    // lookup, so response time does not reveal whether the account exists.
+    void this.customerAuth.api
+      .requestPasswordReset({ body: { email } })
+      .catch((err: unknown) => {
+        this.logger.error(
+          `Password reset request failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 
   /** BetterAuth deletes the token, hashes (Argon2id) and revokes all sessions. */

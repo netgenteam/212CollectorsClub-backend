@@ -1,7 +1,7 @@
 import type { SendMailOptions } from '../common/mailer/mailer.service.js';
 
 /** Default for local development; every deployed env sets FRONTEND_URL. */
-export const DEFAULT_FRONTEND_URL = 'http://localhost:5173';
+export const DEFAULT_FRONTEND_URL = 'http://localhost:3000';
 
 function link(frontendUrl: string, path: string, token: string): string {
   return `${frontendUrl.replace(/\/+$/, '')}${path}?token=${encodeURIComponent(token)}`;

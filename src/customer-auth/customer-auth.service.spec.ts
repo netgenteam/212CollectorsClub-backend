@@ -50,7 +50,7 @@ describe('CustomerAuthService', () => {
     prisma.customerVerification = verification;
     prisma.customer.updateMany = vi.fn();
     resetPassword = vi.fn();
-    requestPasswordReset = vi.fn();
+    requestPasswordReset = vi.fn().mockResolvedValue(undefined);
     service = new CustomerAuthService(
       prisma as never,
       {
@@ -62,7 +62,10 @@ describe('CustomerAuthService', () => {
         },
       } as never,
       { sendMail } as never,
-      { get: (_k: string, d: string) => d } as never,
+      {
+        get: (k: string, d: unknown) =>
+          k === 'REGISTER_MIN_DURATION_MS' ? 0 : d,
+      } as never,
     );
   });
 
@@ -71,8 +74,8 @@ describe('CustomerAuthService', () => {
     signUpEmail.mockResolvedValue({ user: { id: 'u1' } });
     await expect(service.register(DTO)).resolves.toBeUndefined();
     expect(argon2.hash).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(sendMail).toHaveBeenCalledTimes(1));
     expect(verification.create).toHaveBeenCalledTimes(1);
-    expect(sendMail).toHaveBeenCalledTimes(1);
     expect(
       (sendMail.mock.calls[0] as [{ subject: string }])[0].subject,
     ).toMatch(/Verify/);
@@ -199,6 +202,7 @@ describe('CustomerAuthService', () => {
     await expect(service.register(DTO)).resolves.toBeUndefined();
     verification.create.mockRejectedValue(new Error('db'));
     await expect(service.register(DTO)).resolves.toBeUndefined();
+    await new Promise((r) => setTimeout(r, 20));
   });
 
   describe('verifyEmail', () => {
@@ -245,6 +249,63 @@ describe('CustomerAuthService', () => {
       service.resetPassword('t', 'longenough1'),
     ).rejects.toMatchObject({
       response: { errorCode: 'INVALID_RESET_TOKEN' },
+    });
+  });
+
+  describe('timing: no branch awaits work exclusive to the other', () => {
+    const SLOW = 150;
+    const slow = () => new Promise((r) => setTimeout(() => r({}), SLOW));
+    const elapsed = async (fn: () => Promise<unknown>) => {
+      const t = performance.now();
+      await fn();
+      return performance.now() - t;
+    };
+
+    it('forgotPassword: existing account returns as fast as the unknown one even if token generation is slow', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
+      requestPasswordReset.mockImplementation(() => slow());
+      prisma.customer.count.mockResolvedValue(1);
+      const existing = await elapsed(() => service.forgotPassword('a@b.co'));
+      prisma.customer.count.mockResolvedValue(0);
+      const unknown = await elapsed(() => service.forgotPassword('a@b.co'));
+      expect(existing).toBeLessThan(SLOW / 2);
+      expect(unknown).toBeLessThan(SLOW / 2);
+    });
+
+    it('register: both branches are padded to the same minimum duration', async () => {
+      const padded = new CustomerAuthService(
+        prisma as never,
+        { api: { signUpEmail } } as never,
+        { sendMail } as never,
+        {
+          get: (k: string) =>
+            k === 'REGISTER_MIN_DURATION_MS' ? 120 : 'http://x',
+        } as never,
+      );
+      signUpEmail.mockResolvedValue({ user: { id: 'u1' } });
+      prisma.customer.count.mockResolvedValue(1);
+      expect(await elapsed(() => padded.register(DTO))).toBeGreaterThanOrEqual(
+        115,
+      );
+      prisma.customer.count.mockResolvedValue(0);
+      expect(await elapsed(() => padded.register(DTO))).toBeGreaterThanOrEqual(
+        115,
+      );
+    });
+
+    it('register: new account does not await token creation nor mail; duplicate awaits the same lookup', async () => {
+      signUpEmail.mockResolvedValue({ user: { id: 'u1' } });
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
+      verification.create.mockImplementation(() => slow());
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
+      sendMail.mockImplementation(() => slow());
+      prisma.customer.count.mockResolvedValue(1);
+      const fresh = await elapsed(() => service.register(DTO));
+      prisma.customer.count.mockResolvedValue(0);
+      const dup = await elapsed(() => service.register(DTO));
+      expect(fresh).toBeLessThan(SLOW / 2);
+      expect(dup).toBeLessThan(SLOW / 2);
+      expect(prisma.customer.count).toHaveBeenCalledTimes(2);
     });
   });
 });

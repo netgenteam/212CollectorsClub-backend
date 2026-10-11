@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -15,6 +16,8 @@ const EMAIL = 'e2e-customer-12-4@212collectorsclub.test';
 const GHOST = 'e2e-customer-12-4-ghost@212collectorsclub.test';
 const PASSWORD = 'correct-horse-battery-12-4';
 const NEW_PASSWORD = 'brand-new-password-12-4';
+const sha256b64 = (t: string) =>
+  createHash('sha256').update(t).digest('base64url');
 const MAILHOG = 'http://localhost:8025';
 
 /** Mail bodies are quoted-printable: undo soft breaks and =XX escapes. */
@@ -102,6 +105,14 @@ describe(
     });
 
     async function cleanup() {
+      const existing = await prisma.customer.findUnique({
+        where: { email: EMAIL },
+      });
+      if (existing) {
+        await prisma.customerVerification.deleteMany({
+          where: { value: existing.id },
+        });
+      }
       await prisma.customer.deleteMany({ where: { email: { in: [EMAIL] } } });
       await prisma.customerVerification.deleteMany({
         where: { identifier: { startsWith: 'email-verification:' } },
@@ -263,7 +274,7 @@ describe(
           'reset-password',
         );
         const row = await prisma.customerVerification.findFirst({
-          where: { identifier: { contains: token } },
+          where: { identifier: sha256b64(`reset-password:${token}`) },
         });
         expect(row).not.toBeNull();
         const ttl = row!.expiresAt.getTime() - row!.createdAt.getTime();

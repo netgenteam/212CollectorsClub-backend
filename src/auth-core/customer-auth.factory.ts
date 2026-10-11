@@ -57,7 +57,11 @@ export function createCustomerAuth(
       updateAge: CUSTOMER_SESSION_UPDATE_AGE_SECONDS,
     },
     account: { modelName: 'customerAccount' },
-    verification: { modelName: 'customerVerification' },
+    verification: {
+      modelName: 'customerVerification',
+      // Reset tokens are stored as SHA-256, never in clear.
+      storeIdentifier: 'hashed',
+    },
     emailAndPassword: {
       enabled: true,
       autoSignIn: false,
