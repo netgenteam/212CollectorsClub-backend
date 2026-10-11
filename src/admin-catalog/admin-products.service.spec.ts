@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { Logger, NotFoundException } from '@nestjs/common';
 import { AdminProductsService } from './admin-products.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import type { CreateProductDto } from './dto/create-product.dto.js';
@@ -110,7 +110,13 @@ describe('AdminProductsService', () => {
     productImage: {
       createMany: ReturnType<typeof vi.fn>;
       aggregate: ReturnType<typeof vi.fn>;
+      findFirst: ReturnType<typeof vi.fn>;
+      findMany: ReturnType<typeof vi.fn>;
+      count: ReturnType<typeof vi.fn>;
+      delete: ReturnType<typeof vi.fn>;
+      update: ReturnType<typeof vi.fn>;
     };
+    $queryRaw: ReturnType<typeof vi.fn>;
     $transaction: ReturnType<typeof vi.fn>;
   };
 
@@ -127,7 +133,13 @@ describe('AdminProductsService', () => {
       productImage: {
         createMany: vi.fn(),
         aggregate: vi.fn(),
+        findFirst: vi.fn(),
+        findMany: vi.fn(),
+        count: vi.fn(),
+        delete: vi.fn(),
+        update: vi.fn(),
       },
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'locked' }]),
       $transaction: vi.fn(async (cb: (tx: typeof prisma) => Promise<unknown>) =>
         cb(prisma),
       ),
@@ -602,6 +614,179 @@ describe('AdminProductsService', () => {
       expect(prisma.productImage.createMany).toHaveBeenCalledWith({
         data: [expect.objectContaining({ sortOrder: 0 })],
       });
+    });
+  });
+
+  describe('removeImage (Story 12.1)', () => {
+    const PRODUCT_ID = 'f65915f5-2931-4e50-af95-630b1fd7b950';
+    const IMAGE_ID = '11111111-1111-4111-8111-111111111111';
+    const IMAGE_URL = '/uploads/public/products/abc.png';
+
+    it('locks the parent Product row, deletes the row and unlinks the file post-commit', async () => {
+      prisma.productImage.findFirst.mockResolvedValue({
+        id: IMAGE_ID,
+        url: IMAGE_URL,
+      });
+      prisma.productImage.count.mockResolvedValue(2);
+
+      await service.removeImage(PRODUCT_ID, IMAGE_ID);
+
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(prisma.productImage.delete).toHaveBeenCalledWith({
+        where: { id: IMAGE_ID },
+      });
+      expect(unlinkMock).toHaveBeenCalledTimes(1);
+      expect(String(unlinkMock.mock.calls[0][0])).toMatch(
+        /uploads\/public\/products\/abc\.png$/,
+      );
+    });
+
+    it('the last image: 400 PRODUCT_IMAGE_REQUIRED, nothing deleted or unlinked', async () => {
+      prisma.productImage.findFirst.mockResolvedValue({
+        id: IMAGE_ID,
+        url: IMAGE_URL,
+      });
+      prisma.productImage.count.mockResolvedValue(1);
+
+      const thrown: unknown = await service
+        .removeImage(PRODUCT_ID, IMAGE_ID)
+        .catch((err: unknown) => err);
+
+      expect(thrown).toMatchObject({
+        status: 400,
+        response: { errorCode: 'PRODUCT_IMAGE_REQUIRED' },
+      });
+      expect(prisma.productImage.delete).not.toHaveBeenCalled();
+      expect(unlinkMock).not.toHaveBeenCalled();
+    });
+
+    it('an unknown Product: 404', async () => {
+      prisma.$queryRaw.mockResolvedValue([]);
+      await expect(
+        service.removeImage(PRODUCT_ID, IMAGE_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.productImage.delete).not.toHaveBeenCalled();
+    });
+
+    it('an unknown image or an image of another Product: 404', async () => {
+      prisma.productImage.findFirst.mockResolvedValue(null);
+      await expect(
+        service.removeImage(PRODUCT_ID, IMAGE_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.productImage.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: IMAGE_ID, productId: PRODUCT_ID },
+        }),
+      );
+      expect(prisma.productImage.delete).not.toHaveBeenCalled();
+    });
+
+    it('ENOENT on unlink: silent 204 path (resolves)', async () => {
+      prisma.productImage.findFirst.mockResolvedValue({
+        id: IMAGE_ID,
+        url: IMAGE_URL,
+      });
+      prisma.productImage.count.mockResolvedValue(2);
+      unlinkMock.mockRejectedValueOnce(
+        Object.assign(new Error('gone'), { code: 'ENOENT' }),
+      );
+      const warn = vi
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+
+      await expect(
+        service.removeImage(PRODUCT_ID, IMAGE_ID),
+      ).resolves.toBeUndefined();
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it('another unlink error: still resolves, logged with Logger.warn', async () => {
+      prisma.productImage.findFirst.mockResolvedValue({
+        id: IMAGE_ID,
+        url: IMAGE_URL,
+      });
+      prisma.productImage.count.mockResolvedValue(2);
+      unlinkMock.mockRejectedValueOnce(
+        Object.assign(new Error('denied'), { code: 'EACCES' }),
+      );
+      const warn = vi
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+
+      await expect(
+        service.removeImage(PRODUCT_ID, IMAGE_ID),
+      ).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      warn.mockRestore();
+    });
+
+    it('a url that traverses outside the public uploads dir is NOT unlinked (still 204, warned)', async () => {
+      prisma.productImage.findFirst.mockResolvedValue({
+        id: IMAGE_ID,
+        url: '/uploads/public/../../etc/passwd',
+      });
+      prisma.productImage.count.mockResolvedValue(2);
+      const warn = vi
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+
+      await expect(
+        service.removeImage(PRODUCT_ID, IMAGE_ID),
+      ).resolves.toBeUndefined();
+      expect(unlinkMock).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledTimes(1);
+      warn.mockRestore();
+    });
+  });
+
+  describe('reorderImages (Story 12.1)', () => {
+    const PRODUCT_ID = 'f65915f5-2931-4e50-af95-630b1fd7b950';
+    const A = '11111111-1111-4111-8111-111111111111';
+    const B = '22222222-2222-4222-8222-222222222222';
+    const C = '33333333-3333-4333-8333-333333333333';
+
+    beforeEach(() => {
+      prisma.productImage.findMany.mockResolvedValue([
+        { id: A },
+        { id: B },
+        { id: C },
+      ]);
+      prisma.product.findUnique.mockResolvedValue(buildProductRow());
+    });
+
+    it('a valid permutation reassigns sortOrder 0..n-1 in the given order', async () => {
+      await service.reorderImages(PRODUCT_ID, { imageIds: [C, A, B] });
+
+      expect(prisma.productImage.update.mock.calls).toEqual([
+        [{ where: { id: C }, data: { sortOrder: 0 } }],
+        [{ where: { id: A }, data: { sortOrder: 1 } }],
+        [{ where: { id: B }, data: { sortOrder: 2 } }],
+      ]);
+    });
+
+    it.each([
+      ['missing', [A, B]],
+      ['extra/foreign', [A, B, C, '44444444-4444-4444-8444-444444444444']],
+      ['foreign replacing one', [A, B, '44444444-4444-4444-8444-444444444444']],
+      ['duplicate', [A, A, B]],
+    ])('%s ids: 400 INVALID_IMAGE_ORDER, nothing written', async (_n, ids) => {
+      const thrown: unknown = await service
+        .reorderImages(PRODUCT_ID, { imageIds: ids })
+        .catch((err: unknown) => err);
+
+      expect(thrown).toMatchObject({
+        status: 400,
+        response: { errorCode: 'INVALID_IMAGE_ORDER' },
+      });
+      expect(prisma.productImage.update).not.toHaveBeenCalled();
+    });
+
+    it('an unknown Product: 404', async () => {
+      prisma.$queryRaw.mockResolvedValue([]);
+      await expect(
+        service.reorderImages(PRODUCT_ID, { imageIds: [A, B, C] }),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

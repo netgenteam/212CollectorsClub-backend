@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import { unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -629,6 +631,222 @@ describe('AdminProductsController (e2e)', () => {
       )
         .send({ stock: 5 })
         .expect(404);
+    });
+  });
+
+  describe('product image delete & reorder (Story 12.1, FR-38/FR-39)', () => {
+    const NIL = '00000000-0000-4000-8000-000000000000';
+
+    async function createWithTwoImages(): Promise<AdminProduct> {
+      const res = await createProductRequest()
+        .attach('images', IMAGE_FIXTURE_PATH)
+        .expect(201);
+      const created = res.body as AdminProduct;
+      expect(created.images).toHaveLength(2);
+      return created;
+    }
+
+    function fileOf(url: string): string {
+      return join(UPLOADS_PUBLIC_ROOT, url.slice(PUBLIC_STATIC_PREFIX.length));
+    }
+
+    async function cleanup(id: string): Promise<void> {
+      await authed('delete', `/api/v1/admin/products/${id}`);
+    }
+
+    it('401 INVALID_ADMIN_TOKEN without a token (DELETE and PATCH order)', async () => {
+      const del = await request(app.getHttpServer())
+        .delete(`/api/v1/admin/products/${NIL}/images/${NIL}`)
+        .expect(401);
+      expect((del.body as ApiErrorBody).errorCode).toBe('INVALID_ADMIN_TOKEN');
+      const patch = await request(app.getHttpServer())
+        .patch(`/api/v1/admin/products/${NIL}/images/order`)
+        .send({ imageIds: [NIL] })
+        .expect(401);
+      expect((patch.body as ApiErrorBody).errorCode).toBe(
+        'INVALID_ADMIN_TOKEN',
+      );
+    });
+
+    it('AC1+AC6: 204, row gone, file gone, public detail no longer lists it, next image becomes primary', async () => {
+      const product = await createWithTwoImages();
+      try {
+        const [first, second] = product.images;
+        expect(existsSync(fileOf(first.url))).toBe(true);
+
+        await authed(
+          'delete',
+          `/api/v1/admin/products/${product.id}/images/${first.id}`,
+        ).expect(204);
+
+        expect(
+          await prisma.productImage.findUnique({ where: { id: first.id } }),
+        ).toBeNull();
+        expect(existsSync(fileOf(first.url))).toBe(false);
+
+        const pub = await request(app.getHttpServer())
+          .get(`/api/v1/products/${product.id}`)
+          .expect(200);
+        const images = (pub.body as { images: Array<{ id: string }> }).images;
+        expect(images.map((i) => i.id)).toEqual([second.id]);
+
+        const admin = await authed(
+          'get',
+          `/api/v1/admin/products/${product.id}`,
+        ).expect(200);
+        expect((admin.body as AdminProduct).images[0].id).toBe(second.id);
+      } finally {
+        await cleanup(product.id);
+      }
+    });
+
+    it('AC2: the last image: 400 PRODUCT_IMAGE_REQUIRED, row and file untouched', async () => {
+      const res = await createProductRequest().expect(201);
+      const product = res.body as AdminProduct;
+      try {
+        const [only] = product.images;
+        const del = await authed(
+          'delete',
+          `/api/v1/admin/products/${product.id}/images/${only.id}`,
+        ).expect(400);
+        expect((del.body as ApiErrorBody).errorCode).toBe(
+          'PRODUCT_IMAGE_REQUIRED',
+        );
+        expect(
+          await prisma.productImage.findUnique({ where: { id: only.id } }),
+        ).not.toBeNull();
+        expect(existsSync(fileOf(only.url))).toBe(true);
+      } finally {
+        await cleanup(product.id);
+      }
+    });
+
+    it('AC3: non-UUID 400; unknown product / unknown image / image of another product 404', async () => {
+      const a = await createWithTwoImages();
+      const b = await createWithTwoImages();
+      try {
+        await authed(
+          'delete',
+          `/api/v1/admin/products/not-a-uuid/images/${a.images[0].id}`,
+        ).expect(400);
+        await authed(
+          'delete',
+          `/api/v1/admin/products/${a.id}/images/not-a-uuid`,
+        ).expect(400);
+        await authed(
+          'delete',
+          `/api/v1/admin/products/${NIL}/images/${a.images[0].id}`,
+        ).expect(404);
+        await authed(
+          'delete',
+          `/api/v1/admin/products/${a.id}/images/${NIL}`,
+        ).expect(404);
+        await authed(
+          'delete',
+          `/api/v1/admin/products/${a.id}/images/${b.images[0].id}`,
+        ).expect(404);
+        expect(
+          await prisma.productImage.count({ where: { productId: b.id } }),
+        ).toBe(2);
+      } finally {
+        await cleanup(a.id);
+        await cleanup(b.id);
+      }
+    });
+
+    it('AC5: two concurrent DELETEs of the two images: exactly one 204, one 400, one image remains', async () => {
+      for (let round = 0; round < 3; round++) {
+        const product = await createWithTwoImages();
+        try {
+          const results = await Promise.all(
+            product.images.map((img) =>
+              authed(
+                'delete',
+                `/api/v1/admin/products/${product.id}/images/${img.id}`,
+              ),
+            ),
+          );
+          const statuses = results.map((r) => r.status).sort();
+          expect(statuses).toEqual([204, 400]);
+          const loser = results.find((r) => r.status === 400)!;
+          expect((loser.body as ApiErrorBody).errorCode).toBe(
+            'PRODUCT_IMAGE_REQUIRED',
+          );
+          expect(
+            await prisma.productImage.count({
+              where: { productId: product.id },
+            }),
+          ).toBe(1);
+        } finally {
+          await cleanup(product.id);
+        }
+      }
+    });
+
+    it('AC7: file already absent: still 204', async () => {
+      const product = await createWithTwoImages();
+      try {
+        const [first] = product.images;
+        await unlink(fileOf(first.url));
+        await authed(
+          'delete',
+          `/api/v1/admin/products/${product.id}/images/${first.id}`,
+        ).expect(204);
+        expect(
+          await prisma.productImage.findUnique({ where: { id: first.id } }),
+        ).toBeNull();
+      } finally {
+        await cleanup(product.id);
+      }
+    });
+
+    it('AC8: PATCH order with an exact permutation reassigns sortOrder 0..n-1; invalid lists 400 and change nothing; unknown product 404', async () => {
+      const product = await createWithTwoImages();
+      const other = await createWithTwoImages();
+      try {
+        const [a, b] = product.images;
+        const ok = await authed(
+          'patch',
+          `/api/v1/admin/products/${product.id}/images/order`,
+        )
+          .send({ imageIds: [b.id, a.id] })
+          .expect(200);
+        const body = ok.body as AdminProduct;
+        expect(body.images.map((i) => [i.id, i.sortOrder])).toEqual([
+          [b.id, 0],
+          [a.id, 1],
+        ]);
+
+        const invalid: unknown[] = [
+          [a.id],
+          [a.id, b.id, other.images[0].id],
+          [a.id, other.images[0].id],
+          [a.id, a.id],
+          [a.id, 'not-a-uuid'],
+          [],
+        ];
+        for (const imageIds of invalid) {
+          await authed(
+            'patch',
+            `/api/v1/admin/products/${product.id}/images/order`,
+          )
+            .send({ imageIds })
+            .expect(400);
+        }
+        const after = await prisma.productImage.findMany({
+          where: { productId: product.id },
+          orderBy: { sortOrder: 'asc' },
+          select: { id: true },
+        });
+        expect(after.map((i) => i.id)).toEqual([b.id, a.id]);
+
+        await authed('patch', `/api/v1/admin/products/${NIL}/images/order`)
+          .send({ imageIds: [a.id, b.id] })
+          .expect(404);
+      } finally {
+        await cleanup(product.id);
+        await cleanup(other.id);
+      }
     });
   });
 });

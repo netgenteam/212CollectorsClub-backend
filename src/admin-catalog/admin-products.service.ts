@@ -1,6 +1,11 @@
 import { unlink } from 'node:fs/promises';
-import { join } from 'node:path';
-import { HttpStatus, Injectable, NotFoundException } from '@nestjs/common';
+import { join, resolve, sep } from 'node:path';
+import {
+  HttpStatus,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
 import { Prisma } from '../generated/prisma/client.js';
 import type {
@@ -13,6 +18,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import type { GradingCompany } from '../catalog/grading-company.js';
 import { CreateProductDto } from './dto/create-product.dto.js';
 import type { MarketReferenceInputDto } from './dto/market-reference-input.dto.js';
+import { ReorderProductImagesDto } from './dto/reorder-product-images.dto.js';
 import { UpdateProductDto } from './dto/update-product.dto.js';
 import { AdjustProductStockDto } from './dto/adjust-product-stock.dto.js';
 import {
@@ -158,6 +164,8 @@ async function cleanupUploadedFiles(
  */
 @Injectable()
 export class AdminProductsService {
+  private readonly logger = new Logger(AdminProductsService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   async create(
@@ -476,6 +484,120 @@ export class AdminProductsService {
     });
 
     return this.findOne(id);
+  }
+
+  /** Story 12.1 (FR-38, AD-30): deletes one image of a Product. Locks the
+   * PARENT `Products` row (`SELECT ... FOR UPDATE`) — the invariant "at
+   * least one image" is about the set of children, which a per-image lock
+   * cannot protect — then checks ownership, counts, and deletes in the same
+   * transaction. The physical file is unlinked post-commit, tolerantly. */
+  async removeImage(productId: string, imageId: string): Promise<void> {
+    const url = await this.prisma.$transaction(async (tx) => {
+      await this.lockProductOrThrow(tx, productId);
+
+      const image = await tx.productImage.findFirst({
+        where: { id: imageId, productId },
+        select: { id: true, url: true },
+      });
+      if (!image) {
+        throw new NotFoundException(
+          `Image ${imageId} not found for Product ${productId}`,
+        );
+      }
+
+      const count = await tx.productImage.count({ where: { productId } });
+      if (count <= 1) {
+        throw new ApiException(
+          HttpStatus.BAD_REQUEST,
+          'PRODUCT_IMAGE_REQUIRED',
+          'A Product must keep at least one image — the last image cannot be deleted.',
+        );
+      }
+
+      await tx.productImage.delete({ where: { id: image.id } });
+      return image.url;
+    });
+
+    await this.unlinkPublicImageFile(url);
+  }
+
+  /** Story 12.1 (FR-39, AD-30): reassigns `sortOrder` 0..n-1 following
+   * `dto.imageIds`, which must be an exact permutation of the Product's
+   * current images (validated against the set read under the parent lock). */
+  async reorderImages(
+    productId: string,
+    dto: ReorderProductImagesDto,
+  ): Promise<AdminProductResponseDto> {
+    await this.prisma.$transaction(async (tx) => {
+      await this.lockProductOrThrow(tx, productId);
+
+      const current = await tx.productImage.findMany({
+        where: { productId },
+        select: { id: true },
+      });
+      const currentIds = new Set(current.map((image) => image.id));
+      const requested = new Set(dto.imageIds);
+      const isPermutation =
+        requested.size === dto.imageIds.length &&
+        requested.size === currentIds.size &&
+        dto.imageIds.every((id) => currentIds.has(id));
+      if (!isPermutation) {
+        throw new ApiException(
+          HttpStatus.BAD_REQUEST,
+          'INVALID_IMAGE_ORDER',
+          'imageIds must contain each image of the Product exactly once (no missing, extra, duplicate or foreign ids).',
+        );
+      }
+
+      for (const [index, id] of dto.imageIds.entries()) {
+        await tx.productImage.update({
+          where: { id },
+          data: { sortOrder: index },
+        });
+      }
+    });
+
+    return this.findOne(productId);
+  }
+
+  private async lockProductOrThrow(
+    tx: Prisma.TransactionClient,
+    productId: string,
+  ): Promise<void> {
+    const rows = await tx.$queryRaw<
+      Array<{ id: string }>
+    >`SELECT "id" FROM "Products" WHERE "id" = ${productId}::uuid FOR UPDATE`;
+    if (rows.length === 0) {
+      throw productNotFoundException(productId);
+    }
+  }
+
+  /** Post-commit, tolerant unlink: the physical path is derived from `url`
+   * and refused if it resolves outside the public uploads root (path
+   * traversal). ENOENT is silent; any other failure is only logged. */
+  private async unlinkPublicImageFile(url: string): Promise<void> {
+    if (!url.startsWith(PUBLIC_STATIC_PREFIX)) {
+      this.logger.warn(`Refusing to unlink non-public image url "${url}"`);
+      return;
+    }
+    const root = resolve(UPLOADS_PUBLIC_ROOT);
+    const absolutePath = resolve(root, url.slice(PUBLIC_STATIC_PREFIX.length));
+    if (!absolutePath.startsWith(root + sep)) {
+      this.logger.warn(
+        `Refusing to unlink "${url}": resolves outside the public uploads directory`,
+      );
+      return;
+    }
+    try {
+      await unlink(absolutePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return;
+      }
+      this.logger.warn(
+        `Could not unlink image file ${absolutePath}: ${(err as Error).message}`,
+      );
+    }
   }
 
   /** Best-effort disk cleanup after a real (non-fallback) hard delete —

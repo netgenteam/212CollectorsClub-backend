@@ -27,6 +27,7 @@ import { AdminAuthGuard } from '../common/admin-auth.guard.js';
 import { AdminProductsService } from './admin-products.service.js';
 import { CreateProductDto } from './dto/create-product.dto.js';
 import { UpdateProductDto } from './dto/update-product.dto.js';
+import { ReorderProductImagesDto } from './dto/reorder-product-images.dto.js';
 import { AdjustProductStockDto } from './dto/adjust-product-stock.dto.js';
 import { AdminProductResponseDto } from './dto/admin-product-response.dto.js';
 import { createProductImageMulterOptions } from './product-image-multer.config.js';
@@ -271,5 +272,65 @@ export class AdminProductsController {
     @UploadedFiles() files: Express.Multer.File[] | undefined,
   ): Promise<AdminProductResponseDto> {
     return this.adminProductsService.addImages(id, files ?? []);
+  }
+
+  @Patch(':productId/images/order')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Reorder a Product's images (FR-39)",
+    description:
+      "imageIds must be an exact permutation of the Product's current image ids; sortOrder is reassigned 0..n-1 in that order, in one transaction. The first id becomes the primary image.",
+  })
+  @ApiParam({ name: 'productId', format: 'uuid' })
+  @ApiResponse({ status: HttpStatus.OK, type: AdminProductResponseDto })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      'errorCode INVALID_IMAGE_ORDER (missing, extra, duplicate or foreign ids), or a plain validation 400 (non-UUID).',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'No Product exists with the given id.',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'errorCode INVALID_ADMIN_TOKEN.',
+  })
+  reorderImages(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Body() dto: ReorderProductImagesDto,
+  ): Promise<AdminProductResponseDto> {
+    return this.adminProductsService.reorderImages(productId, dto);
+  }
+
+  @Delete(':productId/images/:imageId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Delete one image of a Product (FR-38)',
+    description:
+      'Removes the ProductImage row and, after commit, its file under uploads/public/. A Product always keeps at least one image: deleting the last one is rejected. Concurrent deletes are serialized by a row lock on the parent Product (AD-30). If the file is already gone the call still succeeds.',
+  })
+  @ApiParam({ name: 'productId', format: 'uuid' })
+  @ApiParam({ name: 'imageId', format: 'uuid' })
+  @ApiResponse({ status: HttpStatus.NO_CONTENT })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "errorCode PRODUCT_IMAGE_REQUIRED (it is the Product's last image), or a plain validation 400 (non-UUID params).",
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description:
+      'Unknown Product, unknown image, or the image belongs to another Product.',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'errorCode INVALID_ADMIN_TOKEN.',
+  })
+  removeImage(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Param('imageId', ParseUUIDPipe) imageId: string,
+  ): Promise<void> {
+    return this.adminProductsService.removeImage(productId, imageId);
   }
 }
