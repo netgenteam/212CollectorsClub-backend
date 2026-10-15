@@ -58,6 +58,19 @@ enum Rarity {
 /// Admin-managed grouping table used for catalog browsing/filtering (FR-5).
 /// Independent of Franchise/ProductType/Rarity — a separate taxonomy, per
 /// AD-2. Backed by the `Categories` table (PRD §3 Glossary, HBA-001).
+enum CategoryType {
+  ROOT
+  SUBCATEGORY
+}
+
+enum CategoryDimension {
+  FRANCHISE
+  SEALED_FORMAT
+  EDITION_LANGUAGE
+  SET_COLLECTION
+  CUSTOM
+}
+
 model Category {
   id        String   @id @default(uuid()) @db.Uuid
   name      String
@@ -65,8 +78,21 @@ model Category {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// Story 13.2 (AD-33): taxonomy. ROOT rows carry no dimension/parent (SQL CHECK).
+  type      CategoryType      @default(ROOT)
+  dimension CategoryDimension?
+  parentId  String?           @db.Uuid
+  isActive  Boolean           @default(true)
+  sortOrder Int               @default(0)
+
+  /// Self-relation; ON DELETE RESTRICT so the DB is the guard of 409 CATEGORY_HAS_CHILDREN.
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children Category[] @relation("CategoryTree")
+
   products Product[]
 
+  @@index([parentId])
+  @@index([dimension, isActive])
   @@map("Categories")
 }
 

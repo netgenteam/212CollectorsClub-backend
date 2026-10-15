@@ -62,6 +62,13 @@ describe('Canonical routes & Swagger contract (e2e, Story 11.6)', () => {
     await request(http).get('/v1/products').expect(404);
   });
 
+  it('exposes the Story 13.2 category taxonomy enums as component schemas', () => {
+    const s = doc.components.schemas;
+    expect(s.CategoryType.enum).toEqual(['ROOT', 'SUBCATEGORY']);
+    expect(s.CategoryDimension.enum).toContain('FRANCHISE');
+    expect(s.AdminCategoryResponseDto).toBeDefined();
+  });
+
   it('exposes the Epic 11 enums as reusable component schemas', () => {
     const s = doc.components.schemas;
     expect(s.Franchise.enum).toEqual(

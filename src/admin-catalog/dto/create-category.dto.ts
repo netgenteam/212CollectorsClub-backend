@@ -1,5 +1,22 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsString, Matches, MaxLength } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  IsBoolean,
+  IsEnum,
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Matches,
+  Max,
+  MaxLength,
+  Min,
+  ValidateIf,
+} from 'class-validator';
+import {
+  CategoryDimension,
+  CategoryType,
+} from '../../generated/prisma/enums.js';
 
 /**
  * Story 8.1 (FR-23, AD-2). Body of `POST /api/v1/admin/categories`.
@@ -38,4 +55,53 @@ export class CreateCategoryDto {
       'slug must contain only lowercase letters, digits and single hyphens between segments (e.g. "cartas-sueltas")',
   })
   slug: string;
+
+  @ApiPropertyOptional({
+    enum: CategoryType,
+    enumName: 'CategoryType',
+    description:
+      'ROOT (no dimension/parent) or SUBCATEGORY (requires dimension). Defaults to ROOT on create.',
+  })
+  @ValidateIf((_o, v) => v !== undefined)
+  @IsEnum(CategoryType)
+  type?: CategoryType;
+
+  @ApiPropertyOptional({
+    enum: CategoryDimension,
+    enumName: 'CategoryDimension',
+    nullable: true,
+    description:
+      'Taxonomy dimension. Required for SUBCATEGORY, forbidden for ROOT. `null` clears it (PATCH).',
+  })
+  @IsOptional()
+  @IsEnum(CategoryDimension)
+  dimension?: CategoryDimension | null;
+
+  @ApiPropertyOptional({
+    format: 'uuid',
+    nullable: true,
+    description:
+      'Parent Category id (ROOT or SUBCATEGORY). Max tree depth is 3. `null` clears it (PATCH).',
+  })
+  @IsOptional()
+  @IsUUID()
+  parentId?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Whether the Category is active. Defaults to true on create.',
+  })
+  @ValidateIf((_o, v) => v !== undefined)
+  @IsBoolean()
+  isActive?: boolean;
+
+  @ApiPropertyOptional({
+    minimum: 0,
+    maximum: 100000,
+    description: 'Display order (ascending). Defaults to 0 on create.',
+  })
+  @ValidateIf((_o, v) => v !== undefined)
+  @IsInt()
+  @Min(0)
+  @Max(100000)
+  sortOrder?: number;
 }

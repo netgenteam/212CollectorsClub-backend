@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -19,8 +20,9 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { AdminAuthGuard } from '../common/admin-auth.guard.js';
-import { CategoryResponseDto } from '../catalog/dto/category-response.dto.js';
 import { AdminCategoriesService } from './admin-categories.service.js';
+import { AdminCategoryResponseDto } from './dto/admin-category-response.dto.js';
+import { ListAdminCategoriesQueryDto } from './dto/list-admin-categories-query.dto.js';
 import { CreateCategoryDto } from './dto/create-category.dto.js';
 import { UpdateCategoryDto } from './dto/update-category.dto.js';
 
@@ -57,18 +59,23 @@ export class AdminCategoriesController {
     description:
       'Creates a new Category. Immediately visible via the public GET /api/v1/categories (Story 2.1) — no cache to invalidate (AD-10).',
   })
-  @ApiResponse({ status: HttpStatus.CREATED, type: CategoryResponseDto })
+  @ApiResponse({ status: HttpStatus.CREATED, type: AdminCategoryResponseDto })
   @ApiResponse({
     status: HttpStatus.CONFLICT,
     description:
       'errorCode CATEGORY_SLUG_TAKEN — the given slug is already in use.',
   })
   @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      'errorCode CATEGORY_DIMENSION_INVALID | CATEGORY_PARENT_INVALID | CATEGORY_CYCLE | CATEGORY_DEPTH_EXCEEDED — taxonomy integrity (Story 13.2), or DTO validation.',
+  })
+  @ApiResponse({
     status: HttpStatus.UNAUTHORIZED,
     description:
       'errorCode INVALID_ADMIN_TOKEN — missing/invalid/expired Admin JWT.',
   })
-  create(@Body() dto: CreateCategoryDto): Promise<CategoryResponseDto> {
+  create(@Body() dto: CreateCategoryDto): Promise<AdminCategoryResponseDto> {
     return this.adminCategoriesService.create(dto);
   }
 
@@ -77,29 +84,35 @@ export class AdminCategoriesController {
   @ApiOperation({
     summary: 'List every Category (admin)',
     description:
-      'Same rows as the public GET /api/v1/categories, behind AdminAuthGuard.',
+      'Every Category with taxonomy fields and `_count.products`, behind AdminAuthGuard. Optional `search` (alias `q`; literal, case-insensitive on name/slug, max 100) and `type`, `dimension`, `isActive` filters, ANDed. Unpaginated.',
   })
   @ApiResponse({
     status: HttpStatus.OK,
-    type: CategoryResponseDto,
+    type: AdminCategoryResponseDto,
     isArray: true,
   })
-  findAll(): Promise<CategoryResponseDto[]> {
-    return this.adminCategoriesService.findAll();
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Invalid filter value or search longer than 100 characters.',
+  })
+  findAll(
+    @Query() query: ListAdminCategoriesQueryDto,
+  ): Promise<AdminCategoryResponseDto[]> {
+    return this.adminCategoriesService.findAll(query);
   }
 
   @Get(':id')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Get one Category by id (admin)' })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Category id.' })
-  @ApiResponse({ status: HttpStatus.OK, type: CategoryResponseDto })
+  @ApiResponse({ status: HttpStatus.OK, type: AdminCategoryResponseDto })
   @ApiResponse({
     status: HttpStatus.NOT_FOUND,
     description: 'No Category exists with the given id.',
   })
   findOne(
     @Param('id', ParseUUIDPipe) id: string,
-  ): Promise<CategoryResponseDto> {
+  ): Promise<AdminCategoryResponseDto> {
     return this.adminCategoriesService.findOne(id);
   }
 
@@ -108,10 +121,10 @@ export class AdminCategoriesController {
   @ApiOperation({
     summary: 'Update a Category',
     description:
-      'Partial update (name and/or slug). Reflected in subsequent public reads immediately.',
+      'Partial update (name, slug, type, dimension, parentId, isActive, sortOrder). Cycles and depth > 3 are rejected. Reflected in subsequent public reads immediately.',
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Category id.' })
-  @ApiResponse({ status: HttpStatus.OK, type: CategoryResponseDto })
+  @ApiResponse({ status: HttpStatus.OK, type: AdminCategoryResponseDto })
   @ApiResponse({
     status: HttpStatus.NOT_FOUND,
     description: 'No Category exists with the given id.',
@@ -121,10 +134,15 @@ export class AdminCategoriesController {
     description:
       'errorCode CATEGORY_SLUG_TAKEN — the given slug is already in use by another Category.',
   })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      'errorCode CATEGORY_DIMENSION_INVALID | CATEGORY_PARENT_INVALID | CATEGORY_CYCLE | CATEGORY_DEPTH_EXCEEDED, or DTO validation.',
+  })
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateCategoryDto,
-  ): Promise<CategoryResponseDto> {
+  ): Promise<AdminCategoryResponseDto> {
     return this.adminCategoriesService.update(id, dto);
   }
 
@@ -133,7 +151,7 @@ export class AdminCategoriesController {
   @ApiOperation({
     summary: 'Delete a Category',
     description:
-      'Deletes the Category, UNLESS it is still referenced by >=1 Product (AD-2) — that case is rejected with 409 CATEGORY_IN_USE and never orphans the Products or 500s. Reassign/remove those Products first.',
+      'Deletes the Category, UNLESS it is still referenced by >=1 Product (AD-2, 409 CATEGORY_IN_USE) or has child Categories (409 CATEGORY_HAS_CHILDREN) — never orphans the Products or 500s. Reassign/remove those Products first.',
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Category id.' })
   @ApiResponse({
@@ -147,7 +165,7 @@ export class AdminCategoriesController {
   @ApiResponse({
     status: HttpStatus.CONFLICT,
     description:
-      'errorCode CATEGORY_IN_USE — this Category is still referenced by one or more Products.',
+      'errorCode CATEGORY_IN_USE (Products reference it) or CATEGORY_HAS_CHILDREN (child Categories exist).',
   })
   remove(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
     return this.adminCategoriesService.remove(id);
