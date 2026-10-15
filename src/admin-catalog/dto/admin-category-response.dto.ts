@@ -1,9 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import {
-  CategoryDimension,
-  CategoryType,
-} from '../../generated/prisma/enums.js';
-import { CategoryResponseDto } from '../../catalog/dto/category-response.dto.js';
+import { PublicCategoryResponseDto } from '../../catalog/dto/category-response.dto.js';
 
 export class AdminCategoryCountDto {
   @ApiProperty({
@@ -18,26 +14,7 @@ export class AdminCategoryCountDto {
  * `CategoryResponseDto` plus the taxonomy fields (additive only — `id`,
  * `name`, `slug` are unchanged) and the product count.
  */
-export class AdminCategoryResponseDto extends CategoryResponseDto {
-  @ApiProperty({ enum: CategoryType, enumName: 'CategoryType' })
-  type: CategoryType;
-
-  @ApiProperty({
-    enum: CategoryDimension,
-    enumName: 'CategoryDimension',
-    nullable: true,
-  })
-  dimension: CategoryDimension | null;
-
-  @ApiProperty({ format: 'uuid', nullable: true })
-  parentId: string | null;
-
-  @ApiProperty()
-  isActive: boolean;
-
-  @ApiProperty()
-  sortOrder: number;
-
+export class AdminCategoryResponseDto extends PublicCategoryResponseDto {
   @ApiPropertyOptional({ type: AdminCategoryCountDto })
   _count?: AdminCategoryCountDto;
 }

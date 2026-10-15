@@ -172,14 +172,19 @@ describe('Admin categories taxonomy (e2e, Story 13.2)', () => {
       });
     });
 
-    it('public GET /categories keeps id,name,slug only', async () => {
+    it('public GET /categories keeps id,name,slug (13.3 only adds taxonomy fields)', async () => {
       const res = await request(app.getHttpServer())
         .get('/api/v1/categories')
         .expect(200);
       expect(Object.keys((res.body as Cat[])[0]).sort()).toEqual([
+        'dimension',
         'id',
+        'isActive',
         'name',
+        'parentId',
         'slug',
+        'sortOrder',
+        'type',
       ]);
     });
   });

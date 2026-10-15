@@ -48,30 +48,59 @@ describe('CatalogService', () => {
   });
 
   describe('listCategories', () => {
-    it('returns the categories from PrismaService, ordered by name', async () => {
-      const categories = [
-        {
-          id: 'dd848f24-aac0-4346-ae25-b672bb0d7e14',
-          name: 'Cartas Sueltas',
-          slug: 'cartas-sueltas',
-        },
-        {
-          id: '09d457d9-a402-4915-aca9-ec9648b9a9a8',
-          name: 'Sobres y Cajas',
-          slug: 'sobres-y-cajas',
-        },
-      ];
-      prisma.category.findMany.mockResolvedValue(categories);
+    const rows = [
+      {
+        id: 'dd848f24-aac0-4346-ae25-b672bb0d7e14',
+        name: 'Cartas Sueltas',
+        slug: 'cartas-sueltas',
+        type: 'ROOT',
+        dimension: null,
+        parentId: null,
+        isActive: true,
+        sortOrder: 0,
+      },
+    ];
 
-      await expect(service.listCategories()).resolves.toEqual(categories);
-      expect(prisma.category.findMany).toHaveBeenCalledWith({
-        select: { id: true, name: true, slug: true },
-        orderBy: { name: 'asc' },
-      });
+    // $queryRaw is a tagged template: (strings, ...values). The only
+    // interpolated value is the nested `where` Prisma.Sql fragment.
+    function sqlOf(): { head: string; where: string; values: unknown[] } {
+      const [strings, frag] = prisma.$queryRaw.mock.calls[0] as [
+        string[],
+        { text: string; values: unknown[] },
+      ];
+      return { head: strings.join(''), where: frag.text, values: frag.values };
+    }
+
+    it('returns the rows from the raw CTE query (no filters)', async () => {
+      prisma.$queryRaw.mockResolvedValue(rows);
+
+      await expect(service.listCategories()).resolves.toEqual(rows);
+      const { head, where, values } = sqlOf();
+      expect(head).toContain('WITH RECURSIVE');
+      expect(head).toContain('UNION');
+      expect(head).toContain('ORDER BY c."sortOrder" ASC, c.name ASC');
+      expect(where).toBe('');
+      expect(values).toEqual([]);
     });
 
-    it('returns an empty array (never throws) when no Categories exist', async () => {
-      prisma.category.findMany.mockResolvedValue([]);
+    it('applies filters as parameterized AND conditions', async () => {
+      prisma.$queryRaw.mockResolvedValue([]);
+      const parentId = 'dd848f24-aac0-4346-ae25-b672bb0d7e14';
+
+      await service.listCategories({
+        type: 'SUBCATEGORY',
+        dimension: 'FRANCHISE',
+        parentId,
+      });
+      const { where, values } = sqlOf();
+      expect(where).toContain('WHERE c."type" = $1');
+      expect(where).toContain('AND c."dimension" = $2');
+      expect(where).toContain('AND c."parentId" = $3');
+      expect(values).toEqual(['SUBCATEGORY', 'FRANCHISE', parentId]);
+    });
+
+    it('returns an empty array (never throws) when no Categories match', async () => {
+      prisma.$queryRaw.mockResolvedValue([]);
 
       await expect(service.listCategories()).resolves.toEqual([]);
     });
@@ -228,7 +257,7 @@ describe('CatalogService', () => {
   });
 
   describe('listProducts filters (Story 11.2)', () => {
-    function sqlOf(call: number): { sql: string; values: unknown[] } {
+    function sqlOf(call: number): { text: string; values: unknown[] } {
       const arg = prisma.$queryRaw.mock.calls[call][0] as {
         sql: string;
         values: unknown[];

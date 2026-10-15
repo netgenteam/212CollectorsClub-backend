@@ -8,7 +8,8 @@ import type {
   ProductType,
   Rarity,
 } from '../generated/prisma/enums.js';
-import { CategoryResponseDto } from './dto/category-response.dto.js';
+import { PublicCategoryResponseDto } from './dto/category-response.dto.js';
+import { ListCategoriesQueryDto } from './dto/list-categories-query.dto.js';
 import { ListProductsQueryDto } from './dto/list-products-query.dto.js';
 import {
   PaginatedProductsResponseDto,
@@ -48,18 +49,46 @@ export class CatalogService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Story 2.1 (FR-5): returns every Category. The AC says "active"
-   * Categories, but the `Category` model (Story 1.4) has no `isActive` /
-   * soft-delete field yet, and this story's Technical Notes explicitly rule
-   * out schema changes — so today every row is implicitly "active" and this
-   * is a straight `findMany`. Add an `isActive` filter here once that field
-   * exists on the model (likely Story 8.1, admin CRUD Categories).
+   * Story 2.1 (FR-5) / Story 13.3 (FR-47; AD-35): public flat list of active
+   * Categories whose whole ancestor chain is active, ordered by
+   * `sortOrder, name, id`. Filters are applied in SQL with parameterized,
+   * DTO-validated values. The CTE walks top-down from active roots with
+   * `UNION` (dedup), so a corrupted parent cycle terminates.
    */
-  async listCategories(): Promise<CategoryResponseDto[]> {
-    return this.prisma.category.findMany({
-      select: { id: true, name: true, slug: true },
-      orderBy: { name: 'asc' },
-    });
+  async listCategories(
+    query: ListCategoriesQueryDto = {},
+  ): Promise<PublicCategoryResponseDto[]> {
+    const conditions: Prisma.Sql[] = [];
+    if (query.type) {
+      conditions.push(Prisma.sql`c."type" = ${query.type}::"CategoryType"`);
+    }
+    if (query.dimension) {
+      conditions.push(
+        Prisma.sql`c."dimension" = ${query.dimension}::"CategoryDimension"`,
+      );
+    }
+    if (query.parentId) {
+      conditions.push(Prisma.sql`c."parentId" = ${query.parentId}::uuid`);
+    }
+    const where =
+      conditions.length > 0
+        ? Prisma.sql`WHERE ${Prisma.join(conditions, ' AND ')}`
+        : Prisma.empty;
+
+    return this.prisma.$queryRaw<PublicCategoryResponseDto[]>`
+      WITH RECURSIVE active_tree(id) AS (
+        SELECT id FROM "Categories" WHERE "parentId" IS NULL AND "isActive"
+        UNION
+        SELECT ch.id FROM "Categories" ch
+        JOIN active_tree t ON ch."parentId" = t.id
+        WHERE ch."isActive"
+      )
+      SELECT c.id, c.name, c.slug, c."type", c."dimension", c."parentId",
+             c."isActive", c."sortOrder"
+      FROM "Categories" c
+      JOIN active_tree t ON t.id = c.id
+      ${where}
+      ORDER BY c."sortOrder" ASC, c.name ASC, c.id ASC`;
   }
 
   /**

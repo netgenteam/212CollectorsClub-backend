@@ -1,7 +1,8 @@
-import { Controller, Get, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Get, HttpCode, HttpStatus, Query } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CatalogService } from './catalog.service.js';
-import { CategoryResponseDto } from './dto/category-response.dto.js';
+import { PublicCategoryResponseDto } from './dto/category-response.dto.js';
+import { ListCategoriesQueryDto } from './dto/list-categories-query.dto.js';
 
 @ApiTags('catalog')
 @Controller('categories')
@@ -18,15 +19,21 @@ export class CatalogController {
   @ApiOperation({
     summary: 'List product categories',
     description:
-      'Returns every Category for storefront browsing/filtering. Returns an empty array (never an error) when none exist.',
+      'Returns active Categories (whole ancestor chain active) for storefront menus, optionally filtered by type, dimension and parentId (AND). Empty array when none match; 400 on invalid filter values.',
   })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: 'Categories, ordered by name.',
-    type: CategoryResponseDto,
+    description: 'Categories, ordered by sortOrder then name.',
+    type: PublicCategoryResponseDto,
     isArray: true,
   })
-  listCategories(): Promise<CategoryResponseDto[]> {
-    return this.catalogService.listCategories();
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Invalid type, dimension or parentId.',
+  })
+  listCategories(
+    @Query() query: ListCategoriesQueryDto,
+  ): Promise<PublicCategoryResponseDto[]> {
+    return this.catalogService.listCategories(query);
   }
 }
