@@ -92,9 +92,8 @@ export class ListProductsQueryDto {
   search?: string;
 
   @ApiPropertyOptional({
-    enum: Franchise,
-    enumName: 'Franchise',
-    isArray: true,
+    type: 'array',
+    items: { $ref: '#/components/schemas/Franchise' },
     maxItems: MAX_MULTI_VALUES,
     description:
       'Filter by one or more Franchises (AD-2 enum); repeat the param for several (max 20, OR). Bracket form `franchise[]=` is not supported and is ignored.',
@@ -107,9 +106,8 @@ export class ListProductsQueryDto {
   franchise?: Franchise[];
 
   @ApiPropertyOptional({
-    enum: ProductLanguage,
-    enumName: 'ProductLanguage',
-    isArray: true,
+    type: 'array',
+    items: { $ref: '#/components/schemas/ProductLanguage' },
     maxItems: MAX_MULTI_VALUES,
     description:
       'Filter by edition language (uppercase codes); repeat the param for several (max 20, OR). Bracket form `language[]=` is not supported and is ignored.',
@@ -122,9 +120,8 @@ export class ListProductsQueryDto {
   language?: ProductLanguage[];
 
   @ApiPropertyOptional({
-    enum: ProductType,
-    enumName: 'ProductType',
-    isArray: true,
+    type: 'array',
+    items: { $ref: '#/components/schemas/ProductType' },
     maxItems: MAX_PRODUCT_TYPES,
     description:
       'Filter by one or more Product Types (AD-2 enum); repeat the param for several (max 10). Bracket form `productType[]=` is not supported and is ignored.',
@@ -175,7 +172,7 @@ export class ListProductsQueryDto {
   rarity?: Rarity;
 
   @ApiPropertyOptional({
-    type: [String],
+    type: String,
     format: 'uuid',
     isArray: true,
     maxItems: MAX_MULTI_VALUES,

@@ -104,4 +104,32 @@ describe('Canonical routes & Swagger contract (e2e, Story 11.6)', () => {
     expect(by('onlyInStock')).toBeDefined();
     expect(by('onlyPreorder')).toBeDefined();
   });
+
+  // Story 13.6 (AD-36, AC15): multi-value filters documented as arrays.
+  it('documents franchise/language/categoryId/productType as bounded arrays', () => {
+    for (const n of ['Franchise', 'ProductLanguage', 'ProductType']) {
+      expect(doc.components.schemas[n]?.enum?.length).toBeGreaterThan(0);
+    }
+    const params = doc.paths['/api/v1/products'].get.parameters ?? [];
+    const expected: Record<string, [number, string | undefined]> = {
+      franchise: [20, 'Franchise'],
+      language: [20, 'ProductLanguage'],
+      categoryId: [20, undefined],
+      productType: [10, 'ProductType'],
+    };
+    for (const [name, [max, enumName]] of Object.entries(expected)) {
+      const p = params.find((x) => x.name === name);
+      const schema = p?.schema as
+        | { type?: string; maxItems?: number; items?: Record<string, unknown> }
+        | undefined;
+      expect(schema?.type).toBe('array');
+      expect(schema?.maxItems).toBe(max);
+      expect(schema?.items?.type === 'array').toBe(false);
+      if (enumName) {
+        expect(JSON.stringify(schema?.items)).toContain(enumName);
+      } else {
+        expect(schema?.items).toMatchObject({ type: 'string', format: 'uuid' });
+      }
+    }
+  });
 });
