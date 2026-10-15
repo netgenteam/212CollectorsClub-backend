@@ -187,6 +187,7 @@ export class AdminProductsService {
             description: dto.description,
             franchise: dto.franchise,
             productType: dto.productType,
+            editionLanguage: dto.editionLanguage,
             rarity: dto.rarity,
             priceUsd: dto.priceUsd,
             stock: dto.stock,
@@ -265,6 +266,8 @@ export class AdminProductsService {
     if (dto.description !== undefined) data.description = dto.description;
     if (dto.franchise !== undefined) data.franchise = dto.franchise;
     if (dto.productType !== undefined) data.productType = dto.productType;
+    if (dto.editionLanguage !== undefined)
+      data.editionLanguage = dto.editionLanguage;
     if (dto.rarity !== undefined) data.rarity = dto.rarity;
     if (dto.priceUsd !== undefined) data.priceUsd = dto.priceUsd;
     if (dto.stock !== undefined) data.stock = dto.stock;
@@ -638,6 +641,7 @@ export class AdminProductsService {
       description: product.description,
       franchise: product.franchise,
       productType: product.productType,
+      editionLanguage: product.editionLanguage,
       rarity: product.rarity,
       priceUsd: Number(product.priceUsd),
       stock: product.stock,

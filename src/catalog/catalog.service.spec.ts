@@ -257,7 +257,7 @@ describe('CatalogService', () => {
   });
 
   describe('listProducts filters (Story 11.2)', () => {
-    function sqlOf(call: number): { text: string; values: unknown[] } {
+    function sqlOf(call: number): { sql: string; values: unknown[] } {
       const arg = prisma.$queryRaw.mock.calls[call][0] as {
         sql: string;
         values: unknown[];
@@ -319,6 +319,12 @@ describe('CatalogService', () => {
         expect(sqlOf(call).sql).toContain('"isPreorder" = true');
         expect(sqlOf(call).sql).toContain('(stock - "heldQty") > 0');
       }
+    });
+
+    it('selects "editionLanguage" in the list SQL and adds no language filter (Story 13.4)', async () => {
+      await service.listProducts(buildQuery({}));
+      expect(sqlOf(0).sql).toContain('"editionLanguage"');
+      expect(sqlOf(0).sql).not.toContain('"editionLanguage" =');
     });
 
     it('adds no condition when the booleans are false', async () => {

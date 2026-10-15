@@ -44,6 +44,15 @@ enum ProductType {
   ACCESSORY
 }
 
+/// Story 13.4 (FR-49, AD-33): edition language of a Product.
+enum ProductLanguage {
+  ES
+  EN
+  JP
+  CN
+  OTHER
+}
+
 /// A Product's collectible rarity tier (PRD §3 Glossary — e.g. Common, Rare,
 /// Ultra Rare).
 enum Rarity {
@@ -106,6 +115,8 @@ model Product {
   franchise   Franchise
   productType ProductType
   rarity      Rarity
+  /// Story 13.4 (FR-49, AD-33): edition language; existing rows default to EN.
+  editionLanguage ProductLanguage @default(EN)
   priceUsd    Decimal     @db.Decimal(10, 2)
   stock       Int
   /// Placeholder for Epic 4 (AD-6 stock holds), added now so that story only
@@ -167,6 +178,7 @@ model Product {
   /// stays within the NFR-1 300ms p95 budget instead of a full table scan.
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
   @@index([description(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([editionLanguage])
   @@map("Products")
 }
 

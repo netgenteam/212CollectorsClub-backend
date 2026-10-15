@@ -6,6 +6,7 @@ import { Prisma } from '../generated/prisma/client.js';
 import type {
   Franchise,
   ProductType,
+  ProductLanguage,
   Rarity,
 } from '../generated/prisma/enums.js';
 import { PublicCategoryResponseDto } from './dto/category-response.dto.js';
@@ -34,6 +35,7 @@ interface ProductSearchRow {
   heldQty: number;
   franchise: Franchise;
   productType: ProductType;
+  editionLanguage: ProductLanguage;
   rarity: Rarity;
   slug: string;
   isPreorder: boolean;
@@ -175,7 +177,7 @@ export class CatalogService {
     const [rows, countRows] = await Promise.all([
       this.prisma.$queryRaw<ProductSearchRow[]>(
         Prisma.sql`
-          SELECT id, name, slug, "isPreorder", "releaseDate", "priceUsd", stock, "heldQty", franchise, "productType", rarity
+          SELECT id, name, slug, "isPreorder", "releaseDate", "priceUsd", stock, "heldQty", franchise, "productType", "editionLanguage", rarity
           FROM "Products"
           ${whereSql}
           ${orderBySql}
@@ -230,7 +232,7 @@ export class CatalogService {
 
     const rows = await this.prisma.$queryRaw<ProductSearchRow[]>(
       Prisma.sql`
-        SELECT id, name, slug, "isPreorder", "releaseDate", "priceUsd", stock, "heldQty", franchise, "productType", rarity
+        SELECT id, name, slug, "isPreorder", "releaseDate", "priceUsd", stock, "heldQty", franchise, "productType", "editionLanguage", rarity
         FROM "Products"
         WHERE "isActive" = true
           AND id <> ${id}::uuid
@@ -256,7 +258,7 @@ export class CatalogService {
     }
     const rows = await this.prisma.$queryRaw<ProductSearchRow[]>(
       Prisma.sql`
-        SELECT id, name, slug, "isPreorder", "releaseDate", "priceUsd", stock, "heldQty", franchise, "productType", rarity
+        SELECT id, name, slug, "isPreorder", "releaseDate", "priceUsd", stock, "heldQty", franchise, "productType", "editionLanguage", rarity
         FROM "Products"
         WHERE "isActive" = true AND id = ANY(${ids}::uuid[])
       `,
@@ -314,6 +316,7 @@ export class CatalogService {
         availableStock,
         franchise: row.franchise,
         productType: row.productType,
+        editionLanguage: row.editionLanguage,
         rarity: row.rarity,
         primaryImage: primaryImageByProductId.get(row.id) ?? null,
       };
@@ -368,6 +371,7 @@ export class CatalogService {
       availableStock,
       franchise: product.franchise,
       productType: product.productType,
+      editionLanguage: product.editionLanguage,
       rarity: product.rarity,
       category: product.category,
       images: product.images,

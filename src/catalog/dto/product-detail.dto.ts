@@ -3,6 +3,7 @@ import { MarketReferenceDto } from './market-reference.dto.js';
 import { GradingCompany } from '../grading-company.js';
 import {
   Franchise,
+  ProductLanguage,
   ProductType,
   Rarity,
 } from '../../generated/prisma/enums.js';
@@ -125,6 +126,9 @@ export class ProductDetailDto {
 
   @ApiProperty({ enum: ProductType, enumName: 'ProductType' })
   productType: ProductType;
+
+  @ApiProperty({ enum: ProductLanguage, enumName: 'ProductLanguage' })
+  editionLanguage: ProductLanguage;
 
   @ApiProperty({ enum: Rarity, enumName: 'Rarity' })
   rarity: Rarity;

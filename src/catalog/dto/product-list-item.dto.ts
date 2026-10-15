@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   Franchise,
+  ProductLanguage,
   ProductType,
   Rarity,
 } from '../../generated/prisma/enums.js';
@@ -84,6 +85,9 @@ export class ProductListItemDto {
 
   @ApiProperty({ enum: ProductType, enumName: 'ProductType' })
   productType: ProductType;
+
+  @ApiProperty({ enum: ProductLanguage, enumName: 'ProductLanguage' })
+  editionLanguage: ProductLanguage;
 
   @ApiProperty({ enum: Rarity, enumName: 'Rarity' })
   rarity: Rarity;

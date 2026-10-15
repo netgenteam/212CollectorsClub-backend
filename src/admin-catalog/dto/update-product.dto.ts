@@ -17,6 +17,7 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import {
@@ -28,6 +29,7 @@ import {
 
 import {
   Franchise,
+  ProductLanguage,
   ProductType,
   Rarity,
 } from '../../generated/prisma/enums.js';
@@ -87,6 +89,15 @@ export class UpdateProductDto {
   @IsOptional()
   @IsEnum(ProductType)
   productType?: ProductType;
+
+  @ApiPropertyOptional({
+    enum: ProductLanguage,
+    enumName: 'ProductLanguage',
+    default: 'EN',
+  })
+  @ValidateIf((_o, value) => value !== undefined)
+  @IsEnum(ProductLanguage)
+  editionLanguage?: ProductLanguage;
 
   @ApiPropertyOptional({ enum: Rarity, enumName: 'Rarity' })
   @IsOptional()

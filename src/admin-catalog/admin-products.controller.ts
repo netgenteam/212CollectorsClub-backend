@@ -98,6 +98,11 @@ export class AdminProductsController {
         description: { type: 'string' },
         franchise: { type: 'string' },
         productType: { type: 'string' },
+        editionLanguage: {
+          type: 'string',
+          enum: ['ES', 'EN', 'JP', 'CN', 'OTHER'],
+          default: 'EN',
+        },
         rarity: { type: 'string' },
         priceUsd: { type: 'number' },
         stock: { type: 'integer' },
