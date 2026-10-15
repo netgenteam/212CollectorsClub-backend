@@ -15,12 +15,21 @@ import {
 } from 'class-validator';
 import {
   Franchise,
+  ProductLanguage,
   ProductType,
   Rarity,
 } from '../../generated/prisma/enums.js';
 import { MacroCategory } from '../macro-category.js';
 
 export const MAX_PRODUCT_TYPES = 10;
+export const MAX_MULTI_VALUES = 20;
+
+// Story 13.6 (AD-36): a single string becomes a one-element array; repeated
+// keys already arrive as arrays. Bracket keys (`franchise[]=`) are not
+// supported: Express 5's `simple` parser keeps the key as `franchise[]`, which
+// `whitelist` drops, so they are ignored (200).
+const toArray = ({ value }: { value: unknown }): unknown =>
+  typeof value === 'string' ? [value] : value;
 
 // Explicit string->boolean (no implicit conversion: 'false' must stay false).
 // Anything else is left untouched so `@IsBoolean` rejects it with a 400.
@@ -85,11 +94,32 @@ export class ListProductsQueryDto {
   @ApiPropertyOptional({
     enum: Franchise,
     enumName: 'Franchise',
-    description: 'Filter by Franchise (AD-2 enum).',
+    isArray: true,
+    maxItems: MAX_MULTI_VALUES,
+    description:
+      'Filter by one or more Franchises (AD-2 enum); repeat the param for several (max 20, OR). Bracket form `franchise[]=` is not supported and is ignored.',
   })
   @IsOptional()
-  @IsEnum(Franchise)
-  franchise?: Franchise;
+  @Transform(toArray)
+  @IsArray()
+  @ArrayMaxSize(MAX_MULTI_VALUES)
+  @IsEnum(Franchise, { each: true })
+  franchise?: Franchise[];
+
+  @ApiPropertyOptional({
+    enum: ProductLanguage,
+    enumName: 'ProductLanguage',
+    isArray: true,
+    maxItems: MAX_MULTI_VALUES,
+    description:
+      'Filter by edition language (uppercase codes); repeat the param for several (max 20, OR). Bracket form `language[]=` is not supported and is ignored.',
+  })
+  @IsOptional()
+  @Transform(toArray)
+  @IsArray()
+  @ArrayMaxSize(MAX_MULTI_VALUES)
+  @IsEnum(ProductLanguage, { each: true })
+  language?: ProductLanguage[];
 
   @ApiPropertyOptional({
     enum: ProductType,
@@ -97,7 +127,7 @@ export class ListProductsQueryDto {
     isArray: true,
     maxItems: MAX_PRODUCT_TYPES,
     description:
-      'Filter by one or more Product Types (AD-2 enum); repeat the param for several (max 10).',
+      'Filter by one or more Product Types (AD-2 enum); repeat the param for several (max 10). Bracket form `productType[]=` is not supported and is ignored.',
   })
   @IsOptional()
   @Transform(({ value }: { value: unknown }) =>
@@ -145,10 +175,17 @@ export class ListProductsQueryDto {
   rarity?: Rarity;
 
   @ApiPropertyOptional({
+    type: [String],
     format: 'uuid',
-    description: 'Filter by Category id.',
+    isArray: true,
+    maxItems: MAX_MULTI_VALUES,
+    description:
+      'Filter by one or more Category ids (max 20, OR). Includes descendants at any depth; a product matches by its main category or any of its tags. Bracket form `categoryId[]=` is not supported and is ignored.',
   })
   @IsOptional()
-  @IsUUID()
-  categoryId?: string;
+  @Transform(toArray)
+  @IsArray()
+  @ArrayMaxSize(MAX_MULTI_VALUES)
+  @IsUUID('all', { each: true })
+  categoryId?: string[];
 }

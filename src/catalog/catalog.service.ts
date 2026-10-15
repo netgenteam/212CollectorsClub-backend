@@ -133,8 +133,16 @@ export class CatalogService {
         Prisma.sql`(name % ${search} OR description % ${search})`,
       );
     }
+    // Story 13.6 (AD-36): OR inside a parameter via bound arrays, AND between.
     if (query.franchise) {
-      conditions.push(Prisma.sql`franchise = ${query.franchise}::"Franchise"`);
+      conditions.push(
+        Prisma.sql`franchise = ANY(${query.franchise}::"Franchise"[])`,
+      );
+    }
+    if (query.language) {
+      conditions.push(
+        Prisma.sql`"editionLanguage" = ANY(${query.language}::"ProductLanguage"[])`,
+      );
     }
     // AD-19: effective ProductType set = productType[] ∩ macroCategory set.
     // An empty intersection becomes a constant FALSE (200, empty page).
@@ -162,7 +170,17 @@ export class CatalogService {
       conditions.push(Prisma.sql`rarity = ${query.rarity}::"Rarity"`);
     }
     if (query.categoryId) {
-      conditions.push(Prisma.sql`"categoryId" = ${query.categoryId}::uuid`);
+      // Subtree (any depth, inactive categories included: the product stays
+      // visible, A21). `UNION` dedups, so a corrupted cycle terminates. The
+      // tag side uses EXISTS so a product is never duplicated by a join.
+      const tree = Prisma.sql`WITH RECURSIVE tree(id) AS (
+        SELECT id FROM "Categories" WHERE id = ANY(${query.categoryId}::uuid[])
+        UNION
+        SELECT c.id FROM "Categories" c JOIN tree t ON c."parentId" = t.id
+      ) SELECT id FROM tree`;
+      conditions.push(
+        Prisma.sql`("Products"."categoryId" IN (${tree}) OR EXISTS (SELECT 1 FROM "Product_Categories" pc WHERE pc."productId" = "Products".id AND pc."categoryId" IN (${tree})))`,
+      );
     }
     const whereSql =
       conditions.length > 0
