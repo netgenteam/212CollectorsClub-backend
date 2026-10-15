@@ -31,6 +31,9 @@ enum Franchise {
   DRAGON_BALL_SUPER
   TOPPS
   NARUTO
+  /// Story 13.5 (FR-50, AD-33): franchise without its own enum value; the real
+  /// franchise lives in the product's category tags. Clients must tolerate it.
+  OTHER
 }
 
 /// The physical/commercial form of a Product (PRD §3 Glossary — e.g.
@@ -99,6 +102,8 @@ model Category {
   children Category[] @relation("CategoryTree")
 
   products Product[]
+  /// Story 13.5 (AD-33): products tagged with this category (n:m).
+  productTags ProductCategory[]
 
   @@index([parentId])
   @@index([dimension, isActive])
@@ -147,6 +152,8 @@ model Product {
 
   categoryId String   @db.Uuid
   category   Category @relation(fields: [categoryId], references: [id])
+  /// Story 13.5 (AD-33): taxonomy tags; `categoryId` stays the single main category.
+  taxonomyTags ProductCategory[]
 
   images           ProductImage[]
   /// Story 11.4 (FR-34, AD-18): stored external market reference links.
@@ -898,4 +905,17 @@ model CustomerVerification {
 
   @@index([identifier])
   @@map("Customer_Verifications")
+}
+
+/// Story 13.5 (FR-50, AD-33): n:m tag between Product and Category.
+/// Deleting a Product cascades its links; deleting a tagged Category is RESTRICTed.
+model ProductCategory {
+  productId  String   @db.Uuid
+  categoryId String   @db.Uuid
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@id([productId, categoryId])
+  @@index([categoryId])
+  @@map("Product_Categories")
 }

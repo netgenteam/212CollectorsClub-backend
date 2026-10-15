@@ -355,15 +355,21 @@ export class AdminCategoriesService {
   }
 
   /** One aggregated query for all ids (no N+1): DISTINCT Products whose main
-   * `categoryId` is the Category. Story 13.5 adds the tag UNION here. */
+   * `categoryId` is the Category OR that carry it as a tag (Story 13.5). */
   private async withCounts(
     rows: CategoryRow[],
   ): Promise<AdminCategoryResponseDto[]> {
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.id);
     const counts = await this.prisma.$queryRaw<{ id: string; n: number }[]>`
-      SELECT "categoryId"::text AS id, COUNT(DISTINCT id)::int AS n
-      FROM "Products" WHERE "categoryId" = ANY(${ids}::uuid[]) GROUP BY "categoryId"`;
+      SELECT u.cid::text AS id, COUNT(DISTINCT u.pid)::int AS n
+      FROM (
+        SELECT "categoryId" AS cid, id AS pid FROM "Products"
+        WHERE "categoryId" = ANY(${ids}::uuid[])
+        UNION ALL
+        SELECT "categoryId" AS cid, "productId" AS pid FROM "Product_Categories"
+        WHERE "categoryId" = ANY(${ids}::uuid[])
+      ) u GROUP BY u.cid`;
     const byId = new Map(counts.map((c) => [c.id, c.n]));
     return rows.map((r) => ({
       ...r,

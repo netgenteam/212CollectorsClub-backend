@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ProductTagDto } from '../../catalog/dto/product-tag.dto.js';
 import { GradingCompany } from '../../catalog/grading-company.js';
 import {
   Franchise,
@@ -125,6 +126,14 @@ export class AdminProductResponseDto {
 
   @ApiProperty({ type: AdminProductCategoryDto })
   category: AdminProductCategoryDto;
+
+  @ApiProperty({
+    type: ProductTagDto,
+    isArray: true,
+    description:
+      'Story 13.5: taxonomy tags (derived + custom), ordered by sortOrder, name. `category` stays the single main category.',
+  })
+  categories: ProductTagDto[];
 
   @ApiProperty({ type: AdminProductImageDto, isArray: true })
   images: AdminProductImageDto[];

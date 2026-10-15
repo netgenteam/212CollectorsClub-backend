@@ -20,6 +20,7 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
+import { CategoryIdsInput } from './category-ids-input.js';
 import {
   MARKET_REFERENCES_MAX,
   MarketReferenceInputDto,
@@ -186,6 +187,9 @@ export class CreateProductDto {
     message: 'certNumber must be alphanumeric (1-50 chars)',
   })
   certNumber?: string;
+
+  @CategoryIdsInput()
+  categoryIds?: string[];
 
   @marketReferencesApiProperty()
   @IsOptional()

@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { ProductTagDto } from './product-tag.dto.js';
 import { MarketReferenceDto } from './market-reference.dto.js';
 import { GradingCompany } from '../grading-company.js';
 import {
@@ -148,6 +149,14 @@ export class ProductDetailDto {
 
   @ApiProperty({ type: ProductDetailCategoryDto })
   category: ProductDetailCategoryDto;
+
+  @ApiProperty({
+    type: ProductTagDto,
+    isArray: true,
+    description:
+      'Story 13.5: taxonomy tags whose category and ancestors are active, ordered by sortOrder, name.',
+  })
+  categories: ProductTagDto[];
 
   @ApiProperty({
     type: ProductImageItemDto,

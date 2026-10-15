@@ -24,6 +24,7 @@ import {
   ProductPrimaryImageDto,
 } from './dto/product-list-item.dto.js';
 import { ProductDetailDto } from './dto/product-detail.dto.js';
+import { ProductTagDto } from './dto/product-tag.dto.js';
 
 // Raw shape of one row from the hand-written SQL in `listProducts` below —
 // only the columns that query selects, before mapping to ProductListItemDto.
@@ -228,7 +229,7 @@ export class CatalogService {
     const macroSet: ProductType[] = Object.values(MACRO_CATEGORY_TYPES).find(
       (types) => types.includes(base.productType),
     ) ?? [base.productType];
-    const strongMatch = Prisma.sql`(franchise = ${base.franchise}::"Franchise" AND "productType" = ANY(${macroSet}::"ProductType"[]))`;
+    const strongMatch = Prisma.sql`(franchise = ${base.franchise}::"Franchise" AND "productType" = ANY(${macroSet}::"ProductType"[]) AND franchise <> 'OTHER'::"Franchise")`;
 
     const rows = await this.prisma.$queryRaw<ProductSearchRow[]>(
       Prisma.sql`
@@ -360,6 +361,7 @@ export class CatalogService {
     }
 
     const availableStock = Math.max(product.stock - product.heldQty, 0);
+    const categories = await this.listActiveTags(product.id);
 
     return {
       id: product.id,
@@ -374,6 +376,7 @@ export class CatalogService {
       editionLanguage: product.editionLanguage,
       rarity: product.rarity,
       category: product.category,
+      categories,
       images: product.images,
       isPreorder: product.isPreorder,
       releaseDate: product.releaseDate?.toISOString() ?? null,
@@ -389,5 +392,26 @@ export class CatalogService {
         product.marketReferences,
       ) as MarketReferenceDto[],
     };
+  }
+
+  /**
+   * Story 13.5 (AD-36): the product's tags whose Category and every ancestor
+   * are active — one statement, same top-down CTE as `listCategories`.
+   */
+  private async listActiveTags(productId: string): Promise<ProductTagDto[]> {
+    return this.prisma.$queryRaw<ProductTagDto[]>`
+      WITH RECURSIVE active_tree(id) AS (
+        SELECT id FROM "Categories" WHERE "parentId" IS NULL AND "isActive"
+        UNION
+        SELECT ch.id FROM "Categories" ch
+        JOIN active_tree t ON ch."parentId" = t.id
+        WHERE ch."isActive"
+      )
+      SELECT c.id, c.name, c.slug, c."dimension"
+      FROM "Product_Categories" pc
+      JOIN "Categories" c ON c.id = pc."categoryId"
+      JOIN active_tree t ON t.id = c.id
+      WHERE pc."productId" = ${productId}::uuid
+      ORDER BY c."sortOrder" ASC, c.name ASC, c.id ASC`;
   }
 }

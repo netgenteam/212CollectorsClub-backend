@@ -116,6 +116,11 @@ describe('AdminProductsService', () => {
       delete: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
     };
+    category: { findMany: ReturnType<typeof vi.fn> };
+    productCategory: {
+      deleteMany: ReturnType<typeof vi.fn>;
+      createMany: ReturnType<typeof vi.fn>;
+    };
     $queryRaw: ReturnType<typeof vi.fn>;
     $transaction: ReturnType<typeof vi.fn>;
   };
@@ -138,6 +143,12 @@ describe('AdminProductsService', () => {
         count: vi.fn(),
         delete: vi.fn(),
         update: vi.fn(),
+      },
+      // Story 13.5: tag replacement runs inside the create transaction.
+      category: { findMany: vi.fn().mockResolvedValue([]) },
+      productCategory: {
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        createMany: vi.fn().mockResolvedValue({ count: 0 }),
       },
       $queryRaw: vi.fn().mockResolvedValue([{ id: 'locked' }]),
       $transaction: vi.fn(async (cb: (tx: typeof prisma) => Promise<unknown>) =>
@@ -307,6 +318,8 @@ describe('AdminProductsService', () => {
       expect(prisma.product.findMany).toHaveBeenCalledWith({
         include: {
           category: true,
+          // Story 13.5: tags loaded by one batched relation query.
+          taxonomyTags: expect.any(Object) as unknown,
           images: { orderBy: { sortOrder: 'asc' } },
           marketReferences: { orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] },
         },
@@ -787,6 +800,93 @@ describe('AdminProductsService', () => {
       await expect(
         service.reorderImages(PRODUCT_ID, { imageIds: [A, B, C] }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('tags (Story 13.5, AD-38)', () => {
+    const POKE = {
+      id: '11111111-1111-4111-8111-111111111111',
+      slug: 'franchise-pokemon',
+    };
+    const BOX = {
+      id: '22222222-2222-4222-8222-222222222222',
+      slug: 'format-booster-box',
+    };
+    const OLD = {
+      id: '33333333-3333-4333-8333-333333333333',
+      slug: 'franchise-topps',
+    };
+    const CUSTOM = {
+      id: '44444444-4444-4444-8444-444444444444',
+      slug: 'my-set',
+    };
+
+    it('merges derived tags, drops other seeded tags, keeps custom ones, de-duplicates', async () => {
+      prisma.product.create.mockResolvedValue(buildProductRow());
+      prisma.product.findUnique.mockResolvedValue(buildProductRow());
+      prisma.category.findMany.mockResolvedValue([POKE, BOX, OLD, CUSTOM]);
+
+      await service.create(
+        {
+          ...CREATE_DTO,
+          productType: 'BOOSTER_BOX',
+          categoryIds: [OLD.id, CUSTOM.id, CUSTOM.id],
+        },
+        [buildFile()],
+      );
+
+      const data = prisma.productCategory.createMany.mock.calls[0][0] as {
+        data: { categoryId: string }[];
+        skipDuplicates: boolean;
+      };
+      expect(data.skipDuplicates).toBe(true);
+      expect(data.data.map((d) => d.categoryId).sort()).toEqual(
+        [CUSTOM.id, POKE.id, BOX.id].sort(),
+      );
+    });
+
+    it('unknown id -> 400 CATEGORY_NOT_FOUND and the files are cleaned up', async () => {
+      prisma.product.create.mockResolvedValue(buildProductRow());
+      prisma.category.findMany.mockResolvedValue([POKE]);
+
+      const thrown: unknown = await service
+        .create({ ...CREATE_DTO, categoryIds: [CUSTOM.id] }, [buildFile()])
+        .catch((err: unknown) => err);
+
+      expect(thrown).toMatchObject({
+        status: 400,
+        response: { errorCode: 'CATEGORY_NOT_FOUND' },
+      });
+      expect(prisma.productCategory.createMany).not.toHaveBeenCalled();
+      expect(unlinkMock).toHaveBeenCalled();
+    });
+
+    it('PATCH without categoryIds/enums does not touch tags', async () => {
+      prisma.product.update.mockResolvedValue(buildProductRow());
+      prisma.product.findUnique.mockResolvedValue(buildProductRow());
+
+      await service.update(buildProductRow().id, { name: 'x' });
+
+      expect(prisma.productCategory.deleteMany).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('PATCH categoryIds: [] replaces all non-derived tags', async () => {
+      prisma.product.update.mockResolvedValue({
+        franchise: 'POKEMON',
+        productType: 'SINGLE_CARD',
+        taxonomyTags: [],
+      });
+      prisma.product.findUnique.mockResolvedValue(buildProductRow());
+      prisma.category.findMany.mockResolvedValue([POKE]);
+
+      await service.update(buildProductRow().id, { categoryIds: [] });
+
+      expect(prisma.productCategory.deleteMany).toHaveBeenCalledTimes(1);
+      expect(prisma.productCategory.createMany).toHaveBeenCalledWith({
+        data: [{ productId: buildProductRow().id, categoryId: POKE.id }],
+        skipDuplicates: true,
+      });
     });
   });
 });

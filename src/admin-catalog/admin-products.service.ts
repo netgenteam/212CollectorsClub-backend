@@ -16,6 +16,8 @@ import type {
 } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { GradingCompany } from '../catalog/grading-company.js';
+import type { Franchise, ProductType } from '../generated/prisma/enums.js';
+import { derivedTagSlugs, SEEDED_SLUGS } from './seeded-taxonomy.js';
 import { CreateProductDto } from './dto/create-product.dto.js';
 import type { MarketReferenceInputDto } from './dto/market-reference-input.dto.js';
 import { ReorderProductImagesDto } from './dto/reorder-product-images.dto.js';
@@ -34,12 +36,27 @@ import {
 
 type ProductWithRelations = Product & {
   category: Category;
+  taxonomyTags: {
+    category: Pick<Category, 'id' | 'name' | 'slug' | 'dimension'>;
+  }[];
   images: ProductImage[];
   marketReferences: ProductMarketReference[];
 };
 
 const PRODUCT_INCLUDE = {
   category: true,
+  // Story 13.5 (AD-36): one batched relation query for any number of products.
+  taxonomyTags: {
+    select: {
+      category: {
+        select: { id: true, name: true, slug: true, dimension: true },
+      },
+    },
+    orderBy: [
+      { category: { sortOrder: 'asc' } },
+      { category: { name: 'asc' } },
+    ],
+  },
   images: { orderBy: { sortOrder: 'asc' } },
   marketReferences: {
     orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
@@ -105,6 +122,14 @@ function categoryNotFoundForProductException(categoryId: string): ApiException {
     HttpStatus.BAD_REQUEST,
     'CATEGORY_NOT_FOUND',
     `Category ${categoryId} does not exist — cannot assign this Product to it.`,
+  );
+}
+
+function tagCategoryNotFoundException(ids: readonly string[]): ApiException {
+  return new ApiException(
+    HttpStatus.BAD_REQUEST,
+    'CATEGORY_NOT_FOUND',
+    `Category ${ids.join(', ')} does not exist — cannot use it as a tag.`,
   );
 }
 
@@ -214,6 +239,13 @@ export class AdminProductsService {
             data: toMarketReferenceRows(product.id, marketRefs),
           });
         }
+        await this.replaceTags(
+          tx,
+          product.id,
+          dto.categoryIds ?? [],
+          dto.franchise,
+          dto.productType,
+        );
         return product;
       });
 
@@ -320,22 +352,53 @@ export class AdminProductsService {
     }
 
     try {
-      if (dto.marketReferences === undefined) {
+      const marketRefs = dto.marketReferences;
+      if (marketRefs !== undefined)
+        assertNoDuplicateMarketReferences(marketRefs);
+      // AD-38: tags are rewritten when `categoryIds` is sent OR an enum that
+      // drives the derived tags changes (then the stored tags are re-merged).
+      const touchesTags =
+        dto.categoryIds !== undefined ||
+        dto.franchise !== undefined ||
+        dto.productType !== undefined;
+      if (marketRefs === undefined && !touchesTags) {
         await this.prisma.product.update({ where: { id }, data });
       } else {
         // Story 11.4 semantics: an array (even []) REPLACES every stored
         // reference atomically with the product update; omitted = untouched.
-        const marketRefs = dto.marketReferences;
-        assertNoDuplicateMarketReferences(marketRefs);
         await this.prisma.$transaction(async (tx) => {
-          await tx.product.update({ where: { id }, data });
-          await tx.productMarketReference.deleteMany({
-            where: { productId: id },
+          if (touchesTags) {
+            // Row lock serialises concurrent PATCHes of the same product, so
+            // delete+create of tags never interleaves (AC14).
+            await this.lockProductOrThrow(tx, id);
+          }
+          const stored = await tx.product.update({
+            where: { id },
+            data,
+            select: {
+              franchise: true,
+              productType: true,
+              taxonomyTags: { select: { categoryId: true } },
+            },
           });
-          if (marketRefs.length > 0) {
-            await tx.productMarketReference.createMany({
-              data: toMarketReferenceRows(id, marketRefs),
+          if (marketRefs !== undefined) {
+            await tx.productMarketReference.deleteMany({
+              where: { productId: id },
             });
+            if (marketRefs.length > 0) {
+              await tx.productMarketReference.createMany({
+                data: toMarketReferenceRows(id, marketRefs),
+              });
+            }
+          }
+          if (touchesTags) {
+            await this.replaceTags(
+              tx,
+              id,
+              dto.categoryIds ?? stored.taxonomyTags.map((t) => t.categoryId),
+              stored.franchise,
+              stored.productType,
+            );
           }
         });
       }
@@ -563,6 +626,55 @@ export class AdminProductsService {
     return this.findOne(productId);
   }
 
+  /**
+   * Story 13.5 (AD-38): full replacement of the product's tags inside `tx`.
+   * Submitted ids are de-duplicated and must exist (inactive/ROOT allowed);
+   * seeded tags are dropped and re-derived from the resulting enums so tags
+   * follow `franchise`/`productType`; custom tags are kept.
+   */
+  private async replaceTags(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    submitted: readonly string[],
+    franchise: Franchise,
+    productType: ProductType,
+  ): Promise<void> {
+    const unique = [...new Set(submitted.map((id) => id.toLowerCase()))];
+    const derivedSlugs = derivedTagSlugs(franchise, productType);
+    const rows = await tx.category.findMany({
+      where: { OR: [{ id: { in: unique } }, { slug: { in: derivedSlugs } }] },
+      select: { id: true, slug: true },
+    });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const missing = unique.filter((id) => !byId.has(id));
+    if (missing.length > 0) {
+      throw tagCategoryNotFoundException(missing);
+    }
+    const seeded = new Set(SEEDED_SLUGS);
+    const finalIds = new Set<string>();
+    for (const id of unique) {
+      if (!seeded.has(byId.get(id)!.slug)) finalIds.add(id);
+    }
+    for (const row of rows) {
+      if (derivedSlugs.includes(row.slug)) finalIds.add(row.id);
+    }
+    await tx.productCategory.deleteMany({ where: { productId } });
+    if (finalIds.size > 0) {
+      try {
+        await tx.productCategory.createMany({
+          data: [...finalIds].map((categoryId) => ({ productId, categoryId })),
+          skipDuplicates: true,
+        });
+      } catch (err) {
+        // Category deleted between validation and insert (RESTRICT FK).
+        if (isPrismaKnownError(err, 'P2003')) {
+          throw tagCategoryNotFoundException([...finalIds]);
+        }
+        throw err;
+      }
+    }
+  }
+
   private async lockProductOrThrow(
     tx: Prisma.TransactionClient,
     productId: string,
@@ -657,6 +769,12 @@ export class AdminProductsService {
         name: product.category.name,
         slug: product.category.slug,
       },
+      categories: (product.taxonomyTags ?? []).map((t) => ({
+        id: t.category.id,
+        name: t.category.name,
+        slug: t.category.slug,
+        dimension: t.category.dimension,
+      })),
       images,
       marketReferences: (product.marketReferences ?? []).map((ref) => ({
         provider: ref.provider,
