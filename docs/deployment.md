@@ -128,6 +128,10 @@ CUSTOMER_AUTH_SECRET=REPLACE_ME
 # Public storefront URL used in verification / password-reset email links
 # (Story 12.4), e.g. https://212collectorsclub.com (staging: its own URL).
 FRONTEND_URL=https://REPLACE_ME
+# TEMPORARY - remove with real SMTP (Story 13.1, FR-53). `true` enables
+# POST /api/v1/admin/customers/verify-email (admin marks a customer's email
+# verified by hand); anything else = route 404s. Set to false/unset once SMTP works.
+MANUAL_EMAIL_VERIFY_ENABLED=false
 ```
 
 Set ownership/permissions so only the matching service user (and root) can

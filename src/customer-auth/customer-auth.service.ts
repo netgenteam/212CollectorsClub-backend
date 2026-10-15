@@ -36,7 +36,7 @@ function invalidCredentialsException(): ApiException {
   );
 }
 
-const VERIFICATION_PREFIX = 'email-verification:';
+export const VERIFICATION_PREFIX = 'email-verification:';
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
 
 function invalidVerificationTokenException(): ApiException {

@@ -15,6 +15,7 @@ import { AdminAuthModule } from './admin-auth/admin-auth.module.js';
 import { AdminCatalogModule } from './admin-catalog/admin-catalog.module.js';
 import { AdminLandingModule } from './admin-landing/admin-landing.module.js';
 import { CustomerAuthModule } from './customer-auth/customer-auth.module.js';
+import { AdminCustomersModule } from './admin-customers/admin-customers.module.js';
 import { WishlistModule } from './wishlist/wishlist.module.js';
 
 @Module({
@@ -56,6 +57,8 @@ import { WishlistModule } from './wishlist/wishlist.module.js';
     WishlistModule,
     // Story 12.3 (FR-42, AD-28): storefront customer accounts under /auth.
     CustomerAuthModule,
+    // Story 13.1 (FR-53): TEMPORARY manual email verification, flag-gated.
+    AdminCustomersModule,
   ],
   controllers: [AppController],
   providers: [AppService],
