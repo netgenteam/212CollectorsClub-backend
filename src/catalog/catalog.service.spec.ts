@@ -581,3 +581,53 @@ describe('CatalogService', () => {
     });
   });
 });
+
+// Story 13.7 (AC9, AD-37): constant statement count regardless of categories.
+describe('CatalogService.getFacets (Story 13.7)', () => {
+  const build = async (categoryCount: number) => {
+    const rows = Array.from({ length: categoryCount }, (_, i) => ({
+      id: `id-${i}`,
+      name: `n${i}`,
+      slug: `s${i}`,
+      dimension: i % 2 ? 'FRANCHISE' : 'SEALED_FORMAT',
+      isActive: true,
+      inStockCount: i,
+    }));
+    const queryRaw = vi
+      .fn()
+      .mockResolvedValueOnce(rows)
+      .mockResolvedValueOnce([
+        { editionLanguage: 'JP', total: 2, inStock: 1, preorder: 1 },
+        { editionLanguage: 'ES', total: 1, inStock: 1, preorder: 0 },
+      ]);
+    const module = await Test.createTestingModule({
+      providers: [
+        CatalogService,
+        { provide: PrismaService, useValue: { $queryRaw: queryRaw } },
+      ],
+    }).compile();
+    const result = await module.get(CatalogService).getFacets();
+    return { queryRaw, result };
+  };
+
+  it('issues exactly 2 statements for 5 and for 50 categories', async () => {
+    const a = await build(5);
+    const b = await build(50);
+    expect(a.queryRaw).toHaveBeenCalledTimes(2);
+    expect(b.queryRaw).toHaveBeenCalledTimes(2);
+    expect(b.result.franchises.length + b.result.formats.length).toBe(50);
+  });
+
+  it('orders languages ES before JP, sums totals, omits absent codes', async () => {
+    const { result } = await build(1);
+    expect(result.languages).toEqual([
+      { code: 'ES', name: 'Español', inStockCount: 1 },
+      { code: 'JP', name: 'Japonés', inStockCount: 1 },
+    ]);
+    expect(result.totals).toEqual({
+      totalProducts: 3,
+      totalInStock: 2,
+      totalPreorder: 1,
+    });
+  });
+});

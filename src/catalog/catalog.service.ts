@@ -16,7 +16,9 @@ import {
   PaginatedProductsResponseDto,
   PaginationMetaDto,
 } from './dto/paginated-products-response.dto.js';
-import { MACRO_CATEGORY_TYPES } from './macro-category.js';
+import { MACRO_CATEGORY_TYPES, type MacroCategory } from './macro-category.js';
+import { LANGUAGE_NAMES, LANGUAGE_ORDER } from './language-names.js';
+import type { CatalogFacetsResponseDto } from './dto/catalog-facets.dto.js';
 import { RelatedProductsResponseDto } from './dto/related-products-response.dto.js';
 import type { GradingCompany } from './grading-company.js';
 import {
@@ -92,6 +94,97 @@ export class CatalogService {
       JOIN active_tree t ON t.id = c.id
       ${where}
       ORDER BY c."sortOrder" ASC, c.name ASC, c.id ASC`;
+  }
+
+  /**
+   * Story 13.7 (FR-52, AD-37): filter facets. Exactly two aggregated
+   * statements (categories, then languages/totals), independent of the number
+   * of categories. The macro filter lives in the JOIN condition so categories
+   * with 0 matching products are kept. No cache (AD-10).
+   */
+  async getFacets(
+    macroCategory?: MacroCategory,
+  ): Promise<CatalogFacetsResponseDto> {
+    const macroJoin = macroCategory
+      ? Prisma.sql`AND p."productType" = ANY(${MACRO_CATEGORY_TYPES[macroCategory]}::"ProductType"[])`
+      : Prisma.empty;
+    const macroWhere = macroCategory
+      ? Prisma.sql`AND "productType" = ANY(${MACRO_CATEGORY_TYPES[macroCategory]}::"ProductType"[])`
+      : Prisma.empty;
+
+    const [categoryRows, languageRows] = await Promise.all([
+      this.prisma.$queryRaw<
+        {
+          id: string;
+          name: string;
+          slug: string;
+          dimension: string;
+          isActive: boolean;
+          inStockCount: number;
+        }[]
+      >`
+        WITH RECURSIVE active_tree(id) AS (
+          SELECT id FROM "Categories" WHERE "parentId" IS NULL AND "isActive"
+          UNION
+          SELECT ch.id FROM "Categories" ch
+          JOIN active_tree t ON ch."parentId" = t.id
+          WHERE ch."isActive"
+        )
+        SELECT c.id, c.name, c.slug, c."dimension"::text AS dimension,
+               c."isActive",
+               COUNT(DISTINCT p.id) FILTER (WHERE p.stock - p."heldQty" > 0)::int AS "inStockCount"
+        FROM "Categories" c
+        JOIN active_tree t ON t.id = c.id
+        LEFT JOIN "Product_Categories" pc ON pc."categoryId" = c.id
+        LEFT JOIN "Products" p ON p.id = pc."productId" AND p."isActive" = true ${macroJoin}
+        WHERE c."dimension" IN ('FRANCHISE'::"CategoryDimension", 'SEALED_FORMAT'::"CategoryDimension")
+        GROUP BY c.id, c.name, c.slug, c."dimension", c."isActive", c."sortOrder"
+        ORDER BY c."sortOrder" ASC, c.name ASC, c.id ASC`,
+      this.prisma.$queryRaw<
+        {
+          editionLanguage: ProductLanguage;
+          total: number;
+          inStock: number;
+          preorder: number;
+        }[]
+      >`
+        SELECT "editionLanguage",
+               COUNT(*)::int AS total,
+               COUNT(*) FILTER (WHERE stock - "heldQty" > 0)::int AS "inStock",
+               COUNT(*) FILTER (WHERE "isPreorder")::int AS preorder
+        FROM "Products"
+        WHERE "isActive" = true ${macroWhere}
+        GROUP BY "editionLanguage"`,
+    ]);
+
+    const toFacet = (r: (typeof categoryRows)[number]) => ({
+      id: r.id,
+      name: r.name,
+      slug: r.slug,
+      inStockCount: r.inStockCount,
+      isActive: r.isActive,
+    });
+    const byLang = new Map(languageRows.map((r) => [r.editionLanguage, r]));
+    return {
+      franchises: categoryRows
+        .filter((r) => r.dimension === 'FRANCHISE')
+        .map(toFacet),
+      formats: categoryRows
+        .filter((r) => r.dimension === 'SEALED_FORMAT')
+        .map(toFacet),
+      languages: LANGUAGE_ORDER.filter((code) => byLang.has(code)).map(
+        (code) => ({
+          code,
+          name: LANGUAGE_NAMES[code],
+          inStockCount: byLang.get(code)!.inStock,
+        }),
+      ),
+      totals: {
+        totalProducts: languageRows.reduce((a, r) => a + r.total, 0),
+        totalInStock: languageRows.reduce((a, r) => a + r.inStock, 0),
+        totalPreorder: languageRows.reduce((a, r) => a + r.preorder, 0),
+      },
+    };
   }
 
   /**

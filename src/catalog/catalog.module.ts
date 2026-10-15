@@ -1,12 +1,13 @@
 import { Module } from '@nestjs/common';
 import { CatalogController } from './catalog.controller.js';
+import { CatalogFacetsController } from './catalog-facets.controller.js';
 import { ProductsController } from './products.controller.js';
 import { CatalogService } from './catalog.service.js';
 
 // PrismaService is provided by the global PrismaModule (see
 // src/prisma/prisma.module.ts) — no need to re-import it here.
 @Module({
-  controllers: [CatalogController, ProductsController],
+  controllers: [CatalogController, CatalogFacetsController, ProductsController],
   providers: [CatalogService],
   exports: [CatalogService],
 })

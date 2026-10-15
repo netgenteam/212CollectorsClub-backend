@@ -368,3 +368,16 @@ Angel should treat everything above the "Verification status" heading as a
 reviewed, internally-consistent **plan and set of templates**, not a
 proven-working deployment, until §4's manual walkthrough is actually done
 against the real VPS.
+
+## Pre-launch retirement checklist: manual email verification (FR-53, Story 13.7)
+
+`MANUAL_EMAIL_VERIFY_ENABLED` and `POST /api/v1/admin/customers/verify-email`
+are a TEMPORARY workaround until real SMTP exists (PRD §10). Before launch:
+
+- [ ] Delete `src/admin-customers/` and its import in `AppModule`.
+- [ ] Remove `MANUAL_EMAIL_VERIFY_ENABLED` from `.env.example` and from every
+      environment (`/opt/212cc/{staging,production}/shared/.env`).
+- [ ] Remove its e2e spec (`test/admin-customers-verify-email.e2e-spec.ts`).
+- [ ] Until real SMTP exists, confirm `MANUAL_EMAIL_VERIFY_ENABLED` is `false`
+      or absent in staging and production (the endpoint then answers 404; this
+      is asserted by the "flag off" block of that e2e spec).
