@@ -21,9 +21,12 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import type { Response } from 'express';
+import { ApiException } from '../common/api-exception.js';
 import { AdminAuthGuard } from '../common/admin-auth.guard.js';
 import type { RequestWithAdminUser } from '../common/admin-auth.guard.js';
 import { AdminOrdersService } from './admin-orders.service.js';
+import { OrderLookupService } from './order-lookup.service.js';
+import { AdminOrderDetailResponseDto } from './dto/admin-order-detail-response.dto.js';
 import { AdminOrderPaymentService } from './admin-order-payment.service.js';
 import { AdminOrderFulfillmentService } from './admin-order-fulfillment.service.js';
 import { ListAdminOrdersQueryDto } from './dto/list-admin-orders-query.dto.js';
@@ -90,6 +93,7 @@ export class AdminOrdersController {
     private readonly adminOrdersService: AdminOrdersService,
     private readonly adminOrderPaymentService: AdminOrderPaymentService,
     private readonly adminOrderFulfillmentService: AdminOrderFulfillmentService,
+    private readonly orderLookup: OrderLookupService,
   ) {}
 
   @Get()
@@ -97,7 +101,7 @@ export class AdminOrdersController {
   @ApiOperation({
     summary: 'List/filter every Order (admin)',
     description:
-      'Paginated list of every Order, sorted by createdAt (most recent first by default, or sortOrder=asc to reverse). Combinable (AND) `status`/`paymentRail` filters support the daily reconciliation workflow (PRD UJ-5), e.g. status=pending_verification to find Pago Móvil Orders awaiting verification. Never errors on no matches — returns an empty paginated page with 200, same criterion as the public GET /api/v1/products (Story 2.2).',
+      'Paginated list of every Order, sorted by createdAt (most recent first by default, or sortOrder=asc to reverse). Combinable (AND) `status`/`paymentRail`/`refundPending` filters (refundPending=true: Stripe payments needing a manual refund, Story 14.5b) support the daily reconciliation workflow (PRD UJ-5), e.g. status=pending_verification to find Pago Móvil Orders awaiting verification. Never errors on no matches — returns an empty paginated page with 200, same criterion as the public GET /api/v1/products (Story 2.2).',
   })
   @ApiResponse({
     status: HttpStatus.OK,
@@ -144,6 +148,41 @@ export class AdminOrdersController {
     @Query() query: ReconciliationQueryDto,
   ): Promise<AdminReconciliationResponseDto> {
     return this.adminOrdersService.getReconciliation(query);
+  }
+
+  @Get(':orderId')
+  @HttpCode(HttpStatus.OK)
+  @ApiParam({ name: 'orderId', format: 'uuid' })
+  @ApiOperation({
+    summary: 'Order detail with refund-pending flag (admin)',
+    description:
+      'Full Order detail (same shape as GET /orders/{orderId}) plus `refundPending` (Story 14.5b, AD-50): true when Stripe confirmed a payment that could not be applied (no stock / already payment_failed) and a manual refund from the Stripe dashboard is required.',
+  })
+  @ApiResponse({ status: HttpStatus.OK, type: AdminOrderDetailResponseDto })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'errorCode ORDER_NOT_FOUND.',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'errorCode INVALID_ADMIN_TOKEN.',
+  })
+  async getOrderDetail(
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+  ): Promise<AdminOrderDetailResponseDto> {
+    const exists = await this.adminOrdersService.orderExists(orderId);
+    if (!exists) {
+      throw new ApiException(
+        HttpStatus.NOT_FOUND,
+        'ORDER_NOT_FOUND',
+        'Order not found.',
+      );
+    }
+    const [detail, refundPending] = await Promise.all([
+      this.orderLookup.getDetail(orderId),
+      this.adminOrdersService.hasRefundPending(orderId),
+    ]);
+    return { ...detail, refundPending };
   }
 
   @Get(':orderId/proof-of-payment')

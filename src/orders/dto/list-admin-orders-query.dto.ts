@@ -1,6 +1,13 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import {
+  IsBoolean,
+  IsEnum,
+  IsInt,
+  IsOptional,
+  Max,
+  Min,
+} from 'class-validator';
 
 export const DEFAULT_ADMIN_ORDERS_PAGE = 1;
 export const DEFAULT_ADMIN_ORDERS_LIMIT = 20;
@@ -102,6 +109,18 @@ export class ListAdminOrdersQueryDto {
   @IsOptional()
   @IsEnum(AdminOrderPaymentRailFilter)
   paymentRail?: AdminOrderPaymentRailFilter;
+
+  @ApiPropertyOptional({
+    type: Boolean,
+    description:
+      'Story 14.5b (AD-50): true lists only Orders with a refund_pending_* Stripe webhook event (manual refund needed). Omitted or false: no filtering.',
+  })
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    value === 'true' ? true : value === 'false' ? false : value,
+  )
+  @IsBoolean()
+  refundPending?: boolean;
 
   @ApiPropertyOptional({
     enum: AdminOrdersSortOrder,

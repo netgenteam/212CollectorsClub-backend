@@ -10,6 +10,8 @@ import * as argon2 from 'argon2';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { PaymentProcessingTimeoutCronService } from './../src/orders/cron/payment-processing-timeout-cron.service.js';
+import { StockHoldExpiryCronService } from './../src/orders/cron/stock-hold-expiry-cron.service.js';
 import { FakeStripeClient } from './../src/payments-stripe/fake-stripe-client.js';
 
 // Story 14.4 e2e: checkout with paymentRail=stripe (FR-57, AD-46, AD-44).
@@ -154,7 +156,7 @@ describe('Stripe checkout (e2e, Story 14.4)', () => {
       .set('Cookie', cookie)
       .send(body(over));
 
-  it('AC1/AC2/AC4: guest checkout creates a PAYMENT_PROCESSING order, no hold, session args computed server-side, success lookup stays payment_processing', async () => {
+  it('AC1/AC2/AC4: guest checkout creates a PAYMENT_PROCESSING order with one 65-min hold per line (14.5b), session args computed server-side, success lookup stays payment_processing', async () => {
     const p1 = await makeProduct(
       'a',
       '19.99',
@@ -188,7 +190,13 @@ describe('Stripe checkout (e2e, Story 14.4)', () => {
     });
     expect(order.paymentRail).toBe('STRIPE');
     expect(order.status).toBe('PAYMENT_PROCESSING');
-    expect(order.stockHolds).toHaveLength(0);
+    expect(order.stockHolds).toHaveLength(2);
+    for (const hold of order.stockHolds) {
+      expect(hold.releasedAt).toBeNull();
+      const ttl = hold.expiresAt.getTime() - before;
+      expect(ttl).toBeGreaterThan(64 * 60 * 1000);
+      expect(ttl).toBeLessThan(66 * 60 * 1000);
+    }
     expect(order.fxRateVesPerUsd).toBeNull();
     expect(order.totalVes).toBeNull();
     expect(order.customerId).toBeNull();
@@ -200,7 +208,7 @@ describe('Stripe checkout (e2e, Story 14.4)', () => {
       actorType: 'SYSTEM',
     });
     const prod = await prisma.product.findUniqueOrThrow({ where: { id: p1 } });
-    expect(prod.heldQty).toBe(0);
+    expect(prod.heldQty).toBe(3);
     expect(prod.stock).toBe(20);
 
     const call = fake.createdSessions.find(
@@ -297,7 +305,7 @@ describe('Stripe checkout (e2e, Story 14.4)', () => {
     expect(fake.createdSessions.at(-1)?.customerEmail).toBe(email);
   });
 
-  it('AC3: Stripe failure -> 502 STRIPE_SESSION_CREATION_FAILED, order PAYMENT_FAILED (SYSTEM history), no hold, stock untouched, no session id', async () => {
+  it('AC3: Stripe failure -> 502 STRIPE_SESSION_CREATION_FAILED, order PAYMENT_FAILED (SYSTEM history), hold released in the same tx (14.5b), stock untouched, no session id', async () => {
     const p = await makeProduct('e', '8.00', 10);
     const cookie = await guestCart([{ productId: p, quantity: 2 }]);
     vi.spyOn(fake, 'createCheckoutSession').mockRejectedValueOnce(
@@ -319,7 +327,8 @@ describe('Stripe checkout (e2e, Story 14.4)', () => {
     expect(orders).toHaveLength(1);
     expect(orders[0].status).toBe('PAYMENT_FAILED');
     expect(orders[0].stripeCheckoutSessionId).toBeNull();
-    expect(orders[0].stockHolds).toHaveLength(0);
+    expect(orders[0].stockHolds).toHaveLength(1);
+    expect(orders[0].stockHolds[0].releasedAt).not.toBeNull();
     expect(orders[0].statusHistory.map((h) => h.toStatus)).toEqual([
       'PAYMENT_PROCESSING',
       'PAYMENT_FAILED',
@@ -389,5 +398,179 @@ describe('Stripe checkout (e2e, Story 14.4)', () => {
       where: { id: out.orderId },
     });
     expect(after.status).toBe('PAYMENT_PROCESSING');
+  });
+
+  // ---------------------------------------------------------------- 14.5b
+  const pmBody = {
+    paymentRail: 'pago_movil',
+    fulfillmentType: 'pickup',
+    recipientName: 'Maria Perez',
+    recipientPhone: '0412-1234567',
+  };
+
+  it('14.5b AC2: 6 parallel Stripe checkouts for the last unit -> exactly one 201 with hold, rest 409, no order/session, heldQty 1', async () => {
+    const p = await makeProduct('last', '5.00', 1);
+    const cookies = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        guestCart([{ productId: p, quantity: 1 }]),
+      ),
+    );
+    const sessionsBefore = fake.createdSessions.length;
+    const rs = await Promise.all(cookies.map((c) => guestCheckout(c)));
+    expect(rs.filter((r) => r.status === 201)).toHaveLength(1);
+    const losers = rs.filter((r) => r.status === 409);
+    expect(losers).toHaveLength(5);
+    losers.forEach((r) =>
+      expect((r.body as { errorCode: string }).errorCode).toBe(
+        'INSUFFICIENT_STOCK',
+      ),
+    );
+    expect(fake.createdSessions.length - sessionsBefore).toBe(1);
+    const orders = await prisma.order.findMany({
+      where: { lines: { some: { productId: p } } },
+      include: { stockHolds: true },
+    });
+    expect(orders).toHaveLength(1);
+    expect(orders[0].stockHolds).toHaveLength(1);
+    expect(
+      (await prisma.product.findUniqueOrThrow({ where: { id: p } })).heldQty,
+    ).toBe(1);
+  });
+
+  it('14.5b AC3: Pago Movil and Stripe racing for the last unit -> only one wins', async () => {
+    const p = await makeProduct('race', '5.00', 1);
+    const carts = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        guestCart([{ productId: p, quantity: 1 }]),
+      ),
+    );
+    const rs = await Promise.all(
+      carts.map((c, i) =>
+        i % 2 === 0
+          ? guestCheckout(c)
+          : request(server())
+              .post('/api/v1/checkout')
+              .set('Cookie', c)
+              .send(pmBody),
+      ),
+    );
+    expect(rs.filter((r) => r.status === 201)).toHaveLength(1);
+    expect(rs.filter((r) => r.status === 409)).toHaveLength(3);
+    expect(
+      (await prisma.product.findUniqueOrThrow({ where: { id: p } })).heldQty,
+    ).toBe(1);
+  });
+
+  async function stripeOrderWithHold(key: string, qty = 2) {
+    const p = await makeProduct(key, '6.00', 10);
+    const cookie = await guestCart([{ productId: p, quantity: qty }]);
+    const out = (await guestCheckout(cookie).expect(201))
+      .body as StripeCheckoutBody;
+    return { p, out };
+  }
+
+  it('14.5b AC8: timeout cron (run twice concurrently) fails a 61-min Stripe order and releases the hold once; stock-hold-expiry never touches it', async () => {
+    const { p, out } = await stripeOrderWithHold('cron');
+    await prisma.stockHold.updateMany({
+      where: { orderId: out.orderId },
+      data: { expiresAt: new Date(Date.now() - 60 * 1000) },
+    });
+    // stock-hold-expiry ignores PAYMENT_PROCESSING even with expiresAt past
+    const expiry = await app.get(StockHoldExpiryCronService).runExpiryCheck();
+    expect(expiry.ordersExpired).toBe(0);
+    let prod = await prisma.product.findUniqueOrThrow({ where: { id: p } });
+    expect(prod.heldQty).toBe(2);
+    expect(
+      (await prisma.order.findUniqueOrThrow({ where: { id: out.orderId } }))
+        .status,
+    ).toBe('PAYMENT_PROCESSING');
+
+    await prisma.order.update({
+      where: { id: out.orderId },
+      data: { createdAt: new Date(Date.now() - 61 * 60 * 1000) },
+    });
+    const cron = app.get(PaymentProcessingTimeoutCronService);
+    await Promise.all([cron.runTimeoutCheck(), cron.runTimeoutCheck()]);
+    const order = await prisma.order.findUniqueOrThrow({
+      where: { id: out.orderId },
+      include: { statusHistory: true, stockHolds: true },
+    });
+    expect(order.status).toBe('PAYMENT_FAILED');
+    expect(order.statusHistory).toHaveLength(2);
+    expect(order.stockHolds[0].releasedAt).not.toBeNull();
+    prod = await prisma.product.findUniqueOrThrow({ where: { id: p } });
+    expect(prod).toMatchObject({ stock: 10, heldQty: 0 });
+  });
+
+  it('14.5b AC12: admin detail exposes refundPending and the list filters refundPending=true', async () => {
+    const a = await stripeOrderWithHold('rp1', 1);
+    const b = await stripeOrderWithHold('rp2', 1);
+    const evtId = `evt_${TAG}_rp`;
+    await prisma.stripeWebhookEvent.create({
+      data: {
+        eventId: evtId,
+        type: 'checkout.session.completed',
+        orderId: a.out.orderId,
+        outcome: 'refund_pending_after_terminal',
+      },
+    });
+    try {
+      const auth = { Authorization: `Bearer ${adminToken}` };
+      const da = await request(server())
+        .get(`/api/v1/admin/orders/${a.out.orderId}`)
+        .set(auth)
+        .expect(200);
+      expect((da.body as { refundPending: boolean }).refundPending).toBe(true);
+      expect((da.body as { orderId: string }).orderId).toBe(a.out.orderId);
+      const db_ = await request(server())
+        .get(`/api/v1/admin/orders/${b.out.orderId}`)
+        .set(auth)
+        .expect(200);
+      expect((db_.body as { refundPending: boolean }).refundPending).toBe(
+        false,
+      );
+      await request(server())
+        .get(`/api/v1/admin/orders/${randomUUID()}`)
+        .set(auth)
+        .expect(404);
+
+      const list = await request(server())
+        .get('/api/v1/admin/orders?refundPending=true&limit=100')
+        .set(auth)
+        .expect(200);
+      const rows = (
+        list.body as {
+          data: Array<{ orderId: string; refundPending: boolean }>;
+        }
+      ).data;
+      expect(rows.some((r) => r.orderId === a.out.orderId)).toBe(true);
+      expect(rows.some((r) => r.orderId === b.out.orderId)).toBe(false);
+      expect(rows.every((r) => r.refundPending)).toBe(true);
+      await request(server())
+        .get('/api/v1/admin/orders?refundPending=banana')
+        .set(auth)
+        .expect(400);
+
+      const { SwaggerModule, DocumentBuilder } =
+        await import('@nestjs/swagger');
+      const doc = SwaggerModule.createDocument(
+        app,
+        new DocumentBuilder().build(),
+      );
+      const listPath = Object.keys(doc.paths).find((x) =>
+        x.endsWith('/admin/orders'),
+      );
+      const params = (doc.paths[listPath!].get!.parameters ?? []) as Array<{
+        name: string;
+      }>;
+      expect(params.map((x) => x.name)).toContain('refundPending');
+      expect(
+        Object.keys(doc.paths).some((x) =>
+          x.endsWith('/admin/orders/{orderId}'),
+        ),
+      ).toBe(true);
+    } finally {
+      await prisma.stripeWebhookEvent.delete({ where: { eventId: evtId } });
+    }
   });
 });

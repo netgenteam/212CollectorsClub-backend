@@ -10,6 +10,10 @@ import {
   guardedOrderStatusTransition,
   OrderTransitionConflictError,
 } from '../../common/order-status-transition.js';
+import {
+  HeldQtyReleaseError,
+  releaseOrderHolds,
+} from '../../common/order-stock-holds.js';
 
 /**
  * AD-7: an Order enters `payment_processing` exactly once, at creation
@@ -48,10 +52,10 @@ export interface PaymentProcessingTimeoutCheckResult {
  * buyer's abandoned/interrupted PayPal flow doesn't leave an Order stuck
  * ambiguously forever.
  *
- * **Never touches stock**: a PayPal Order never holds stock in the first
- * place (AD-13 — `CheckoutService`'s paypal branch never creates a
- * `StockHold`, unlike the Pago Móvil branch `StockHoldExpiryCronService`
- * handles), so there is nothing to release here, unlike that cron.
+ * **Never decrements `stock`**: a PayPal Order never holds stock (AD-13).
+ * Story 14.5b (AD-50): a Stripe Order does hold stock; the cron that WINS
+ * the guarded transition releases its active holds (heldQty only) in the
+ * same transaction. A PayPal Order simply has no holds to release.
  *
  * **Testable without the real interval**: same shape as
  * `StockHoldExpiryCronService` — `handleCron` (the `@Cron`-decorated
@@ -107,14 +111,16 @@ export class PaymentProcessingTimeoutCronService {
         // --- AD-7/AD-16: payment_processing->payment_failed,
         // actorType=cron. NEVER decrements stock — see this class's own
         // doc comment.
-        await this.prisma.$transaction((tx) =>
-          guardedOrderStatusTransition(tx, {
+        await this.prisma.$transaction(async (tx) => {
+          await guardedOrderStatusTransition(tx, {
             orderId,
             fromStatus: OrderStatus.PAYMENT_PROCESSING,
             toStatus: OrderStatus.PAYMENT_FAILED,
             actorType: OrderActorType.CRON,
-          }),
-        );
+          });
+          // AD-50: only the transition winner releases the holds.
+          await releaseOrderHolds(tx, orderId);
+        });
         ordersFailed++;
       } catch (err) {
         if (err instanceof OrderTransitionConflictError) {
@@ -125,6 +131,12 @@ export class PaymentProcessingTimeoutCronService {
             `Payment-processing timeout: Order ${orderId} already left payment_processing — safe no-op.`,
           );
           ordersSkippedConflict++;
+          continue;
+        }
+        if (err instanceof HeldQtyReleaseError) {
+          this.logger.error(
+            `MANUAL RECONCILIATION REQUIRED: ${err.message} The ->payment_failed transition was rolled back; retried on the next run.`,
+          );
           continue;
         }
         throw err;

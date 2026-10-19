@@ -16,6 +16,7 @@ import {
   guardedOrderStatusTransition,
   recordInitialOrderStatus,
 } from '../common/order-status-transition.js';
+import { releaseOrderHolds } from '../common/order-stock-holds.js';
 import { invalidCustomerTokenException } from '../common/customer-auth.guard.js';
 import type { AuthenticatedCustomer } from '../common/customer-auth.guard.js';
 import { PAYPAL_CLIENT } from '../payments-paypal/paypal-client.interface.js';
@@ -46,6 +47,10 @@ import { PAGO_MOVIL_PLACEHOLDER_ACCOUNT } from './pago-movil-instructions.consta
 
 /** Story 4.1 (AD-6): 24h soft-reservation window for a Pago Móvil StockHold. */
 const STOCK_HOLD_TTL_MS = 24 * 60 * 60 * 1000;
+/** Story 14.5b (AD-50): Stripe hold = 60 min timeout cron + 5 min margin.
+ * Informative/defensive only: the stock-hold-expiry cron never sees
+ * PAYMENT_PROCESSING Orders. */
+const STRIPE_STOCK_HOLD_TTL_MS = 65 * 60 * 1000;
 
 interface StockLineIssue {
   productId: string;
@@ -397,7 +402,8 @@ export class CheckoutService {
         // story's own design note; the real stock guard for it is the
         // AD-13 guarded decrement PaypalPaymentsService runs at
         // confirmation time, not here.
-        if (!isNoHoldRail) {
+        // Story 14.5b (AD-50): Stripe now reserves stock like Pago Móvil.
+        if (!isPaypal) {
           // `Cart_Items` guarantees at most one row per Product (Story
           // 3.1's `@@unique([cartId, productId])`), so each Product here is
           // guarded exactly once. Zero affected rows on ANY line means that
@@ -443,7 +449,10 @@ export class CheckoutService {
                 orderId: order.id,
                 productId: item.productId,
                 quantity: item.quantity,
-                expiresAt: new Date(Date.now() + STOCK_HOLD_TTL_MS),
+                expiresAt: new Date(
+                  Date.now() +
+                    (isStripe ? STRIPE_STOCK_HOLD_TTL_MS : STOCK_HOLD_TTL_MS),
+                ),
               },
             });
           }
@@ -565,7 +574,7 @@ export class CheckoutService {
    * checkout transaction committed. The amount comes only from the persisted
    * OrderLine snapshot (integer cents); nothing client-supplied is read. On
    * Stripe failure the Order is guardedly moved payment_processing ->
-   * payment_failed (no stock was ever touched: no hold exists) and a 502
+   * payment_failed and its holds are released in the same transaction (AD-50) and a 502
    * STRIPE_SESSION_CREATION_FAILED is thrown. Only the webhook (14.5) pays.
    */
   private async finalizeStripeCheckout(
@@ -597,14 +606,16 @@ export class CheckoutService {
         `Stripe session creation failed for Order ${result.orderId}: ${err instanceof Error ? err.message : String(err)}`,
       );
       await this.prisma
-        .$transaction((tx) =>
-          guardedOrderStatusTransition(tx, {
+        .$transaction(async (tx) => {
+          await guardedOrderStatusTransition(tx, {
             orderId: result.orderId,
             fromStatus: OrderStatus.PAYMENT_PROCESSING,
             toStatus: OrderStatus.PAYMENT_FAILED,
             actorType: OrderActorType.SYSTEM,
-          }),
-        )
+          });
+          // AD-50: same transaction as the transition (winner owns release).
+          await releaseOrderHolds(tx, result.orderId);
+        })
         .catch((transitionErr: unknown) => {
           this.logger.error(
             `Also failed to auto-fail Order ${result.orderId} after the Stripe session-creation error above: ${transitionErr instanceof Error ? transitionErr.message : String(transitionErr)}`,

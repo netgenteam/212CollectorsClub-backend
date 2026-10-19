@@ -53,6 +53,7 @@ describe('AdminOrdersService', () => {
       findMany: ReturnType<typeof vi.fn>;
       count: ReturnType<typeof vi.fn>;
     };
+    stripeWebhookEvent: { findMany: ReturnType<typeof vi.fn> };
   };
 
   beforeEach(async () => {
@@ -61,6 +62,7 @@ describe('AdminOrdersService', () => {
         findMany: vi.fn(),
         count: vi.fn(),
       },
+      stripeWebhookEvent: { findMany: vi.fn().mockResolvedValue([]) },
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -96,6 +98,7 @@ describe('AdminOrdersService', () => {
         recipientName: 'Maria Perez',
         totalUsd: 179.98,
         totalVes: 7289.19,
+        refundPending: false,
         createdAt: order.createdAt.toISOString(),
         updatedAt: order.updatedAt.toISOString(),
       },
@@ -106,6 +109,24 @@ describe('AdminOrdersService', () => {
       total: 1,
       totalPages: 1,
     });
+  });
+
+  it('refundPending=true restricts to Orders with a refund_pending_* event and flags them (Story 14.5b)', async () => {
+    const order = buildOrder();
+    prisma.stripeWebhookEvent.findMany.mockResolvedValue([
+      { orderId: order.id },
+    ]);
+    prisma.order.findMany.mockResolvedValue([order]);
+    prisma.order.count.mockResolvedValue(1);
+
+    const result = await service.listOrders(
+      buildQuery({ refundPending: true }),
+    );
+
+    expect(prisma.order.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: { in: [order.id] } } }),
+    );
+    expect(result.data[0].refundPending).toBe(true);
   });
 
   it('a paypal Order (totalVes null): mapped through untouched, never coerced to 0', async () => {

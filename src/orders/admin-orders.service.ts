@@ -100,6 +100,12 @@ export class AdminOrdersService {
       where.paymentRail = query.paymentRail.toUpperCase() as PaymentRail;
     }
 
+    // Story 14.5b (AD-50): Stripe_Webhook_Events has no FK to Order, so the
+    // refund-pending set is resolved first and applied as an id filter.
+    if (query.refundPending === true) {
+      where.id = { in: await this.refundPendingOrderIds() };
+    }
+
     const [rows, total] = await Promise.all([
       this.prisma.order.findMany({
         where,
@@ -110,8 +116,12 @@ export class AdminOrdersService {
       this.prisma.order.count({ where }),
     ]);
 
+    const pending = await this.refundPendingOrderIds(
+      rows.map((order) => order.id),
+    );
+    const pendingSet = new Set(pending);
     const data: AdminOrderListItemDto[] = rows.map((order) =>
-      this.toListItemDto(order),
+      this.toListItemDto(order, pendingSet.has(order.id)),
     );
 
     const meta: AdminOrdersPaginationMetaDto = {
@@ -124,8 +134,34 @@ export class AdminOrdersService {
     return { data, meta };
   }
 
-  private toListItemDto(order: Order): AdminOrderListItemDto {
+  /** Story 14.5b (AD-50): Orders with a `refund_pending_*` webhook event. */
+  private async refundPendingOrderIds(within?: string[]): Promise<string[]> {
+    const rows = await this.prisma.stripeWebhookEvent.findMany({
+      where: {
+        outcome: { startsWith: 'refund_pending_' },
+        orderId: within ? { in: within } : { not: null },
+      },
+      select: { orderId: true },
+      distinct: ['orderId'],
+    });
+    return rows.flatMap((row) => (row.orderId ? [row.orderId] : []));
+  }
+
+  async orderExists(orderId: string): Promise<boolean> {
+    return (await this.prisma.order.count({ where: { id: orderId } })) > 0;
+  }
+
+  /** Story 14.5b (AD-50): true when this Order has a refund_pending_* event. */
+  async hasRefundPending(orderId: string): Promise<boolean> {
+    return (await this.refundPendingOrderIds([orderId])).length > 0;
+  }
+
+  private toListItemDto(
+    order: Order,
+    refundPending: boolean,
+  ): AdminOrderListItemDto {
     return {
+      refundPending,
       orderId: order.id,
       status: order.status.toLowerCase(),
       paymentRail: order.paymentRail.toLowerCase(),

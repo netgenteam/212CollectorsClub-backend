@@ -51,4 +51,11 @@ export class AdminOrderListItemDto {
       'Last time this Order row changed (e.g. its last status transition).',
   })
   updatedAt: string;
+
+  @ApiProperty({
+    example: false,
+    description:
+      'Story 14.5b (AD-50): true when a Stripe payment was confirmed that could not be applied (no stock / after terminal state) and needs a manual refund from the Stripe dashboard.',
+  })
+  refundPending: boolean;
 }

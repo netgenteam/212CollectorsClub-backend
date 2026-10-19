@@ -16,6 +16,10 @@ describe('PaymentProcessingTimeoutCronService', () => {
   let tx: {
     $executeRaw: ReturnType<typeof vi.fn>;
     orderStatusHistory: { create: ReturnType<typeof vi.fn> };
+    stockHold: {
+      findMany: ReturnType<typeof vi.fn>;
+      update: ReturnType<typeof vi.fn>;
+    };
   };
   let prisma: {
     $transaction: ReturnType<typeof vi.fn>;
@@ -26,6 +30,7 @@ describe('PaymentProcessingTimeoutCronService', () => {
     tx = {
       $executeRaw: vi.fn(),
       orderStatusHistory: { create: vi.fn() },
+      stockHold: { findMany: vi.fn().mockResolvedValue([]), update: vi.fn() },
     };
     prisma = {
       $transaction: vi.fn((cb: (tx: unknown) => unknown) => cb(tx)),
@@ -100,6 +105,35 @@ describe('PaymentProcessingTimeoutCronService', () => {
         actorType: 'CRON',
       }) as unknown,
     });
+  });
+
+  it('releases the Order active holds (heldQty only) in the same transaction as the transition (Story 14.5b)', async () => {
+    prisma.order.findMany.mockResolvedValue([{ id: 'order-1' }]);
+    tx.$executeRaw.mockResolvedValue(1);
+    tx.stockHold.findMany.mockResolvedValue([
+      { id: 'h1', productId: 'p1', quantity: 2 },
+    ]);
+
+    const result = await service.runTimeoutCheck();
+
+    expect(result.ordersFailed).toBe(1);
+    expect(tx.stockHold.findMany).toHaveBeenCalledWith({
+      where: { orderId: 'order-1', releasedAt: null },
+    });
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(2);
+    expect(tx.stockHold.update).toHaveBeenCalledWith({
+      where: { id: 'h1' },
+      data: { releasedAt: expect.any(Date) as unknown },
+    });
+  });
+
+  it('losing the transition race never touches holds (Story 14.5b)', async () => {
+    prisma.order.findMany.mockResolvedValue([{ id: 'order-1' }]);
+    tx.$executeRaw.mockResolvedValueOnce(0);
+
+    await service.runTimeoutCheck();
+
+    expect(tx.stockHold.findMany).not.toHaveBeenCalled();
   });
 
   it('a candidate Order already resolved by the time its transaction runs (guard affects 0 rows): safe skip, no history written', async () => {

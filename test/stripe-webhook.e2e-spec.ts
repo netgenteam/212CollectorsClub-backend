@@ -10,6 +10,7 @@ import Stripe from 'stripe';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { PaymentProcessingTimeoutCronService } from './../src/orders/cron/payment-processing-timeout-cron.service.js';
 import { FAKE_STRIPE_WEBHOOK_SECRET } from './../src/payments-stripe/fake-stripe-client.js';
 
 // Story 14.5 e2e: signed, idempotent Stripe webhook (FR-58, AD-47).
@@ -166,6 +167,7 @@ describe('Stripe webhook (e2e, Story 14.5)', () => {
     events: await prisma.stripeWebhookEvent.count({
       where: { orderId },
     }),
+    holds: await prisma.stockHold.findMany({ where: { orderId } }),
   });
 
   it('AC1/AC9: missing, malformed, wrong-secret, stale or tampered signature -> 400 and nothing written', async () => {
@@ -221,7 +223,10 @@ describe('Stripe webhook (e2e, Story 14.5)', () => {
       'PAID',
     ]);
     expect(s.order.statusHistory[1].actorType).toBe('STRIPE_WEBHOOK');
-    expect(s.product.stock).toBe(8);
+    // Story 14.5b: hold consumed -> stock and heldQty drop together, once.
+    expect(s.product).toMatchObject({ stock: 8, heldQty: 0 });
+    expect(s.holds).toHaveLength(1);
+    expect(s.holds[0].releasedAt).not.toBeNull();
     expect(s.events).toBe(1);
     const lookup = await request(server())
       .get(`/api/v1/orders/${co.orderId}`)
@@ -254,17 +259,26 @@ describe('Stripe webhook (e2e, Story 14.5)', () => {
   it.each([
     'checkout.session.async_payment_failed',
     'checkout.session.expired',
-  ])('AC4: %s -> PAYMENT_FAILED, stock untouched', async (type) => {
-    const { co, productId, totalCents } = await makeOrder();
-    const r = await send(
-      evt(type, co, { paymentStatus: 'unpaid', amount: totalCents }),
-    ).expect(200);
-    expect((r.body as Ack).outcome).toBe('failed');
-    const s = await db(co.orderId, productId);
-    expect(s.order.status).toBe('PAYMENT_FAILED');
-    expect(s.order.statusHistory[1].actorType).toBe('STRIPE_WEBHOOK');
-    expect(s.product.stock).toBe(10);
-  });
+  ])(
+    'AC4: %s -> PAYMENT_FAILED, hold released (heldQty restored, stock untouched)',
+    async (type) => {
+      const { co, productId, totalCents } = await makeOrder();
+      const r = await send(
+        evt(type, co, { paymentStatus: 'unpaid', amount: totalCents }),
+      ).expect(200);
+      expect((r.body as Ack).outcome).toBe('failed');
+      const s = await db(co.orderId, productId);
+      expect(s.order.status).toBe('PAYMENT_FAILED');
+      expect(s.order.statusHistory[1].actorType).toBe('STRIPE_WEBHOOK');
+      expect(s.product).toMatchObject({ stock: 10, heldQty: 0 });
+      expect(s.holds[0].releasedAt).not.toBeNull();
+      // delivered again (distinct event): no double release
+      await send(
+        evt(type, co, { paymentStatus: 'unpaid', amount: totalCents }),
+      ).expect(200);
+      expect((await db(co.orderId, productId)).product.heldQty).toBe(0);
+    },
+  );
 
   it('AC5: 5 parallel deliveries of the same event -> one transition, stock once', async () => {
     const { co, productId, totalCents } = await makeOrder('10.00', 2, 10);
@@ -282,7 +296,7 @@ describe('Stripe webhook (e2e, Story 14.5)', () => {
     const s = await db(co.orderId, productId);
     expect(s.order.status).toBe('PAID');
     expect(s.order.statusHistory).toHaveLength(2);
-    expect(s.product.stock).toBe(8);
+    expect(s.product).toMatchObject({ stock: 8, heldQty: 0 });
     expect(s.events).toBe(1);
   });
 
@@ -306,7 +320,7 @@ describe('Stripe webhook (e2e, Story 14.5)', () => {
     const s = await db(co.orderId, productId);
     expect(s.order.status).toBe('PAID');
     expect(s.order.statusHistory).toHaveLength(2);
-    expect(s.product.stock).toBe(8);
+    expect(s.product).toMatchObject({ stock: 8, heldQty: 0 });
     expect(s.events).toBe(4);
   });
 
@@ -325,7 +339,8 @@ describe('Stripe webhook (e2e, Story 14.5)', () => {
     expect((b.body as Ack).outcome).toBe('amount_mismatch');
     const s = await db(co.orderId, productId);
     expect(s.order.status).toBe('PAYMENT_PROCESSING');
-    expect(s.product.stock).toBe(10);
+    expect(s.product).toMatchObject({ stock: 10, heldQty: 2 });
+    expect(s.holds[0].releasedAt).toBeNull();
     const rows = await prisma.stripeWebhookEvent.findMany({
       where: { orderId: co.orderId },
     });
@@ -369,7 +384,12 @@ describe('Stripe webhook (e2e, Story 14.5)', () => {
     expect((late.body as Ack).outcome).toBe('noop');
     const s = await db(co.orderId, productId);
     expect(s.order.status).toBe('PAYMENT_FAILED');
-    expect(s.product.stock).toBe(10);
+    expect(s.product).toMatchObject({ stock: 10, heldQty: 0 });
+    // Story 14.5b AC11: the confirmed payment leaves a persistent trace.
+    const trace = await prisma.stripeWebhookEvent.findMany({
+      where: { orderId: co.orderId, outcome: 'refund_pending_after_terminal' },
+    });
+    expect(trace).toHaveLength(1);
 
     // paid order: further events are no-ops
     const paid = await makeOrder();
@@ -387,7 +407,7 @@ describe('Stripe webhook (e2e, Story 14.5)', () => {
     );
   });
 
-  it('AC8/R1: stock exhausted -> rollback, order stays PAYMENT_PROCESSING, no event row, 200', async () => {
+  it('AC8/R1 (14.5b AC10): guarded consume affects 0 rows -> rollback, refund_pending_no_stock persisted, redelivery is a duplicate', async () => {
     const { co, productId, totalCents } = await makeOrder('10.00', 2, 10);
     await prisma.product.update({
       where: { id: productId },
@@ -401,8 +421,81 @@ describe('Stripe webhook (e2e, Story 14.5)', () => {
     const s = await db(co.orderId, productId);
     expect(s.order.status).toBe('PAYMENT_PROCESSING');
     expect(s.order.statusHistory).toHaveLength(1);
-    expect(s.product.stock).toBe(1);
-    expect(s.events).toBe(0);
+    expect(s.product).toMatchObject({ stock: 1, heldQty: 2 });
+    expect(s.holds[0].releasedAt).toBeNull();
+    expect(s.events).toBe(1);
+    const row = await prisma.stripeWebhookEvent.findFirstOrThrow({
+      where: { orderId: co.orderId },
+    });
+    expect(row.outcome).toBe('refund_pending_no_stock');
+    const again = await send(payload).expect(200);
+    expect((again.body as Ack).outcome).toBe('duplicate');
+    expect((await db(co.orderId, productId)).events).toBe(1);
+  });
+
+  it('14.5b AC10: hold manually released -> not PAID, refund_pending_no_stock, stock/heldQty untouched', async () => {
+    const { co, productId, totalCents } = await makeOrder('10.00', 2, 10);
+    await prisma.$transaction([
+      prisma.stockHold.updateMany({
+        where: { orderId: co.orderId },
+        data: { releasedAt: new Date() },
+      }),
+      prisma.product.update({
+        where: { id: productId },
+        data: { heldQty: 0 },
+      }),
+    ]);
+    const r = await send(
+      evt('checkout.session.completed', co, { amount: totalCents }),
+    ).expect(200);
+    expect((r.body as Ack).outcome).toBe('no_stock');
+    const s = await db(co.orderId, productId);
+    expect(s.order.status).toBe('PAYMENT_PROCESSING');
+    expect(s.product).toMatchObject({ stock: 10, heldQty: 0 });
+    const row = await prisma.stripeWebhookEvent.findFirstOrThrow({
+      where: { orderId: co.orderId },
+    });
+    expect(row.outcome).toBe('refund_pending_no_stock');
+  });
+
+  it('14.5b AC9: paid vs expired vs cron timeout simultaneously -> one transition, hold settled exactly once', async () => {
+    for (let i = 0; i < 4; i++) {
+      const { co, productId, totalCents } = await makeOrder('10.00', 2, 10);
+      await prisma.order.update({
+        where: { id: co.orderId },
+        data: { createdAt: new Date(Date.now() - 61 * 60 * 1000) },
+      });
+      const cron = app.get(PaymentProcessingTimeoutCronService);
+      const rs = await Promise.all([
+        send(evt('checkout.session.completed', co, { amount: totalCents })),
+        send(evt('checkout.session.expired', co, { paymentStatus: 'unpaid' })),
+        send(
+          evt('checkout.session.async_payment_failed', co, {
+            paymentStatus: 'unpaid',
+          }),
+        ),
+        cron.runTimeoutCheck(),
+        cron.runTimeoutCheck(),
+      ]);
+      rs.slice(0, 3).forEach((r) =>
+        expect((r as { status: number }).status).toBe(200),
+      );
+      const s = await db(co.orderId, productId);
+      expect(['PAID', 'PAYMENT_FAILED']).toContain(s.order.status);
+      expect(s.order.statusHistory).toHaveLength(2);
+      expect(s.holds.every((h) => h.releasedAt !== null)).toBe(true);
+      expect(s.product.heldQty).toBe(0);
+      const paid = s.order.status === 'PAID';
+      expect(s.product.stock).toBe(paid ? 8 : 10);
+      const traces = await prisma.stripeWebhookEvent.count({
+        where: {
+          orderId: co.orderId,
+          outcome: 'refund_pending_after_terminal',
+        },
+      });
+      // A paid event that lost to a terminal failure is never silent.
+      expect(traces).toBe(paid ? 0 : 1);
+    }
   });
 
   it('AC9: only the webhook route reads the raw body; JSON routes still parse', async () => {
