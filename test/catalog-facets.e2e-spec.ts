@@ -34,6 +34,7 @@ interface Facets {
   formats: Facet[];
   languages: Lang[];
   totals: Totals;
+  categoryGroups: unknown[];
 }
 
 const TEST_USERNAME = 'e2e-admin-story-13-7';
@@ -200,6 +201,7 @@ describe('Catalog facets (e2e, Story 13.7)', () => {
 
     const after = await facets();
     expect(Object.keys(after).sort()).toEqual([
+      'categoryGroups', // Story 14.2: additive key
       'formats',
       'franchises',
       'languages',

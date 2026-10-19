@@ -584,7 +584,10 @@ describe('CatalogService', () => {
 
 // Story 13.7 (AC9, AD-37): constant statement count regardless of categories.
 describe('CatalogService.getFacets (Story 13.7)', () => {
-  const build = async (categoryCount: number) => {
+  const build = async (
+    categoryCount: number,
+    groupRows: Record<string, unknown>[] = [],
+  ) => {
     const rows = Array.from({ length: categoryCount }, (_, i) => ({
       id: `id-${i}`,
       name: `n${i}`,
@@ -599,7 +602,8 @@ describe('CatalogService.getFacets (Story 13.7)', () => {
       .mockResolvedValueOnce([
         { editionLanguage: 'JP', total: 2, inStock: 1, preorder: 1 },
         { editionLanguage: 'ES', total: 1, inStock: 1, preorder: 0 },
-      ]);
+      ])
+      .mockResolvedValueOnce(groupRows);
     const module = await Test.createTestingModule({
       providers: [
         CatalogService,
@@ -610,11 +614,11 @@ describe('CatalogService.getFacets (Story 13.7)', () => {
     return { queryRaw, result };
   };
 
-  it('issues exactly 2 statements for 5 and for 50 categories', async () => {
+  it('issues exactly 3 statements for 5 and for 50 categories', async () => {
     const a = await build(5);
     const b = await build(50);
-    expect(a.queryRaw).toHaveBeenCalledTimes(2);
-    expect(b.queryRaw).toHaveBeenCalledTimes(2);
+    expect(a.queryRaw).toHaveBeenCalledTimes(3);
+    expect(b.queryRaw).toHaveBeenCalledTimes(3);
     expect(b.result.franchises.length + b.result.formats.length).toBe(50);
   });
 
@@ -629,5 +633,74 @@ describe('CatalogService.getFacets (Story 13.7)', () => {
       totalInStock: 2,
       totalPreorder: 1,
     });
+  });
+});
+
+// Story 14.2 (AC1/2, AD-43): flat rows -> categoryGroups, order preserved.
+describe('CatalogService.getFacets categoryGroups (Story 14.2)', () => {
+  const row = (
+    id: string,
+    parentId: string | null,
+    sortOrder: number,
+    inStockCount: number,
+  ) => ({
+    id,
+    name: id,
+    slug: id,
+    sortOrder,
+    parentId,
+    inStockCount,
+  });
+
+  const run = async (groupRows: Record<string, unknown>[]) => {
+    const queryRaw = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(groupRows);
+    const module = await Test.createTestingModule({
+      providers: [
+        CatalogService,
+        { provide: PrismaService, useValue: { $queryRaw: queryRaw } },
+      ],
+    }).compile();
+    return module.get(CatalogService).getFacets();
+  };
+
+  it('returns [] when there are no groups', async () => {
+    expect((await run([])).categoryGroups).toEqual([]);
+  });
+
+  it('groups children under their root keeping SQL order', async () => {
+    const result = await run([
+      row('r1', null, 0, 5),
+      row('r2', null, 1, 0),
+      row('c1', 'r1', 0, 3),
+      row('c2', 'r1', 1, 0),
+      row('c3', 'r2', 0, 0),
+    ]);
+    expect(result.categoryGroups).toEqual([
+      {
+        id: 'r1',
+        name: 'r1',
+        slug: 'r1',
+        sortOrder: 0,
+        inStockCount: 5,
+        children: [
+          { id: 'c1', name: 'c1', slug: 'c1', sortOrder: 0, inStockCount: 3 },
+          { id: 'c2', name: 'c2', slug: 'c2', sortOrder: 1, inStockCount: 0 },
+        ],
+      },
+      {
+        id: 'r2',
+        name: 'r2',
+        slug: 'r2',
+        sortOrder: 1,
+        inStockCount: 0,
+        children: [
+          { id: 'c3', name: 'c3', slug: 'c3', sortOrder: 0, inStockCount: 0 },
+        ],
+      },
+    ]);
   });
 });

@@ -18,7 +18,11 @@ import {
 } from './dto/paginated-products-response.dto.js';
 import { MACRO_CATEGORY_TYPES, type MacroCategory } from './macro-category.js';
 import { LANGUAGE_NAMES, LANGUAGE_ORDER } from './language-names.js';
-import type { CatalogFacetsResponseDto } from './dto/catalog-facets.dto.js';
+import type {
+  CatalogFacetsResponseDto,
+  CategoryGroupChildDto,
+  CategoryGroupDto,
+} from './dto/catalog-facets.dto.js';
 import { RelatedProductsResponseDto } from './dto/related-products-response.dto.js';
 import type { GradingCompany } from './grading-company.js';
 import {
@@ -97,9 +101,9 @@ export class CatalogService {
   }
 
   /**
-   * Story 13.7 (FR-52, AD-37): filter facets. Exactly two aggregated
-   * statements (categories, then languages/totals), independent of the number
-   * of categories. The macro filter lives in the JOIN condition so categories
+   * Story 13.7 (FR-52, AD-37) / Story 14.2 (FR-55, AD-43): filter facets.
+   * Exactly three aggregated statements (categories, languages/totals,
+   * categoryGroups), independent of the number of categories. The macro filter lives in the JOIN condition so categories
    * with 0 matching products are kept. No cache (AD-10).
    */
   async getFacets(
@@ -112,7 +116,7 @@ export class CatalogService {
       ? Prisma.sql`AND "productType" = ANY(${MACRO_CATEGORY_TYPES[macroCategory]}::"ProductType"[])`
       : Prisma.empty;
 
-    const [categoryRows, languageRows] = await Promise.all([
+    const [categoryRows, languageRows, groupRows] = await Promise.all([
       this.prisma.$queryRaw<
         {
           id: string;
@@ -155,7 +159,75 @@ export class CatalogService {
         FROM "Products"
         WHERE "isActive" = true ${macroWhere}
         GROUP BY "editionLanguage"`,
+      this.prisma.$queryRaw<
+        {
+          id: string;
+          name: string;
+          slug: string;
+          sortOrder: number;
+          parentId: string | null;
+          inStockCount: number;
+        }[]
+      >`
+        WITH RECURSIVE shown AS (
+          SELECT r.id, r.name, r.slug, r."sortOrder", NULL::uuid AS "parentId"
+          FROM "Categories" r
+          WHERE r."type" = 'ROOT'::"CategoryType" AND r."isActive"
+            AND EXISTS (
+              SELECT 1 FROM "Categories" c
+              WHERE c."parentId" = r.id AND c."isActive"
+            )
+          UNION ALL
+          SELECT c.id, c.name, c.slug, c."sortOrder", c."parentId"
+          FROM "Categories" c
+          JOIN "Categories" r ON r.id = c."parentId"
+          WHERE c."isActive" AND r."type" = 'ROOT'::"CategoryType" AND r."isActive"
+        ), closure(anc, id) AS (
+          SELECT id, id FROM shown
+          UNION
+          SELECT cl.anc, c.id FROM "Categories" c JOIN closure cl ON c."parentId" = cl.id
+        ), pairs AS (
+          SELECT p.id AS pid, p."categoryId" AS cid
+          FROM "Products" p
+          WHERE p."isActive" AND p.stock - p."heldQty" > 0 ${macroJoin}
+          UNION
+          SELECT p.id, pc."categoryId"
+          FROM "Products" p
+          JOIN "Product_Categories" pc ON pc."productId" = p.id
+          WHERE p."isActive" AND p.stock - p."heldQty" > 0 ${macroJoin}
+        )
+        SELECT s.id, s.name, s.slug, s."sortOrder", s."parentId",
+               COUNT(DISTINCT pr.pid)::int AS "inStockCount"
+        FROM shown s
+        LEFT JOIN closure cl ON cl.anc = s.id
+        LEFT JOIN pairs pr ON pr.cid = cl.id
+        GROUP BY s.id, s.name, s.slug, s."sortOrder", s."parentId"
+        ORDER BY s."sortOrder" ASC, s.name ASC, s.id ASC`,
     ]);
+
+    const childrenByParent = new Map<string, CategoryGroupChildDto[]>();
+    for (const r of groupRows) {
+      if (r.parentId === null) continue;
+      const list = childrenByParent.get(r.parentId) ?? [];
+      list.push({
+        id: r.id,
+        name: r.name,
+        slug: r.slug,
+        sortOrder: r.sortOrder,
+        inStockCount: r.inStockCount,
+      });
+      childrenByParent.set(r.parentId, list);
+    }
+    const categoryGroups: CategoryGroupDto[] = groupRows
+      .filter((r) => r.parentId === null)
+      .map((r) => ({
+        id: r.id,
+        name: r.name,
+        slug: r.slug,
+        sortOrder: r.sortOrder,
+        inStockCount: r.inStockCount,
+        children: childrenByParent.get(r.id) ?? [],
+      }));
 
     const toFacet = (r: (typeof categoryRows)[number]) => ({
       id: r.id,
@@ -184,6 +256,7 @@ export class CatalogService {
         totalInStock: languageRows.reduce((a, r) => a + r.inStock, 0),
         totalPreorder: languageRows.reduce((a, r) => a + r.preorder, 0),
       },
+      categoryGroups,
     };
   }
 

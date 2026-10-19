@@ -59,6 +59,51 @@ export class FacetTotalsDto {
   totalPreorder: number;
 }
 
+export class CategoryGroupChildDto {
+  @ApiProperty({ format: 'uuid' })
+  id: string;
+
+  @ApiProperty({ example: 'Booster Box' })
+  name: string;
+
+  @ApiProperty({ example: 'booster-box' })
+  slug: string;
+
+  @ApiProperty({ example: 0 })
+  sortOrder: number;
+
+  @ApiProperty({
+    example: 7,
+    description:
+      'Distinct active in-stock products in this category or any descendant (same as GET /products?categoryId=<id>&onlyInStock=true).',
+  })
+  inStockCount: number;
+}
+
+export class CategoryGroupDto {
+  @ApiProperty({ format: 'uuid' })
+  id: string;
+
+  @ApiProperty({ example: 'Sellados' })
+  name: string;
+
+  @ApiProperty({ example: 'sellados' })
+  slug: string;
+
+  @ApiProperty({ example: 0 })
+  sortOrder: number;
+
+  @ApiProperty({
+    example: 12,
+    description:
+      'Distinct in-stock products in the whole subtree (not the sum of children).',
+  })
+  inStockCount: number;
+
+  @ApiProperty({ type: () => [CategoryGroupChildDto] })
+  children: CategoryGroupChildDto[];
+}
+
 export class CatalogFacetsResponseDto {
   @ApiProperty({ type: () => [FacetCategoryDto] })
   franchises: FacetCategoryDto[];
@@ -71,4 +116,11 @@ export class CatalogFacetsResponseDto {
 
   @ApiProperty({ type: () => FacetTotalsDto })
   totals: FacetTotalsDto;
+
+  @ApiProperty({
+    type: () => [CategoryGroupDto],
+    description:
+      'Active ROOT categories with at least one active child, each with its active direct children.',
+  })
+  categoryGroups: CategoryGroupDto[];
 }
