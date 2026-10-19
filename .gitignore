@@ -45,3 +45,7 @@ pnpm-debug.log*
 
 # Prisma
 /prisma/migrations/**/migration.sql.bak
+
+# Importador tcgapi.dev (scripts/import-tcgapi.mjs)
+scripts/.env.import
+scripts/.tcgapi-import-manifest.json
