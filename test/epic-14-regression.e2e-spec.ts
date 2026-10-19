@@ -356,8 +356,28 @@ describe('Epic 14 zero-trace of the retired rail (Story 14.7, AC7)', () => {
       ].map((f) => join(root, f)),
     ].filter((f) => existsSync(f));
     expect(files.length).toBeGreaterThan(20);
+    // Only the bounded removal note of docs/deployment.md may mention it,
+    // and only on lines carrying one of these exact literals.
+    const P = 'Pay' + 'Pal';
+    const allowedDocLiteral = new RegExp(
+      [
+        `${P.toUpperCase()}_REMOVAL_ABORTED`,
+        `remove_${RETIRED}`,
+        `payments/${RETIRED}/webhook`,
+        `${P} (rows|removal|Order)`,
+        `${P} is no longer`,
+        `removes ${P}`,
+        `references ${P}`,
+      ].join('|'),
+    );
     const hits = files.filter((f) =>
-      readFileSync(f, 'utf8').toLowerCase().includes(RETIRED),
+      readFileSync(f, 'utf8')
+        .split('\n')
+        .some(
+          (line) =>
+            line.toLowerCase().includes(RETIRED) &&
+            !(f.endsWith('docs/deployment.md') && allowedDocLiteral.test(line)),
+        ),
     );
     expect(hits).toEqual([]);
   });
