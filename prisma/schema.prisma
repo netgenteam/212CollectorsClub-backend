@@ -356,6 +356,7 @@ model FxRateSetting {
 enum PaymentRail {
   PAGO_MOVIL
   PAYPAL
+  STRIPE
 }
 
 /// AD-8 `[ASSUMPTION — pending Nabil confirmation, PRD OQ6]`. Both
@@ -393,6 +394,7 @@ enum OrderStatus {
 enum OrderActorType {
   SYSTEM
   PAYPAL_WEBHOOK
+  STRIPE_WEBHOOK
   ADMIN
   CRON
 }
@@ -452,6 +454,15 @@ model Order {
   /// indexed lookup, never a scan.
   paypalOrderId String? @unique
 
+  /// Story 14.3 (AD-44): Stripe Checkout Session id (`cs_...`), the
+  /// correlation key for the webhook. Null for other rails and briefly null
+  /// for Stripe between Order creation and the Stripe call (like paypalOrderId).
+  stripeCheckoutSessionId String? @unique
+
+  /// Story 14.3 (AD-44): `pi_...`, only known on completion; not unique and
+  /// not used for lookup.
+  stripePaymentIntentId String?
+
   /// Story 12.6 (AD-31): owner account; null = guest order. SetNull keeps
   /// the order (and its access-token flows) if the account is ever deleted.
   customerId String?   @db.Uuid
@@ -473,6 +484,7 @@ model Order {
   proofOfPayments ProofOfPayment[]
 
   @@index([customerId, createdAt])
+  @@index([stripePaymentIntentId])
   @@map("Orders")
 }
 
@@ -918,4 +930,17 @@ model ProductCategory {
   @@id([productId, categoryId])
   @@index([categoryId])
   @@map("Product_Categories")
+}
+
+/// Story 14.3 (AD-44): idempotency ledger for Stripe webhook deliveries.
+/// No FK to Order on purpose (events for unknown orders are recorded too).
+model StripeWebhookEvent {
+  eventId     String   @id
+  type        String
+  orderId     String?  @db.Uuid
+  /// paid | failed | noop | amount_mismatch | unknown_order
+  outcome     String
+  processedAt DateTime @default(now())
+
+  @@map("Stripe_Webhook_Events")
 }

@@ -12,7 +12,11 @@ import {
 } from './admin-catalog/product-image-upload-paths.constants.js';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    // Story 14.3 (AD-47): exposes req.rawBody (Buffer) for Stripe webhook
+    // signature verification; JSON parsing of every route is unchanged.
+    rawBody: true,
+  });
   const configService = app.get(ConfigService);
   const port = configService.get<number>('PORT', 3000);
 
