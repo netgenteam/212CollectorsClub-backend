@@ -53,7 +53,7 @@ function proofOfPaymentFileMissingException(orderId: string): ApiException {
  * TODO, nunca decremento parcial".
  *
  * **Deliberately NOT swallowed into a safe no-op**, unlike
- * `PaypalPaymentsService.StockDecrementConflictError` (Story 4.3) or the
+ * the Stripe webhook's `StockDecrementConflictError` (Story 14.5) or the
  * stock-hold-expiry cron's `HeldQtyReleaseConflictError` (Story 5.2):
  * those two happen with no live HTTP caller to answer (a webhook that
  * already has the buyer's money, an unattended cron run), so they log loud
@@ -122,13 +122,13 @@ export interface ProofOfPaymentFile {
  * **Reuses, never reinvents**: every status change goes through
  * `guardedOrderStatusTransition` (Story 4.1's helper, `common/
  * order-status-transition.ts`) — this is its 4th/5th real UPDATE-on-an-
- * existing-row consumer, after `PaypalPaymentsService` (4.3) and
+ * existing-row consumer, after the Stripe webhook (14.5) and
  * `StockHoldExpiryCronService` (5.2). Every stock/heldQty mutation goes
  * through `executeGuardedUpdate` (the same generic AD-16 primitive both of
  * those already use). Both guarded transitions here write `actorType =
  * ADMIN` with `adminUserId` set — the first real writer of that
- * combination in this codebase (every prior writer used SYSTEM,
- * PAYPAL_WEBHOOK, or CRON).
+ * combination in this codebase (every prior writer used SYSTEM
+ * or CRON).
  *
  * **Closing the Story 5.2 StockHold gap**: QA flagged, back in Story 5.2,
  * that the expiry cron deliberately never touches an Order that has
@@ -150,7 +150,7 @@ export interface ProofOfPaymentFile {
  *
  * **AC4 — a duplicate confirm/reject is an explicit conflict, never a
  * silent no-op**: this is the one place this story's behavior deliberately
- * diverges from Story 4.3's PayPal webhook and Story 5.2's cron, both of
+ * diverges from the Stripe webhook and Story 5.2's cron, both of
  * which swallow `OrderTransitionConflictError` into a safe, silent 200/
  * noop (no live caller to usefully tell there, see those services' own
  * doc comments). Here there IS a live Admin HTTP request waiting on an
@@ -370,9 +370,7 @@ export class AdminOrderPaymentService {
    * always with a stable `errorCode`, always distinguishable from each
    * other. Anything else (a genuinely unexpected error) is rethrown
    * unchanged, exactly as every other guarded-transaction call site in
-   * this codebase already does (see `PaypalPaymentsService.
-   * applyPaidTransition`'s own `catch` block for the same final
-   * `throw err;` pattern).
+   * this codebase already does (the same final `throw err;` pattern).
    *
    * AC4's "estado actual de la Order" detail: for the duplicate-
    * confirm/reject case specifically, this re-reads the Order's NOW-

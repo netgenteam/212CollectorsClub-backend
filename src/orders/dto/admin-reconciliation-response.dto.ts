@@ -13,7 +13,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 export class ReconciliationBreakdownEntryDto {
   @ApiProperty({
     example: 'pago_movil',
-    enum: ['pago_movil', 'paypal', 'stripe'],
+    enum: ['pago_movil', 'stripe'],
   })
   paymentRail: string;
 
@@ -36,7 +36,7 @@ export class ReconciliationBreakdownEntryDto {
     example: 14578.38,
     nullable: true,
     description:
-      'Sum of Order.totalVes across this group. Always null for paymentRail=paypal (AD-3 never populates VES for PayPal Orders).',
+      'Sum of Order.totalVes across this group. Always null for paymentRail=stripe (AD-3 never populates VES for Stripe Orders).',
   })
   totalVes: number | null;
 }
@@ -46,7 +46,7 @@ export class ReconciliationBreakdownEntryDto {
 export class ReconciliationRailTotalDto {
   @ApiProperty({
     example: 'pago_movil',
-    enum: ['pago_movil', 'paypal', 'stripe'],
+    enum: ['pago_movil', 'stripe'],
   })
   paymentRail: string;
 
@@ -71,7 +71,7 @@ export class ReconciliationGrandTotalDto {
     example: 24488.28,
     nullable: true,
     description:
-      'Sum of Order.totalVes across every Order in the period, regardless of rail (paypal Orders never contribute — see AD-3). Null when the period has zero pago_movil Orders.',
+      'Sum of Order.totalVes across every Order in the period, regardless of rail (stripe Orders never contribute — see AD-3). Null when the period has zero pago_movil Orders.',
   })
   totalVes: number | null;
 }

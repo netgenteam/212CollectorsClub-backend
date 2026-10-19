@@ -21,7 +21,7 @@ import {
  * (never a blind decrement) in case a future writer (e.g. Story 8.3's
  * admin direct-stock-adjustment tool) ever touches `heldQty` too — same
  * defensive posture `StockDecrementConflictError` already establishes in
- * `PaypalPaymentsService` for the analogous `stock` guard.
+ * the Stripe webhook for the analogous `stock` guard.
  *
  * Thrown INSIDE the per-order transaction, so it aborts that transaction
  * as a whole — the Order's `->expired` transition rolls back right along
@@ -79,14 +79,14 @@ export interface StockHoldExpiryCheckResult {
  * **Reuses, never reimplements, Story 4.1's guarded-transition helper**:
  * every Order status change goes through `guardedOrderStatusTransition`
  * (`src/common/order-status-transition.ts`), exactly like
- * `PaypalPaymentsService` (Story 4.3) already does. The `heldQty` release
+ * the Stripe webhook (Story 14.5) does. The `heldQty` release
  * itself reuses the same generic `executeGuardedUpdate` (AD-16) primitive
  * `CheckoutService` already uses for the opposite (increment) direction.
  *
  * **One DB transaction per Order, not one giant transaction for the whole
  * batch**: a 5-minute sweep could in principle find many expired Orders;
  * processing each in its own short transaction keeps lock scope minimal
- * (mirrors `PaypalPaymentsService`'s per-webhook transaction, one Order at
+ * (mirrors the Stripe webhook's per-event transaction, one Order at
  * a time) and means one Order's conflict/failure never blocks or rolls
  * back another's otherwise-successful expiry.
  */
@@ -172,8 +172,8 @@ export class StockHoldExpiryCronService {
   private async expireOneOrder(orderId: string, now: Date): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
       // --- AD-7/AD-16: pending_verification->expired, actorType=cron.
-      // Runs FIRST (same ordering `PaypalPaymentsService` already
-      // established for its own guarded transition + stock mutation): if
+      // Runs FIRST (same ordering the Stripe webhook
+      // uses for its own guarded transition + stock mutation): if
       // this guard affects 0 rows, the whole transaction rolls back
       // before any heldQty is ever touched.
       await guardedOrderStatusTransition(tx, {

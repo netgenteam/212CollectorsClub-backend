@@ -128,7 +128,7 @@ export class AdminOrdersController {
   @ApiOperation({
     summary: 'Consolidated payment reconciliation summary (admin)',
     description:
-      "Cross-rail (PayPal + Pago Móvil) payment summary for the given period, grouped by (paymentRail, status) with per-rail subtotals and a grand total — see AdminOrdersService.getReconciliation's own doc comment for the full field-choice rationale (PRD UJ-5). A period with no matching Orders returns this same shape with empty arrays and a zeroed grandTotal, never an error.",
+      "Cross-rail (Stripe + Pago Móvil) payment summary for the given period, grouped by (paymentRail, status) with per-rail subtotals and a grand total — see AdminOrdersService.getReconciliation's own doc comment for the full field-choice rationale (PRD UJ-5). A period with no matching Orders returns this same shape with empty arrays and a zeroed grandTotal, never an error.",
   })
   @ApiResponse({
     status: HttpStatus.OK,

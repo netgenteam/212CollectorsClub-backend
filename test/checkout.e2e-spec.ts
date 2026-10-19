@@ -174,10 +174,17 @@ describe('CheckoutController (e2e)', () => {
         .expect(400);
     });
 
-    it('400s on an unrecognized paymentRail (pago_movil and, as of Story 4.3, paypal are the only legal values)', () => {
+    it('400s on an unrecognized paymentRail (pago_movil and stripe are the only legal values)', () => {
       return request(app.getHttpServer())
         .post('/api/v1/checkout')
         .send(pickupBody({ paymentRail: 'bogus_rail' }))
+        .expect(400);
+    });
+
+    it('400s on the retired rail value (Story 14.6, AD-49)', () => {
+      return request(app.getHttpServer())
+        .post('/api/v1/checkout')
+        .send(pickupBody({ paymentRail: 'pay' + 'pal' }))
         .expect(400);
     });
   });
@@ -477,7 +484,7 @@ describe('CheckoutController (e2e)', () => {
       // Scoped to THIS test's own cart, deliberately NOT a global
       // `prisma.order.count()` before/after comparison — under Vitest's
       // parallel file execution, other e2e suites (e.g.
-      // payments-paypal.e2e-spec.ts) legitimately create real Orders at
+      // the stripe checkout suite) legitimately create real Orders at
       // the same wall-clock moment, which would make a global count
       // racy/flaky here. A rejected checkout's transaction rolls back in
       // full (CheckoutService's own guarantee), so the cart this specific

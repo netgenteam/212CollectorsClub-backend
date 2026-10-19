@@ -10,7 +10,6 @@ import { CartModule } from './cart/cart.module.js';
 import { ContactModule } from './contact/contact.module.js';
 import { CheckoutModule } from './checkout/checkout.module.js';
 import { OrdersModule } from './orders/orders.module.js';
-import { PaymentsPaypalModule } from './payments-paypal/payments-paypal.module.js';
 import { PaymentsStripeModule } from './payments-stripe/payments-stripe.module.js';
 import { AdminAuthModule } from './admin-auth/admin-auth.module.js';
 import { AdminCatalogModule } from './admin-catalog/admin-catalog.module.js';
@@ -36,7 +35,6 @@ import { WishlistModule } from './wishlist/wishlist.module.js';
     CatalogModule,
     CartModule,
     ContactModule,
-    PaymentsPaypalModule,
     PaymentsStripeModule,
     CheckoutModule,
     OrdersModule,

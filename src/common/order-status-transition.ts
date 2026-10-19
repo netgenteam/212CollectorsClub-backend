@@ -10,7 +10,7 @@ import { executeGuardedUpdate } from './guarded-update.js';
  * admin click, a cron expiry racing an admin confirm, etc., per AD-16).
  * A generic `Error` subclass rather than an `ApiException` on purpose: this
  * module lives in `common/` and is reused by Order-transition call sites in
- * several future modules/stories (4.3 PayPal outcome, 5.2 stock-hold expiry
+ * several future modules/stories (Stripe webhook outcome, 5.2 stock-hold expiry
  * cron, 9.2 admin confirm/reject, 9.3 admin fulfillment status) that may
  * each want a different HTTP status/errorCode for the same underlying
  * conflict (e.g. a cron job doesn't have an HTTP response to shape at all).
@@ -93,7 +93,7 @@ export interface GuardedOrderStatusTransitionParams extends OrderActorParams {
  * Story 4.1 does not call this itself (its own `[]->pending_verification`
  * transition is a fresh INSERT via `recordInitialOrderStatus` above, not an
  * UPDATE on an existing row) — it is introduced here, tested here, and
- * left ready for the first real caller (Story 4.3's PayPal
+ * left ready for the first real caller (Stripe webhook's
  * payment_processing->{paid,payment_failed} transition).
  */
 export async function guardedOrderStatusTransition(

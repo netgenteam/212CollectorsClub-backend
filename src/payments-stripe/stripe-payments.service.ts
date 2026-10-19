@@ -42,8 +42,7 @@ class StockDecrementConflictError extends Error {
 }
 
 /**
- * Story 14.5 (AD-47). Pattern copied from PaypalPaymentsService (retired in
- * 14.6; nothing shared). Idempotency: the event row is inserted first inside
+ * Story 14.5 (AD-47). Idempotency: the event row is inserted first inside
  * the same transaction with ON CONFLICT DO NOTHING; a duplicate/concurrent
  * delivery waits on the unique index and then sees 0 rows inserted.
  */

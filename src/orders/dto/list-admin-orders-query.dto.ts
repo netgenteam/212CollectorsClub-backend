@@ -41,13 +41,12 @@ export enum AdminOrderStatusFilter {
 /**
  * Same lowercase-wire-vs-uppercase-Prisma-enum split as
  * `AdminOrderStatusFilter` above, and deliberately identical wire spelling
- * to `CheckoutPaymentRail` (`pago_movil`/`paypal`) — a story-9.1 filter
+ * to `CheckoutPaymentRail` (`pago_movil`/`stripe`) — a story-9.1 filter
  * value round-trips through the exact same string a Story 4.1/4.3 checkout
  * request originally sent.
  */
 export enum AdminOrderPaymentRailFilter {
   PAGO_MOVIL = 'pago_movil',
-  PAYPAL = 'paypal',
   STRIPE = 'stripe',
 }
 

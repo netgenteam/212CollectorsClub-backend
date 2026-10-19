@@ -9,23 +9,17 @@ import {
 } from 'class-validator';
 
 /**
- * Story 4.1 (FR-12) introduced `pago_movil`; Story 4.3 adds `paypal` —
- * both are now legal `paymentRail` values, and `CheckoutService` branches
- * on which one was sent (stock-hold-then-pending_verification for
- * pago_movil, no-hold-then-payment_processing-plus-a-PayPal-order for
- * paypal — see that service's own doc comment).
+ * Legal `paymentRail` values: `pago_movil` (stock-hold then
+ * pending_verification) and `stripe` (stock-hold then payment_processing
+ * plus a Stripe Checkout Session) — see `CheckoutService`. Any other
+ * value is a 400 (the third-party rail retired in Story 14.6, AD-49).
  *
- * Deliberately lowercase-snake wire values (`pago_movil`, `paypal`), NOT
- * the internal Prisma `PaymentRail` enum's UPPER_SNAKE keys (`PAGO_MOVIL`,
- * `PAYPAL`) — the story's own Acceptance Criteria spell the wire value as
- * `paymentRail=pago_movil`/`paymentRail=paypal` verbatim (unlike Story
- * 2.2's catalog filters, which exposed the Prisma enum's own UPPER_SNAKE
- * values directly on the wire). This DTO enum is the wire contract;
+ * Deliberately lowercase-snake wire values (`pago_movil`, `stripe`), NOT
+ * the internal Prisma `PaymentRail` enum's UPPER_SNAKE keys.
  * `CheckoutService` maps it onto the Prisma enum when persisting.
  */
 export enum CheckoutPaymentRail {
   PAGO_MOVIL = 'pago_movil',
-  PAYPAL = 'paypal',
   /** Story 14.4 (AD-46): Stripe Checkout Session. */
   STRIPE = 'stripe',
 }
@@ -72,7 +66,7 @@ export class CheckoutDto {
     enum: CheckoutPaymentRail,
     example: CheckoutPaymentRail.PAGO_MOVIL,
     description:
-      'Payment rail for this checkout. "pago_movil" (Story 4.1) creates a stock hold and enters pending_verification. "paypal" (Story 4.3) never holds stock, enters payment_processing, and the response includes a paypal.approveUrl to redirect the buyer to. "stripe" (Story 14.4) never holds stock, enters payment_processing, and the response includes stripe.url (Stripe-hosted payment page) to redirect the buyer to; the amount is always computed server-side.',
+      'Payment rail for this checkout. "pago_movil" (Story 4.1) creates a stock hold and enters pending_verification. "stripe" (Story 14.4/14.5b) reserves stock, enters payment_processing, and the response includes stripe.url (Stripe-hosted payment page) to redirect the buyer to; the amount is always computed server-side.',
   })
   @IsEnum(CheckoutPaymentRail)
   paymentRail: CheckoutPaymentRail;

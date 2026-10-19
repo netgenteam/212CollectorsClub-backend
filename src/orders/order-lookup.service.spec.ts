@@ -107,10 +107,10 @@ describe('OrderLookupService', () => {
       });
     });
 
-    it('keeps fxRateVesPerUsd/totalVes null for a paypal Order (AD-3), never coerced to 0', async () => {
+    it('keeps fxRateVesPerUsd/totalVes null for a stripe Order (AD-3), never coerced to 0', async () => {
       prisma.order.findUniqueOrThrow.mockResolvedValue(
         buildOrderWithLines({
-          paymentRail: PaymentRail.PAYPAL,
+          paymentRail: PaymentRail.STRIPE,
           fulfillmentType: FulfillmentType.PICKUP,
           fxRateVesPerUsd: null,
           totalVes: null,
@@ -119,7 +119,7 @@ describe('OrderLookupService', () => {
 
       const result = await service.getDetail('order-1');
 
-      expect(result.paymentRail).toBe('paypal');
+      expect(result.paymentRail).toBe('stripe');
       expect(result.fulfillment.type).toBe('pickup');
       expect(result.fxRateVesPerUsd).toBeNull();
       expect(result.totalVes).toBeNull();

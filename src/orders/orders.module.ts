@@ -25,8 +25,7 @@ import { AdminOrderFulfillmentService } from './admin-order-fulfillment.service.
 // `ScheduleModule.forRoot()` in AppModule) plus direct method calls from
 // tests. Both exported (not strictly required for Nest's own DI — test
 // modules can `get()` any provider in the tree regardless — but exported
-// anyway for the same self-documenting reason `PaymentsPaypalModule`
-// exports `FakePaypalClient`: it's the explicit, discoverable way for an
+// anyway for self-documentation: it's the explicit, discoverable way for an
 // e2e test to say "yes, this provider is meant to be reached from
 // outside this module").
 //

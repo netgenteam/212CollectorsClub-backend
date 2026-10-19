@@ -18,7 +18,7 @@ interface CheckoutBody {
   status: string;
   orderAccessToken: string;
   paymentInstructions: unknown;
-  paypal: { paypalOrderId: string; approveUrl: string } | null;
+  stripe: { sessionId: string; url: string } | null;
   totalUsd: number;
   lines: unknown[];
 }
@@ -267,13 +267,15 @@ describe(
         expect((cart.body as { items: unknown[] }).items).toEqual([]);
       });
 
-      it('verified customer paypal: same contract; webhook confirms it and the customer sees paid', async () => {
-        const p = await mkProduct('pp', 10);
-        const c = await customer('pp');
-        const guest = await guestCheckout(p, { paymentRail: 'paypal' });
-        const acct = await accountOrder(c, p, { paymentRail: 'paypal' });
+      it('verified customer stripe: same contract as a guest stripe checkout, linked to the account', async () => {
+        const p = await mkProduct('st', 10);
+        const c = await customer('st');
+        const guest = await guestCheckout(p, { paymentRail: 'stripe' });
+        const acct = await accountOrder(c, p, { paymentRail: 'stripe' });
         expect(Object.keys(acct).sort()).toEqual(Object.keys(guest).sort());
-        expect(acct.paypal?.approveUrl).toContain('paypal');
+        expect(acct.stripe?.url).toBeTruthy();
+        expect(acct.paymentInstructions).toBeNull();
+        expect(acct.status).toBe('payment_processing');
         expect(
           (
             await prisma.order.findUniqueOrThrow({
@@ -281,15 +283,8 @@ describe(
             })
           ).customerId,
         ).toBe(c.id);
-        await request(server())
-          .post('/api/v1/payments/paypal/webhook')
-          .send({
-            paypalOrderId: acct.paypal?.paypalOrderId,
-            eventType: 'PAYMENT.CAPTURE.COMPLETED',
-          })
-          .expect((r) => expect(r.status).toBeLessThan(300));
         const seen = await mine(c.s, `/${acct.orderId}`).expect(200);
-        expect((seen.body as OrderBody).status).toBe('paid');
+        expect((seen.body as OrderBody).status).toBe('payment_processing');
       });
 
       it('unverified customer: 409 EMAIL_NOT_VERIFIED, no order, no hold, cart untouched', async () => {

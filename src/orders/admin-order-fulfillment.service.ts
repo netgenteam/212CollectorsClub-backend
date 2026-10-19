@@ -80,7 +80,7 @@ class StockReincrementConflictError extends Error {
  * **AC3 — an illegal/duplicate transition is an explicit conflict, never a
  * silent no-op**: exactly Story 9.2's own AC4 criterion, reapplied here.
  * `fulfill`/`cancel` are live, interactive Admin HTTP requests with a caller
- * waiting on a useful answer — unlike Story 4.3's PayPal webhook or Story
+ * waiting on a useful answer — unlike the Stripe webhook or Story
  * 5.2's crons (no live caller, so those two swallow
  * `OrderTransitionConflictError` into a safe 200/no-op instead, see their
  * own doc comments) — so `translateTransitionError` below always turns a
@@ -90,7 +90,7 @@ class StockReincrementConflictError extends Error {
  *
  * **No stock touch on fulfill**: `fulfillOrder` is a pure status transition.
  * `Product.stock` was already decremented once, permanently, at payment
- * confirmation time (4.3's PayPal capture / 9.2's Pago Móvil confirm) — a
+ * confirmation time (14.5's Stripe webhook / 9.2's Pago Móvil confirm) — a
  * fulfilled Order does not "sell" anything a second time, so there is
  * nothing to guard or mutate here beyond the Order row itself.
  */

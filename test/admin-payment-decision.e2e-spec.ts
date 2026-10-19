@@ -38,8 +38,8 @@ const TEST_PASSWORD = 'correct-horse-battery-staple-9f2c';
 // tests below (never checked out by any other suite — cart.e2e-spec.ts
 // only ever adds/removes it from a Cart, never calls /checkout, so its
 // `stock` column is never mutated by anything but this file), for the
-// exact same isolation reason payments-paypal.e2e-spec.ts dedicates
-// MTG_PLANESWALKER_ID to its own concurrency test.
+// exact same isolation reason other e2e files dedicate a Product to
+// their own concurrency tests.
 const OP_ROMANCE_DAWN_ID = '4b904156-c25d-48ad-818e-b2e78224df97'; // stock 180
 const ONE_PIECE_DECK_ID = '8bae3dd3-da83-4509-9ee6-07ee83fb5954'; // stock 60
 

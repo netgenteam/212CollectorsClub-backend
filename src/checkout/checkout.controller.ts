@@ -39,14 +39,14 @@ export class CheckoutController {
   @Post()
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
-    summary: 'Check out the current cart (Pago Móvil or PayPal)',
+    summary: 'Check out the current cart (Pago Móvil or Stripe)',
     description:
-      "Creates an Order from the caller's cart (identified by the signed cartId cookie; with a valid customer session cookie `cc_session` it is the ACCOUNT's cart instead, the order is linked to the account, and a verified email is required — Story 12.6; an invalid/expired session behaves as a guest), re-validating stock for every line at this exact moment (not the add-to-cart-time check). paymentRail=pago_movil (Story 4.1): an Order+OrderLines are created with a price/FX snapshot that is never recomputed, a StockHold is atomically reserved per line (AD-6), the Order enters pending_verification directly, and the response carries Pago Móvil payment instructions. paymentRail=paypal (Story 4.3): no FX/VES snapshot, no StockHold (a paypal Order never holds stock), the Order enters the transient payment_processing state, a PayPal order/session is created server-side, and the response carries paypal.approveUrl to redirect the buyer to — the payment is later confirmed independently via POST /api/v1/payments/paypal/webhook, never by trusting the frontend. fulfillmentType=delivery requires a full Venezuela address (addressLine1/city/state); fulfillmentType=pickup requires none of it — orthogonal to paymentRail. On success (either rail): the cart is cleared and the response carries a one-time orderAccessToken (only its hash is persisted server-side — save it, it is not recoverable later).",
+      "Creates an Order from the caller's cart (identified by the signed cartId cookie; with a valid customer session cookie `cc_session` it is the ACCOUNT's cart instead, the order is linked to the account, and a verified email is required — Story 12.6; an invalid/expired session behaves as a guest), re-validating stock for every line at this exact moment (not the add-to-cart-time check). paymentRail=pago_movil (Story 4.1): an Order+OrderLines are created with a price/FX snapshot that is never recomputed, a StockHold is atomically reserved per line (AD-6), the Order enters pending_verification directly, and the response carries Pago Móvil payment instructions. paymentRail=stripe (Story 14.4/14.5b): no FX/VES snapshot, a StockHold is reserved per line (AD-50), the Order enters the transient payment_processing state, a Stripe Checkout Session is created server-side, and the response carries stripe.url to redirect the buyer to — the payment is later confirmed independently via POST /api/v1/payments/stripe/webhook, never by trusting the frontend. fulfillmentType=delivery requires a full Venezuela address (addressLine1/city/state); fulfillmentType=pickup requires none of it — orthogonal to paymentRail. On success (either rail): the cart is cleared and the response carries a one-time orderAccessToken (only its hash is persisted server-side — save it, it is not recoverable later).",
   })
   @ApiResponse({
     status: HttpStatus.CREATED,
     description:
-      'The created Order (price/FX snapshot for pago_movil, or a PayPal session for paypal) and the one-time orderAccessToken.',
+      'The created Order (price/FX snapshot for pago_movil, or a Stripe session for stripe) and the one-time orderAccessToken.',
     type: CheckoutResponseDto,
   })
   @ApiResponse({
@@ -67,7 +67,7 @@ export class CheckoutController {
   @ApiResponse({
     status: HttpStatus.BAD_GATEWAY,
     description:
-      'paymentRail=paypal only — errorCode PAYPAL_ORDER_CREATION_FAILED: the Order was created but PayPal itself failed to create its own order/session for it; the Order is guardedly moved to payment_failed. Retry the checkout.',
+      'paymentRail=stripe only — errorCode STRIPE_SESSION_CREATION_FAILED: the Order was created but Stripe failed to create the Checkout Session; the Order is guardedly moved to payment_failed and its stock holds are released. Retry the checkout.',
   })
   async checkout(
     @Body() dto: CheckoutDto,

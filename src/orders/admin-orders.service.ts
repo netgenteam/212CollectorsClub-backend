@@ -201,7 +201,7 @@ export class AdminOrdersService {
    * Field choice: `orderCount` + `SUM(totalUsd)` + `SUM(totalVes)` per
    * (paymentRail, status) group. `totalUsd` is the one field every Order
    * always has (AD-3) — the natural "how much money" figure. `totalVes` is
-   * included too (nullable — AD-3 never populates it for paypal Orders)
+   * included too (nullable — AD-3 never populates it for stripe Orders)
    * since VES is what a Pago Móvil buyer/admin actually reconciles against
    * a bank statement. Grouping by `status` (not just `paymentRail`) is the
    * actual reconciliation-relevant decision: it separates money genuinely

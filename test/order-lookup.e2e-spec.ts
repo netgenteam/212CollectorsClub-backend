@@ -4,9 +4,11 @@ import { INestApplication, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
+import Stripe from 'stripe';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { FAKE_STRIPE_WEBHOOK_SECRET } from './../src/payments-stripe/fake-stripe-client.js';
 
 type App = Parameters<typeof request>[0];
 
@@ -17,9 +19,9 @@ type App = Parameters<typeof request>[0];
 // catalog Product is already claimed by some other *.e2e-spec.ts file's
 // own stock/heldQty mutations). The two tests that need REAL transitions
 // (multi-row history, the FR-16 regression) instead drive a genuine
-// checkout + PayPal webhook confirmation, reusing OP_ROMANCE_DAWN_ID
+// checkout + signed Stripe webhook confirmation, reusing OP_ROMANCE_DAWN_ID
 // (already claimed by checkout.e2e-spec.ts, but ONLY for its `heldQty`/
-// StockHold mutations there — pago_movil never reaches Story 4.3's PayPal
+// StockHold mutations there — pago_movil never reaches the Stripe webhook's
 // `stock`-decrement path). This file is the first to touch THIS product's
 // `stock` column directly, always restores it in a `finally` block, and
 // never asserts an absolute stock value (only that ITS OWN Order/history
@@ -62,12 +64,13 @@ interface CheckoutResponse {
   orderId: string;
   status: string;
   orderAccessToken: string;
-  paypal: { paypalOrderId: string; approveUrl: string } | null;
+  totalUsd: number;
+  stripe: { sessionId: string; url: string } | null;
 }
 
 interface WebhookAckResponse {
   received: boolean;
-  outcome: 'paid' | 'payment_failed' | 'noop';
+  outcome: string;
 }
 
 interface ApiErrorBody {
@@ -95,7 +98,7 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
       imports: [AppModule],
     }).compile();
 
-    app = moduleFixture.createNestApplication();
+    app = moduleFixture.createNestApplication({ rawBody: true });
 
     const configService = app.get(ConfigService);
     app.use(cookieParser(configService.getOrThrow<string>('COOKIE_SECRET')));
@@ -125,7 +128,7 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
     overrides: {
       status?: string;
       fulfillmentType?: 'DELIVERY' | 'PICKUP';
-      paymentRail?: 'PAGO_MOVIL' | 'PAYPAL';
+      paymentRail?: 'PAGO_MOVIL' | 'STRIPE';
       withHistoryRow?: boolean;
     } = {},
   ): Promise<{ orderId: string; rawToken: string }> {
@@ -135,7 +138,7 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
     const paymentRail = overrides.paymentRail ?? 'PAGO_MOVIL';
     const fulfillmentType = overrides.fulfillmentType ?? 'PICKUP';
     const isDelivery = fulfillmentType === 'DELIVERY';
-    const isPaypal = paymentRail === 'PAYPAL';
+    const isStripe = paymentRail === 'STRIPE';
 
     const order = await prisma.order.create({
       data: {
@@ -150,8 +153,8 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
         state: isDelivery ? 'Distrito Capital' : null,
         country: isDelivery ? 'Venezuela' : null,
         totalUsd: '25.50' as never,
-        fxRateVesPerUsd: isPaypal ? null : ('40.5000' as never),
-        totalVes: isPaypal ? null : ('1033.00' as never),
+        fxRateVesPerUsd: isStripe ? null : ('40.5000' as never),
+        totalVes: isStripe ? null : ('1033.00' as never),
         accessTokenHash,
         lines: {
           create: [
@@ -187,13 +190,15 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
       .catch(() => undefined);
   }
 
-  /** Drives a REAL HTTP add-to-cart + paypal checkout against
+  /** Drives a REAL HTTP add-to-cart + stripe checkout against
    * OP_ROMANCE_DAWN_ID — used only by the two tests that need genuine
-   * transitions (not a fixture), same helper shape as
-   * payments-paypal.e2e-spec.ts's own `checkoutPaypal`. */
-  async function checkoutPaypal(
-    quantity: number,
-  ): Promise<{ orderId: string; paypalOrderId: string; rawToken: string }> {
+   * transitions (not a fixture). */
+  async function checkoutStripe(quantity: number): Promise<{
+    orderId: string;
+    sessionId: string;
+    totalCents: number;
+    rawToken: string;
+  }> {
     const addRes = await request(app.getHttpServer())
       .post('/api/v1/cart/items')
       .send({ productId: OP_ROMANCE_DAWN_ID, quantity })
@@ -204,29 +209,60 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
       .post('/api/v1/checkout')
       .set('Cookie', cartCookie)
       .send({
-        paymentRail: 'paypal',
+        paymentRail: 'stripe',
         fulfillmentType: 'pickup',
         recipientName: 'Order Lookup E2E Buyer',
         recipientPhone: '0412-9999999',
       })
       .expect(201);
     const body = checkoutRes.body as CheckoutResponse;
-    if (!body.paypal) {
+    if (!body.stripe) {
       throw new Error(
-        `Expected a paypal session on the checkout response, got: ${JSON.stringify(body)}`,
+        `Expected a stripe session on the checkout response, got: ${JSON.stringify(body)}`,
       );
     }
     return {
       orderId: body.orderId,
-      paypalOrderId: body.paypal.paypalOrderId,
+      sessionId: body.stripe.sessionId,
+      totalCents: Math.round(body.totalUsd * 100),
       rawToken: body.orderAccessToken,
     };
   }
 
-  async function postWebhook(paypalOrderId: string): Promise<request.Response> {
+  /** Sends a signed `checkout.session.completed` (paid) webhook. */
+  async function postWebhook(co: {
+    orderId: string;
+    sessionId: string;
+    totalCents: number;
+  }): Promise<request.Response> {
+    const secret =
+      app.get(ConfigService).get<string>('STRIPE_WEBHOOK_SECRET') ||
+      FAKE_STRIPE_WEBHOOK_SECRET;
+    const payload = JSON.stringify({
+      id: `evt_lookup_${randomBytes(8).toString('hex')}`,
+      object: 'event',
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          object: 'checkout.session',
+          id: co.sessionId,
+          client_reference_id: co.orderId,
+          metadata: { orderId: co.orderId },
+          payment_status: 'paid',
+          amount_total: co.totalCents,
+          currency: 'usd',
+          payment_intent: 'pi_test_lookup',
+        },
+      },
+    });
     return request(app.getHttpServer())
-      .post('/api/v1/payments/paypal/webhook')
-      .send({ paypalOrderId, eventType: 'PAYMENT.CAPTURE.COMPLETED' });
+      .post('/api/v1/payments/stripe/webhook')
+      .set('Content-Type', 'application/json')
+      .set(
+        'Stripe-Signature',
+        Stripe.webhooks.generateTestHeaderString({ payload, secret }),
+      )
+      .send(payload);
   }
 
   async function restoreStockAndDeleteOrder(
@@ -334,9 +370,9 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
       }
     });
 
-    it('a paypal Order returns null fxRateVesPerUsd/totalVes (AD-3)', async () => {
+    it('a stripe Order returns null fxRateVesPerUsd/totalVes (AD-3)', async () => {
       const { orderId, rawToken } = await createTestOrder({
-        paymentRail: 'PAYPAL',
+        paymentRail: 'STRIPE',
         status: 'PAYMENT_PROCESSING',
       });
 
@@ -349,7 +385,7 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
         const body = res.body as OrderDetailResponse;
         if (body.fxRateVesPerUsd !== null || body.totalVes !== null) {
           throw new Error(
-            `Expected null VES fields for a paypal Order, got: ${JSON.stringify(body)}`,
+            `Expected null VES fields for a stripe Order, got: ${JSON.stringify(body)}`,
           );
         }
       } finally {
@@ -487,11 +523,12 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
       }
     });
 
-    it('reflects multiple REAL transitions from an actual checkout + PayPal webhook confirmation (creation row, then paid row, oldest first)', async () => {
-      const { orderId, paypalOrderId, rawToken } = await checkoutPaypal(1);
+    it('reflects multiple REAL transitions from an actual checkout + Stripe webhook confirmation (creation row, then paid row, oldest first)', async () => {
+      const co = await checkoutStripe(1);
+      const { orderId, rawToken } = co;
 
       try {
-        const webhookRes = await postWebhook(paypalOrderId);
+        const webhookRes = await postWebhook(co);
         const ack = webhookRes.body as WebhookAckResponse;
         if (webhookRes.status !== 200 || ack.outcome !== 'paid') {
           throw new Error(
@@ -522,7 +559,7 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
         if (
           history[1].fromStatus !== 'payment_processing' ||
           history[1].toStatus !== 'paid' ||
-          history[1].actorType !== 'paypal_webhook'
+          history[1].actorType !== 'stripe_webhook'
         ) {
           throw new Error(
             `Unexpected paid transition row: ${JSON.stringify(history[1])}`,
@@ -549,11 +586,12 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
       }
     });
 
-    it('FR-16 regression: a duplicate PayPal webhook confirmation never produces a second →paid OrderStatusHistory row', async () => {
-      const { orderId, paypalOrderId, rawToken } = await checkoutPaypal(1);
+    it('FR-16 regression: a duplicate Stripe webhook confirmation never produces a second →paid OrderStatusHistory row', async () => {
+      const co = await checkoutStripe(1);
+      const { orderId, rawToken } = co;
 
       try {
-        const firstRes = await postWebhook(paypalOrderId);
+        const firstRes = await postWebhook(co);
         const firstAck = firstRes.body as WebhookAckResponse;
         if (firstAck.outcome !== 'paid') {
           throw new Error(
@@ -561,11 +599,11 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
           );
         }
 
-        // The duplicate — same paypalOrderId, second delivery (PayPal
-        // retries webhooks that don't behave, per Story 4.3).
-        const secondRes = await postWebhook(paypalOrderId);
+        // The duplicate — same order/session, second delivery with a new
+        // event id (Stripe retries webhooks).
+        const secondRes = await postWebhook(co);
         const secondAck = secondRes.body as WebhookAckResponse;
-        if (secondAck.outcome !== 'noop') {
+        if (secondAck.outcome !== 'noop' && secondAck.outcome !== 'duplicate') {
           throw new Error(
             `Expected the duplicate confirmation outcome=noop, got: ${JSON.stringify(secondRes.body)}`,
           );

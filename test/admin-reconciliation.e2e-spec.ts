@@ -1,12 +1,15 @@
+import { randomUUID } from 'node:crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
+import Stripe from 'stripe';
 import * as argon2 from 'argon2';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { FAKE_STRIPE_WEBHOOK_SECRET } from './../src/payments-stripe/fake-stripe-client.js';
 
 type App = Parameters<typeof request>[0];
 
@@ -36,7 +39,8 @@ interface ReconciliationResponse {
 interface CheckoutResponse {
   orderId: string;
   orderAccessToken: string;
-  paypal: { paypalOrderId: string; approveUrl: string } | null;
+  totalUsd: number;
+  stripe: { sessionId: string; url: string } | null;
 }
 
 interface ApiErrorBody {
@@ -79,9 +83,9 @@ function pagoMovilPickupBody(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function paypalPickupBody(overrides: Record<string, unknown> = {}) {
+function stripePickupBody(overrides: Record<string, unknown> = {}) {
   return {
-    paymentRail: 'paypal',
+    paymentRail: 'stripe',
     fulfillmentType: 'pickup',
     recipientName: 'Carlos Gomez',
     recipientPhone: '0414-7654321',
@@ -119,7 +123,7 @@ describe('AdminOrdersController — Story 9.4 reconciliation (e2e)', () => {
       imports: [AppModule],
     }).compile();
 
-    app = moduleFixture.createNestApplication();
+    app = moduleFixture.createNestApplication({ rawBody: true });
 
     const configService = app.get(ConfigService);
     app.use(cookieParser(configService.getOrThrow<string>('COOKIE_SECRET')));
@@ -181,7 +185,7 @@ describe('AdminOrdersController — Story 9.4 reconciliation (e2e)', () => {
     return (checkoutRes.body as CheckoutResponse).orderId;
   }
 
-  async function createPaidPaypalOrder(
+  async function createPaidStripeOrder(
     productId: string,
     quantity: number,
   ): Promise<string> {
@@ -194,21 +198,43 @@ describe('AdminOrdersController — Story 9.4 reconciliation (e2e)', () => {
     const checkoutRes = await request(app.getHttpServer())
       .post('/api/v1/checkout')
       .set('Cookie', cartCookie)
-      .send(paypalPickupBody())
+      .send(stripePickupBody())
       .expect(201);
     const body = checkoutRes.body as CheckoutResponse;
-    if (!body.paypal) {
+    if (!body.stripe) {
       throw new Error(
-        `Expected a paypal session, got: ${JSON.stringify(body)}`,
+        `Expected a stripe session, got: ${JSON.stringify(body)}`,
       );
     }
 
+    const secret =
+      app.get(ConfigService).get<string>('STRIPE_WEBHOOK_SECRET') ||
+      FAKE_STRIPE_WEBHOOK_SECRET;
+    const payload = JSON.stringify({
+      id: `evt_recon_${randomUUID()}`,
+      object: 'event',
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          object: 'checkout.session',
+          id: body.stripe.sessionId,
+          client_reference_id: body.orderId,
+          metadata: { orderId: body.orderId },
+          payment_status: 'paid',
+          amount_total: Math.round(body.totalUsd * 100),
+          currency: 'usd',
+          payment_intent: 'pi_test_recon',
+        },
+      },
+    });
     await request(app.getHttpServer())
-      .post('/api/v1/payments/paypal/webhook')
-      .send({
-        paypalOrderId: body.paypal.paypalOrderId,
-        eventType: 'PAYMENT.CAPTURE.COMPLETED',
-      })
+      .post('/api/v1/payments/stripe/webhook')
+      .set('Content-Type', 'application/json')
+      .set(
+        'Stripe-Signature',
+        Stripe.webhooks.generateTestHeaderString({ payload, secret }),
+      )
+      .send(payload)
       .expect(200);
 
     return body.orderId;
@@ -230,7 +256,7 @@ describe('AdminOrdersController — Story 9.4 reconciliation (e2e)', () => {
       .catch(() => undefined);
   }
 
-  async function cleanupPaypalOrder(
+  async function cleanupStripeOrder(
     orderId: string,
     productId: string,
     quantity: number,
@@ -332,7 +358,12 @@ describe('AdminOrdersController — Story 9.4 reconciliation (e2e)', () => {
   }
 
   function expectRowsClose<
-    T extends { orderCount: number; totalUsd: number; totalVes: number | null },
+    T extends {
+      orderCount: number;
+      totalUsd: number;
+      totalVes: number | null;
+      paymentRail: string;
+    },
   >(actual: T[], expected: T[]): void {
     expect(actual.length).toBe(expected.length);
     actual.forEach((actualRow, index) => {
@@ -403,7 +434,7 @@ describe('AdminOrdersController — Story 9.4 reconciliation (e2e)', () => {
         OP_ROMANCE_DAWN_ID,
         1,
       );
-      const paidPaypalOrderId = await createPaidPaypalOrder(
+      const paidStripeOrderId = await createPaidStripeOrder(
         DBS_UNION_FORCE_ID,
         1,
       );
@@ -450,7 +481,7 @@ describe('AdminOrdersController — Story 9.4 reconciliation (e2e)', () => {
               in: [
                 confirmedPagoMovilOrderId,
                 rejectedPagoMovilOrderId,
-                paidPaypalOrderId,
+                paidStripeOrderId,
               ],
             },
           },
@@ -468,7 +499,7 @@ describe('AdminOrdersController — Story 9.4 reconciliation (e2e)', () => {
         const body = res.body as ReconciliationResponse;
 
         // Sanity check: our 3 Orders (2 distinct pago_movil statuses + 1
-        // paypal) are actually inside both the endpoint's response and the
+        // stripe) are actually inside both the endpoint's response and the
         // independent ground truth — otherwise the loop below would
         // vacuously pass on an empty window.
         expect(expected.breakdown.length).toBeGreaterThanOrEqual(3);
@@ -501,16 +532,16 @@ describe('AdminOrdersController — Story 9.4 reconciliation (e2e)', () => {
           (e) =>
             e.paymentRail === 'pago_movil' && e.status === 'payment_rejected',
         );
-        const paidPaypalEntry = body.breakdown.find(
-          (e) => e.paymentRail === 'paypal' && e.status === 'paid',
+        const paidStripeEntry = body.breakdown.find(
+          (e) => e.paymentRail === 'stripe' && e.status === 'paid',
         );
         expect(paidPagoMovilEntry).toBeDefined();
         expect(rejectedPagoMovilEntry).toBeDefined();
-        expect(paidPaypalEntry).toBeDefined();
+        expect(paidStripeEntry).toBeDefined();
         // AD-3: totalVes is always populated for pago_movil, always null
-        // for paypal.
+        // for stripe.
         expect(paidPagoMovilEntry?.totalVes).not.toBeNull();
-        expect(paidPaypalEntry?.totalVes).toBeNull();
+        expect(paidStripeEntry?.totalVes).toBeNull();
       } finally {
         await cleanupPagoMovilOrder(rejectedPagoMovilOrderId);
         // The confirmed Order's hold was already consumed (converted into
@@ -524,7 +555,7 @@ describe('AdminOrdersController — Story 9.4 reconciliation (e2e)', () => {
         await prisma.order
           .delete({ where: { id: confirmedPagoMovilOrderId } })
           .catch(() => undefined);
-        await cleanupPaypalOrder(paidPaypalOrderId, DBS_UNION_FORCE_ID, 1);
+        await cleanupStripeOrder(paidStripeOrderId, DBS_UNION_FORCE_ID, 1);
       }
     });
   });

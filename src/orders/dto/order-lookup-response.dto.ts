@@ -96,7 +96,7 @@ export class OrderDetailResponseDto {
 
   @ApiProperty({
     example: 'pago_movil',
-    enum: ['pago_movil', 'paypal', 'stripe'],
+    enum: ['pago_movil', 'stripe'],
   })
   paymentRail: string;
 
@@ -109,14 +109,14 @@ export class OrderDetailResponseDto {
   @ApiPropertyOptional({
     example: 40.5,
     nullable: true,
-    description: 'Null for a paypal Order (AD-3).',
+    description: 'Null for a stripe Order (AD-3).',
   })
   fxRateVesPerUsd: number | null;
 
   @ApiPropertyOptional({
     example: 7289.19,
     nullable: true,
-    description: 'Null for a paypal Order (AD-3).',
+    description: 'Null for a stripe Order (AD-3).',
   })
   totalVes: number | null;
 
@@ -154,7 +154,7 @@ export class OrderStatusHistoryEntryDto {
 
   @ApiProperty({
     example: 'admin',
-    enum: ['system', 'paypal_webhook', 'stripe_webhook', 'admin', 'cron'],
+    enum: ['system', 'stripe_webhook', 'admin', 'cron'],
   })
   actorType: string;
 

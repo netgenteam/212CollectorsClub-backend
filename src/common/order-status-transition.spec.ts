@@ -10,9 +10,7 @@ import { OrderActorType, OrderStatus } from '../generated/prisma/enums.js';
  * exercised by CheckoutService's own `[]->pending_verification` path
  * beyond `recordInitialOrderStatus` — `guardedOrderStatusTransition` is
  * forward-looking infrastructure for the first REAL Order UPDATE
- * transition, which lands in Story 4.3 (PayPal payment_processing->paid/
- * payment_failed). These tests exist so that infrastructure is proven
- * correct here, not left untested until 4.3 happens to exercise it.
+ * transition, used by the Stripe webhook (payment_processing->paid/payment_failed).
  */
 describe('order-status-transition', () => {
   let tx: {

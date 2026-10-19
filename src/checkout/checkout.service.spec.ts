@@ -5,7 +5,6 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { ConfigService } from '@nestjs/config';
 import { STRIPE_CLIENT } from '../payments-stripe/stripe-client.interface.js';
-import { PAYPAL_CLIENT } from '../payments-paypal/paypal-client.interface.js';
 import {
   CheckoutDto,
   CheckoutFulfillmentType,
@@ -60,11 +59,11 @@ function buildDeliveryDto(overrides: Partial<CheckoutDto> = {}): CheckoutDto {
   };
 }
 
-function buildPaypalPickupDto(
+function buildStripePickupDto(
   overrides: Partial<CheckoutDto> = {},
 ): CheckoutDto {
   return {
-    paymentRail: CheckoutPaymentRail.PAYPAL,
+    paymentRail: CheckoutPaymentRail.STRIPE,
     fulfillmentType: CheckoutFulfillmentType.PICKUP,
     recipientName: 'Maria Perez',
     recipientPhone: '0412-1234567',
@@ -90,9 +89,8 @@ describe('CheckoutService', () => {
     $transaction: ReturnType<typeof vi.fn>;
     order: { update: ReturnType<typeof vi.fn> };
   };
-  let paypalClient: {
-    createOrder: ReturnType<typeof vi.fn>;
-    captureAndVerifyOrder: ReturnType<typeof vi.fn>;
+  let stripeClient: {
+    createCheckoutSession: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(async () => {
@@ -109,21 +107,19 @@ describe('CheckoutService', () => {
       $transaction: vi.fn((cb: (tx: unknown) => unknown) => cb(tx)),
       order: { update: vi.fn() },
     };
-    paypalClient = {
-      createOrder: vi.fn(),
-      captureAndVerifyOrder: vi.fn(),
-    };
+    stripeClient = { createCheckoutSession: vi.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         CheckoutService,
         { provide: PrismaService, useValue: prisma },
-        { provide: PAYPAL_CLIENT, useValue: paypalClient },
+        { provide: STRIPE_CLIENT, useValue: stripeClient },
         {
-          provide: STRIPE_CLIENT,
-          useValue: { createCheckoutSession: vi.fn() },
+          provide: ConfigService,
+          useValue: {
+            get: vi.fn((_k: string, d?: string) => d ?? 'https://front.test'),
+          },
         },
-        { provide: ConfigService, useValue: { get: vi.fn() } },
       ],
     }).compile();
 
@@ -144,10 +140,9 @@ describe('CheckoutService', () => {
     tx.orderStatusHistory.create.mockResolvedValue({ id: 'history-1' });
     tx.cart.delete.mockResolvedValue({ id: 'cart-1' });
     prisma.order.update.mockResolvedValue({ id: 'order-1' });
-    paypalClient.createOrder.mockResolvedValue({
-      paypalOrderId: 'FAKE-PP-ORDER-1',
-      approveUrl:
-        'https://www.sandbox.paypal.com/checkoutnow?token=FAKE-PP-ORDER-1',
+    stripeClient.createCheckoutSession.mockResolvedValue({
+      sessionId: 'cs_test_1',
+      url: 'https://checkout.stripe.test/cs_test_1',
     });
   });
 
@@ -439,36 +434,36 @@ describe('CheckoutService', () => {
     });
   });
 
-  describe('PayPal checkout (Story 4.3)', () => {
+  describe('Stripe checkout (Story 14.4 / 14.5b)', () => {
     beforeEach(() => {
       tx.order.create.mockResolvedValue({
         id: 'order-1',
-        paymentRail: 'PAYPAL',
+        paymentRail: 'STRIPE',
       });
     });
 
-    it('creates the Order in PAYMENT_PROCESSING with paymentRail=PAYPAL, null FX/VES fields, and never creates a StockHold', async () => {
+    it('creates the Order in PAYMENT_PROCESSING with paymentRail=STRIPE, null FX/VES fields, and reserves a StockHold per line (AD-50)', async () => {
       tx.cart.findFirst.mockResolvedValue({
         id: 'cart-1',
         items: [buildCartItem({ quantity: 2, priceUsd: '89.99' })],
       });
 
-      const result = await service.checkout('cart-1', buildPaypalPickupDto());
+      const result = await service.checkout('cart-1', buildStripePickupDto());
 
       const orderCreateArg = tx.order.create.mock.calls[0][0] as {
         data: Record<string, unknown>;
       };
       expect(orderCreateArg.data).toMatchObject({
         status: 'PAYMENT_PROCESSING',
-        paymentRail: 'PAYPAL',
+        paymentRail: 'STRIPE',
         fxRateVesPerUsd: null,
         totalVes: null,
       });
-      // paypal never reads the FX rate at all.
+      // stripe never reads the FX rate at all.
       expect(tx.fxRateSetting.findUnique).not.toHaveBeenCalled();
-      // paypal never holds stock — no guarded UPDATE, no StockHold row.
-      expect(tx.$executeRaw).not.toHaveBeenCalled();
-      expect(tx.stockHold.create).not.toHaveBeenCalled();
+      // stripe reserves stock: one guarded UPDATE + one StockHold per line.
+      expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+      expect(tx.stockHold.create).toHaveBeenCalledTimes(1);
 
       expect(result.status).toBe('payment_processing');
       expect(result.fxRateVesPerUsd).toBeNull();
@@ -482,7 +477,7 @@ describe('CheckoutService', () => {
         items: [buildCartItem({})],
       });
 
-      await service.checkout('cart-1', buildPaypalPickupDto());
+      await service.checkout('cart-1', buildStripePickupDto());
 
       expect(tx.cart.delete).toHaveBeenCalledWith({ where: { id: 'cart-1' } });
       expect(tx.orderStatusHistory.create).toHaveBeenCalledWith({
@@ -496,65 +491,67 @@ describe('CheckoutService', () => {
       });
     });
 
-    it('still re-validates stock per line (shared FR-12 pre-check) and rejects with 409 INSUFFICIENT_STOCK without ever calling PayPal', async () => {
+    it('re-validates stock per line (shared FR-12 pre-check) and rejects with 409 INSUFFICIENT_STOCK without ever calling Stripe', async () => {
       tx.cart.findFirst.mockResolvedValue({
         id: 'cart-1',
         items: [buildCartItem({ quantity: 5, stock: 3, heldQty: 0 })],
       });
 
       await expect(
-        service.checkout('cart-1', buildPaypalPickupDto()),
+        service.checkout('cart-1', buildStripePickupDto()),
       ).rejects.toMatchObject({
         status: 409,
         response: { errorCode: 'INSUFFICIENT_STOCK' },
       });
       expect(tx.order.create).not.toHaveBeenCalled();
-      expect(paypalClient.createOrder).not.toHaveBeenCalled();
+      expect(stripeClient.createCheckoutSession).not.toHaveBeenCalled();
     });
 
-    it('calls paypalClient.createOrder with the Order id + 2dp totalUsd string, persists the returned paypalOrderId, and returns the approveUrl', async () => {
+    it('creates the Stripe session, persists stripeCheckoutSessionId, and returns the hosted url (no paymentInstructions)', async () => {
       tx.cart.findFirst.mockResolvedValue({
         id: 'cart-1',
         items: [buildCartItem({ quantity: 2, priceUsd: '89.99' })],
       });
 
-      const result = await service.checkout('cart-1', buildPaypalPickupDto());
+      const result = await service.checkout('cart-1', buildStripePickupDto());
 
-      expect(paypalClient.createOrder).toHaveBeenCalledWith({
-        orderId: 'order-1',
-        totalUsd: '179.98',
-      });
+      expect(stripeClient.createCheckoutSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          orderId: 'order-1',
+          currency: 'usd',
+          lines: [
+            expect.objectContaining({ unitAmountCents: 8999, quantity: 2 }),
+          ],
+        }),
+      );
       expect(prisma.order.update).toHaveBeenCalledWith({
         where: { id: 'order-1' },
-        data: { paypalOrderId: 'FAKE-PP-ORDER-1' },
+        data: { stripeCheckoutSessionId: 'cs_test_1' },
       });
-      expect(result.paypal).toEqual({
-        paypalOrderId: 'FAKE-PP-ORDER-1',
-        approveUrl:
-          'https://www.sandbox.paypal.com/checkoutnow?token=FAKE-PP-ORDER-1',
+      expect(result.stripe).toEqual({
+        sessionId: 'cs_test_1',
+        url: 'https://checkout.stripe.test/cs_test_1',
       });
+      expect(result.paymentInstructions).toBeNull();
+      expect(result).not.toHaveProperty('pay' + 'pal');
     });
 
-    it('on paypalClient.createOrder failure: guardedly transitions the already-committed Order to PAYMENT_FAILED and rejects with a 502', async () => {
+    it('on Stripe failure: guardedly transitions the already-committed Order to PAYMENT_FAILED and rejects with a 502', async () => {
       tx.cart.findFirst.mockResolvedValue({
         id: 'cart-1',
         items: [buildCartItem({})],
       });
-      paypalClient.createOrder.mockRejectedValue(new Error('PayPal is down'));
+      stripeClient.createCheckoutSession.mockRejectedValue(
+        new Error('Stripe is down'),
+      );
 
       await expect(
-        service.checkout('cart-1', buildPaypalPickupDto()),
+        service.checkout('cart-1', buildStripePickupDto()),
       ).rejects.toMatchObject({
         status: 502,
-        response: { errorCode: 'PAYPAL_ORDER_CREATION_FAILED' },
+        response: { errorCode: 'STRIPE_SESSION_CREATION_FAILED' },
       });
 
-      // The guarded fail-over transition ran against the Order created in
-      // the (already-committed) checkout transaction above — paypal never
-      // calls $executeRaw during checkout itself (no StockHold guard), so
-      // this one call is exclusively the PAYMENT_PROCESSING->PAYMENT_FAILED
-      // guarded UPDATE.
-      expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
       expect(tx.orderStatusHistory.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           orderId: 'order-1',
@@ -563,8 +560,6 @@ describe('CheckoutService', () => {
           actorType: 'SYSTEM',
         }) as unknown,
       });
-      // Never persisted a paypalOrderId — the order/session was never
-      // actually created on PayPal's side.
       expect(prisma.order.update).not.toHaveBeenCalled();
     });
   });

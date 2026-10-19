@@ -19,11 +19,6 @@ import {
 import { releaseOrderHolds } from '../common/order-stock-holds.js';
 import { invalidCustomerTokenException } from '../common/customer-auth.guard.js';
 import type { AuthenticatedCustomer } from '../common/customer-auth.guard.js';
-import { PAYPAL_CLIENT } from '../payments-paypal/paypal-client.interface.js';
-import type {
-  CreatePaypalOrderResult,
-  PaypalClient,
-} from '../payments-paypal/paypal-client.interface.js';
 import { STRIPE_CLIENT } from '../payments-stripe/stripe-client.interface.js';
 import type {
   CreateStripeCheckoutSessionResult,
@@ -39,7 +34,6 @@ import {
   CheckoutOrderLineResponseDto,
   CheckoutResponseDto,
   PagoMovilInstructionsDto,
-  PaypalCheckoutSessionDto,
   StripeCheckoutSessionDto,
 } from './dto/checkout-response.dto.js';
 import { SINGLETON_FX_RATE_ID } from './fx-rate.constants.js';
@@ -74,23 +68,6 @@ function emailNotVerifiedException(): ApiException {
     HttpStatus.CONFLICT,
     'EMAIL_NOT_VERIFIED',
     'Verify your email address before checking out with your account.',
-  );
-}
-
-/**
- * Story 4.3: the checkout itself always succeeds in creating the Order
- * (status `payment_processing`, committed in its own DB transaction —
- * see `checkout`'s own doc comment for why the PayPal API call below is
- * deliberately OUTSIDE that transaction) before this is ever thrown — this
- * is only reachable if the follow-up call to PayPal's own order-creation
- * API fails. 502, not 500: the failure is in an upstream dependency
- * (PayPal), not this server's own logic.
- */
-function paypalOrderCreationFailedException(): ApiException {
-  return new ApiException(
-    HttpStatus.BAD_GATEWAY,
-    'PAYPAL_ORDER_CREATION_FAILED',
-    'Could not create a PayPal order for this checkout — the checkout was not completed. Please try again.',
   );
 }
 
@@ -157,17 +134,17 @@ function generateOrderAccessToken(): {
 
 /** What the DB transaction inside `checkout` hands back to the (non-
  * transactional) code that runs after it commits — enough for either
- * branch (`toResponseDto` directly for pago_movil, `finalizePaypalCheckout`
- * first for paypal) to build the final response. */
+ * branch (`toResponseDto` directly for pago_movil, `finalizeStripeCheckout`
+ * first for stripe) to build the final response. */
 interface CheckoutTransactionResult {
   orderId: string;
   status: OrderStatus;
   paymentRail: PaymentRail;
   totalUsd: Prisma.Decimal;
   lines: Prisma.OrderLineCreateManyOrderInput[];
-  /** Story 4.3 (AD-3): null for a paypal checkout. */
+  /** Story 4.3 (AD-3): null for a stripe checkout. */
   fxRateVesPerUsd: Prisma.Decimal | null;
-  /** Story 4.3 (AD-3): null for a paypal checkout. */
+  /** Story 4.3 (AD-3): null for a stripe checkout. */
   totalVes: Prisma.Decimal | null;
   rawToken: string;
   /** Story 14.4: account email (logged-in checkouts only) to prefill Stripe. */
@@ -180,48 +157,34 @@ export class CheckoutService {
 
   constructor(
     private readonly prisma: PrismaService,
-    @Inject(PAYPAL_CLIENT) private readonly paypalClient: PaypalClient,
     @Inject(STRIPE_CLIENT) private readonly stripeClient: StripeClient,
     private readonly config: ConfigService,
   ) {}
 
   /**
    * Story 4.1 (FR-12, FR-13, FR-15 creation portion; AD-3, AD-4, AD-6, AD-7,
-   * AD-8, AD-16, AD-17) + Story 4.3 (FR-12 paypal branch; AD-3, AD-7,
-   * AD-13). `cartId` is whatever `CheckoutController` read from the
+   * AD-8, AD-16, AD-17) + Story 14.4 (stripe branch; AD-46, AD-50). `cartId` is whatever `CheckoutController` read from the
    * (already signature-verified) AD-5 cart cookie, or `null` when there
    * was none / it didn't verify — treated identically to "the cart is
    * empty" (see `emptyCartException`), since there is nothing to check out
    * either way.
    *
-   * Stock re-validation, the price/line snapshot, and the Order+OrderLine
-   * creation are SHARED between both payment rails (this is the "shared
-   * logic with Story 4.1" the Story 4.3 Acceptance Criteria call for) —
-   * they diverge only in: whether an FX/VES snapshot is taken at all (AD-3:
-   * pago_movil only), whether a per-line AD-6 StockHold is guardedly
-   * created (pago_movil only — a paypal Order never holds stock, per AD-13
-   * and this story's own design note), and which initial `OrderStatus`
-   * `recordInitialOrderStatus` writes (`pending_verification` vs.
+   * Stock re-validation, the price/line snapshot, the per-line AD-6
+   * StockHold and the Order+OrderLine creation are SHARED between both
+   * payment rails; they diverge only in: whether an FX/VES snapshot is
+   * taken (AD-3: pago_movil only), the StockHold TTL, and which initial
+   * `OrderStatus` is written (`pending_verification` vs.
    * `payment_processing`).
    *
-   * Everything through the shared-logic branch above runs in a single
-   * Prisma transaction, same guarantee Story 4.1 already established: if
-   * ANY line fails its stock re-validation or (pago_movil only) its AD-6
-   * guarded hold-creation UPDATE, everything already done in this same
-   * transaction callback rolls back in full.
+   * Everything through the shared-logic branch runs in a single Prisma
+   * transaction: if ANY line fails its stock re-validation or its AD-6
+   * guarded hold-creation UPDATE, everything done in this transaction rolls
+   * back in full.
    *
-   * **Why the PayPal API call is deliberately OUTSIDE that transaction**
-   * (see `finalizePaypalCheckout`): holding a DB transaction open across an
-   * external HTTP round trip to PayPal would hold row locks/a pooled
-   * connection for the duration of that network call — a well-known
-   * anti-pattern this codebase has no other precedent for (Story 6.1's
-   * MailerService is the closest prior external-call case, and it is
-   * likewise called only after its own DB write already committed, for the
-   * same reason). Instead: the Order commits as `payment_processing`
-   * first, then PayPal's own order is created, then `Order.paypalOrderId`
-   * is filled in with a plain follow-up update. See
-   * `finalizePaypalCheckout`'s own doc comment for what happens if the
-   * PayPal call itself fails.
+   * The Stripe API call is deliberately OUTSIDE that transaction (see
+   * `finalizeStripeCheckout`): holding a DB transaction open across an
+   * external HTTP round trip would hold row locks/a pooled connection for
+   * the duration of that network call.
    */
   async checkout(
     cartId: string | null,
@@ -249,11 +212,10 @@ export class CheckoutService {
     }
 
     const isDelivery = dto.fulfillmentType === CheckoutFulfillmentType.DELIVERY;
-    const isPaypal = dto.paymentRail === CheckoutPaymentRail.PAYPAL;
-    // Story 14.4 (AD-46): stripe shares paypal's no-hold / no-VES /
-    // payment_processing shape; only the rail value and the finalizer differ.
+    // Story 14.4 (AD-46): stripe has no VES snapshot and enters
+    // payment_processing; pago_movil snapshots FX and enters
+    // pending_verification.
     const isStripe = dto.paymentRail === CheckoutPaymentRail.STRIPE;
-    const isNoHoldRail = isPaypal || isStripe;
 
     const result = await this.prisma.$transaction(
       async (tx): Promise<CheckoutTransactionResult> => {
@@ -291,11 +253,7 @@ export class CheckoutService {
         // add-time check. This SELECT-based pre-check is informative (it can
         // report every failing line in one response); for pago_movil it is
         // deliberately NOT the actual concurrency guarantee (the guarded
-        // UPDATE loop further below, AD-6, is). For paypal — which never
-        // holds stock at all — this pre-check IS the only re-validation
-        // checkout itself performs; the real, final guard for a paypal
-        // Order is the AD-13 guarded decrement `PaypalPaymentsService` runs
-        // at payment-confirmation time, not here.
+        // UPDATE loop further below, AD-6, is).
         const stockIssues: StockLineIssue[] = [];
         for (const item of cart.items) {
           const available = Math.max(
@@ -336,11 +294,11 @@ export class CheckoutService {
           });
         }
 
-        // --- AD-3: a paypal Order never snapshots an FX rate or a VES
+        // --- AD-3: a stripe Order never snapshots an FX rate or a VES
         // total — only pago_movil does. `fxRate`/`totalVes` stay null.
         let fxRate: { vesPerUsd: Prisma.Decimal } | null = null;
         let totalVes: Prisma.Decimal | null = null;
-        if (!isNoHoldRail) {
+        if (!isStripe) {
           fxRate = await tx.fxRateSetting.findUnique({
             where: { id: SINGLETON_FX_RATE_ID },
           });
@@ -360,21 +318,16 @@ export class CheckoutService {
         const { rawToken, tokenHash } = generateOrderAccessToken();
 
         // --- AD-7: a pago_movil Order enters pending_verification
-        // directly; a paypal Order enters the transient payment_processing
-        // state instead (Story 4.3's own state, resolved later by
-        // PaypalPaymentsService).
-        const initialStatus = isNoHoldRail
+        // directly; a stripe Order enters the transient payment_processing
+        // state instead (resolved later by the Stripe webhook / timeout cron).
+        const initialStatus = isStripe
           ? OrderStatus.PAYMENT_PROCESSING
           : OrderStatus.PENDING_VERIFICATION;
 
         const order = await tx.order.create({
           data: {
             status: initialStatus,
-            paymentRail: isStripe
-              ? PaymentRail.STRIPE
-              : isPaypal
-                ? PaymentRail.PAYPAL
-                : PaymentRail.PAGO_MOVIL,
+            paymentRail: isStripe ? PaymentRail.STRIPE : PaymentRail.PAGO_MOVIL,
             fulfillmentType: isDelivery
               ? FulfillmentType.DELIVERY
               : FulfillmentType.PICKUP,
@@ -397,13 +350,8 @@ export class CheckoutService {
           },
         });
 
-        // --- AD-6/AD-13: ONLY pago_movil guardedly reserves stock at
-        // checkout time. A paypal Order never holds stock at all — see this
-        // story's own design note; the real stock guard for it is the
-        // AD-13 guarded decrement PaypalPaymentsService runs at
-        // confirmation time, not here.
-        // Story 14.5b (AD-50): Stripe now reserves stock like Pago Móvil.
-        if (!isPaypal) {
+        // --- AD-6 / AD-50: both rails guardedly reserve stock at checkout.
+        {
           // `Cart_Items` guarantees at most one row per Product (Story
           // 3.1's `@@unique([cartId, productId])`), so each Product here is
           // guarded exactly once. Zero affected rows on ANY line means that
@@ -459,7 +407,7 @@ export class CheckoutService {
         }
 
         // --- AD-7: []->pending_verification (pago_movil) or
-        // []->payment_processing (paypal), actorType=system.
+        // []->payment_processing (stripe), actorType=system.
         await recordInitialOrderStatus(tx, {
           orderId: order.id,
           toStatus: initialStatus,
@@ -471,7 +419,7 @@ export class CheckoutService {
         // FK (Story 3.1's schema) — no separate CartItem delete needed.
         // Applies to both rails: the Order snapshot already captured the
         // cart's contents, so there is nothing left for the buyer to edit
-        // while they finish paying (whether that's off at PayPal, or by
+        // while they finish paying (whether that's off at Stripe, or by
         // Pago Móvil transfer).
         // Of two concurrent checkouts of the SAME cart only one removes the
         // row; the other rolls back as an empty cart (P2025) instead of a 500.
@@ -501,9 +449,6 @@ export class CheckoutService {
       },
     );
 
-    if (isPaypal) {
-      return this.finalizePaypalCheckout(result);
-    }
     if (isStripe) {
       return this.finalizeStripeCheckout(result);
     }
@@ -511,66 +456,7 @@ export class CheckoutService {
   }
 
   /**
-   * Story 4.3: runs strictly AFTER the checkout transaction above has
-   * already committed (the Order exists, `payment_processing`, no
-   * StockHold) — see `checkout`'s own doc comment for why this external
-   * call is deliberately not inside that transaction.
-   *
-   * On success: asks the injected `PaypalClient` to create PayPal's own
-   * order/session, persists the returned `paypalOrderId` onto the already-
-   * committed Order (a plain update — no status guard needed, nothing else
-   * can be racing this specific field on a freshly-created Order only this
-   * request knows the id of yet), and returns the full response including
-   * the `approveUrl` the frontend redirects the buyer to.
-   *
-   * On failure: the Order already exists in `payment_processing` with no
-   * `paypalOrderId` — payment can never proceed for it (there is no PayPal
-   * order to confirm against). Rather than leaving it silently stuck until
-   * Story 5.2's 30-minute timeout cron eventually catches it, this
-   * guardedly (AD-16) fails it immediately, best-effort: a failure of THIS
-   * best-effort transition is logged and swallowed, never masking the
-   * original PayPal error the caller actually needs to see (as a 502).
-   */
-  private async finalizePaypalCheckout(
-    result: CheckoutTransactionResult,
-  ): Promise<CheckoutResponseDto> {
-    let session: CreatePaypalOrderResult;
-    try {
-      session = await this.paypalClient.createOrder({
-        orderId: result.orderId,
-        totalUsd: result.totalUsd.toFixed(2),
-      });
-    } catch (err) {
-      this.logger.error(
-        `PayPal order creation failed for Order ${result.orderId}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      await this.prisma
-        .$transaction((tx) =>
-          guardedOrderStatusTransition(tx, {
-            orderId: result.orderId,
-            fromStatus: OrderStatus.PAYMENT_PROCESSING,
-            toStatus: OrderStatus.PAYMENT_FAILED,
-            actorType: OrderActorType.SYSTEM,
-          }),
-        )
-        .catch((transitionErr: unknown) => {
-          this.logger.error(
-            `Also failed to auto-fail Order ${result.orderId} after the PayPal order-creation error above: ${transitionErr instanceof Error ? transitionErr.message : String(transitionErr)}`,
-          );
-        });
-      throw paypalOrderCreationFailedException();
-    }
-
-    await this.prisma.order.update({
-      where: { id: result.orderId },
-      data: { paypalOrderId: session.paypalOrderId },
-    });
-
-    return this.toResponseDto(result, session);
-  }
-
-  /**
-   * Story 14.4 (AD-46): mirrors `finalizePaypalCheckout`, strictly AFTER the
+   * Story 14.4 (AD-46): runs strictly AFTER the
    * checkout transaction committed. The amount comes only from the persisted
    * OrderLine snapshot (integer cents); nothing client-supplied is read. On
    * Stripe failure the Order is guardedly moved payment_processing ->
@@ -629,7 +515,7 @@ export class CheckoutService {
       data: { stripeCheckoutSessionId: session.sessionId },
     });
 
-    return this.toResponseDto(result, null, session);
+    return this.toResponseDto(result, session);
   }
 
   private emptyCartException(): ApiException {
@@ -647,14 +533,12 @@ export class CheckoutService {
     );
   }
 
-  /** Story 4.3: `paypalSession` is `null` for a pago_movil checkout (which
-   * gets `paymentInstructions` instead — exactly one of the two is ever
-   * non-null on the resulting DTO, per `CheckoutResponseDto`'s own doc
-   * comment). */
+  /** `stripeSession` is `null` for a pago_movil checkout (which gets
+   * `paymentInstructions` instead — exactly one of the two is ever non-null
+   * on the resulting DTO, per `CheckoutResponseDto`'s own doc comment). */
   private toResponseDto(
     result: CheckoutTransactionResult,
-    paypalSession: CreatePaypalOrderResult | null,
-    stripeSession: CreateStripeCheckoutSessionResult | null = null,
+    stripeSession: CreateStripeCheckoutSessionResult | null,
   ): CheckoutResponseDto {
     const lineDtos: CheckoutOrderLineResponseDto[] = result.lines.map(
       (line) => ({
@@ -676,13 +560,6 @@ export class CheckoutService {
             reference: result.orderId,
           };
 
-    const paypal: PaypalCheckoutSessionDto | null = paypalSession
-      ? {
-          paypalOrderId: paypalSession.paypalOrderId,
-          approveUrl: paypalSession.approveUrl,
-        }
-      : null;
-
     const stripe: StripeCheckoutSessionDto | null = stripeSession
       ? { sessionId: stripeSession.sessionId, url: stripeSession.url }
       : null;
@@ -696,7 +573,6 @@ export class CheckoutService {
       totalVes: result.totalVes !== null ? Number(result.totalVes) : null,
       lines: lineDtos,
       paymentInstructions,
-      paypal,
       stripe,
       orderAccessToken: result.rawToken,
     };

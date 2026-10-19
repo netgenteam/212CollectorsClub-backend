@@ -37,7 +37,6 @@
     "@nestjs/schedule": "^12.0.2",
     "@nestjs/swagger": "^12.0.1",
     "@nestjs/throttler": "^6.7.0",
-    "@paypal/paypal-server-sdk": "^2.5.0",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "argon2": "^0.45.1",

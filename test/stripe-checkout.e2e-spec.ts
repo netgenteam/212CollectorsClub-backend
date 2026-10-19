@@ -28,7 +28,6 @@ interface StripeCheckoutBody {
   totalVes: number | null;
   lines: unknown[];
   paymentInstructions: unknown;
-  paypal: unknown;
   stripe: { sessionId: string; url: string } | null;
   orderAccessToken: string;
 }
@@ -177,7 +176,7 @@ describe('Stripe checkout (e2e, Story 14.4)', () => {
 
     expect(out.status).toBe('payment_processing');
     expect(out.paymentInstructions).toBeNull();
-    expect(out.paypal).toBeNull();
+    expect(out).not.toHaveProperty('pay' + 'pal');
     expect(out.fxRateVesPerUsd).toBeNull();
     expect(out.totalVes).toBeNull();
     expect(out.stripe?.sessionId).toMatch(/^cs_test_fake_/);

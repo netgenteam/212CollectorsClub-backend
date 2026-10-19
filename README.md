@@ -59,7 +59,7 @@ must never contain committed secrets.
 ## Project structure
 
 `src/` is organized by feature module per the architecture's structural seed:
-`catalog/`, `cart/`, `checkout/`, `payments-paypal/`, `payments-pago-movil/`, `orders/`,
+`catalog/`, `cart/`, `checkout/`, `payments-stripe/`, `payments-pago-movil/`, `orders/`,
 `contact/`, `admin-auth/`, `admin-catalog/`, `admin-landing/`, `common/`, `prisma/`.
 Most are still empty scaffolds (`.gitkeep`) — they're filled in by later stories.
 

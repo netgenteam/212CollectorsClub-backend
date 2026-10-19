@@ -86,7 +86,7 @@ export class OrderLookupController {
   @ApiOperation({
     summary: "Get an Order's full status-transition history",
     description:
-      'Every OrderStatusHistory row for this Order, oldest first, each with its own timestamp and actorType (system/paypal_webhook/admin/cron) — not just the current status (FR-17, AD-7). An Order that has never left its initial state still returns its single creation-transition row here, never an empty array (Story 5.1 AC3). Same orderAccessToken gate as the route above.',
+      'Every OrderStatusHistory row for this Order, oldest first, each with its own timestamp and actorType (system/stripe_webhook/admin/cron) — not just the current status (FR-17, AD-7). An Order that has never left its initial state still returns its single creation-transition row here, never an empty array (Story 5.1 AC3). Same orderAccessToken gate as the route above.',
   })
   @ApiResponse({ status: 200, type: [OrderStatusHistoryEntryDto] })
   @ApiResponse({

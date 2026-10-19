@@ -1,11 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service.js';
-import {
-  OrderActorType,
-  OrderStatus,
-  PaymentRail,
-} from '../../generated/prisma/enums.js';
+import { OrderActorType, OrderStatus } from '../../generated/prisma/enums.js';
 import {
   guardedOrderStatusTransition,
   OrderTransitionConflictError,
@@ -17,29 +13,24 @@ import {
 
 /**
  * AD-7: an Order enters `payment_processing` exactly once, at creation
- * (Story 4.3's PayPal branch — `CheckoutService.checkout` writes this as
- * the Order's INITIAL status via `recordInitialOrderStatus`, never as a
- * later transition into it from anywhere else), and the only two legal
- * transitions OUT of it (`->paid`, `->payment_failed`, both applied by
- * `PaypalPaymentsService`) never lead back into it. So `Order.createdAt`
- * IS "when this Order entered payment_processing" — no separate
- * "enteredProcessingAt" column is needed to measure this timeout.
+ * (`CheckoutService.checkout` writes this as the Order's INITIAL status via
+ * `recordInitialOrderStatus`, only for the Stripe rail), and the only two
+ * legal transitions OUT of it (`->paid`, `->payment_failed`) never lead back
+ * into it. So `Order.createdAt` IS "when this Order entered
+ * payment_processing" — no separate column is needed to measure this timeout.
+ *
+ * Story 14.4/14.6 (AD-46, AD-49): Stripe sessions expire at 30 min, so the
+ * safety-net cron waits a single 60 min cutoff to avoid racing
+ * `checkout.session.expired`/late-payment webhooks.
  */
-const PAYMENT_PROCESSING_TIMEOUT_MS = 30 * 60 * 1000;
-/**
- * Story 14.4 (AD-46): Stripe sessions expire at 30 min, so the safety-net cron
- * waits 60 min for `paymentRail=STRIPE` to avoid racing `checkout.session.
- * expired`/late-payment webhooks. Collapses to the single cutoff once PayPal
- * is removed (14.6).
- */
-const STRIPE_PAYMENT_PROCESSING_TIMEOUT_MS = 60 * 60 * 1000;
+const PAYMENT_PROCESSING_TIMEOUT_MS = 60 * 60 * 1000;
 
 export interface PaymentProcessingTimeoutCheckResult {
   /** Orders successfully transitioned payment_processing -> payment_failed. */
   ordersFailed: number;
   /** Orders whose candidate row was already stale by the time this ran —
    * the guarded transition's WHERE matched 0 rows because the Order
-   * already left payment_processing (a PayPal webhook resolved it, or a
+   * already left payment_processing (the Stripe webhook resolved it, or a
    * previous/overlapping cron run already won this same Order). Safe
    * no-op. */
   ordersSkippedConflict: number;
@@ -47,15 +38,14 @@ export interface PaymentProcessingTimeoutCheckResult {
 
 /**
  * Story 5.2 (AD-7, AD-16): fails any Order that has sat in
- * `payment_processing` (PayPal checkout submitted, but neither a "paid"
- * nor a "declined" webhook ever arrived) for more than 30 minutes — so a
- * buyer's abandoned/interrupted PayPal flow doesn't leave an Order stuck
+ * `payment_processing` (Stripe checkout submitted, but no terminal webhook
+ * ever arrived) for more than 60 minutes — so a
+ * buyer's abandoned/interrupted Stripe flow doesn't leave an Order stuck
  * ambiguously forever.
  *
- * **Never decrements `stock`**: a PayPal Order never holds stock (AD-13).
- * Story 14.5b (AD-50): a Stripe Order does hold stock; the cron that WINS
- * the guarded transition releases its active holds (heldQty only) in the
- * same transaction. A PayPal Order simply has no holds to release.
+ * **Never decrements `stock`**: Story 14.5b (AD-50): a Stripe Order holds
+ * stock; the cron that WINS the guarded transition releases its active
+ * holds (heldQty only) in the same transaction.
  *
  * **Testable without the real interval**: same shape as
  * `StockHoldExpiryCronService` — `handleCron` (the `@Cron`-decorated
@@ -64,9 +54,8 @@ export interface PaymentProcessingTimeoutCheckResult {
  * directly.
  *
  * **Reuses, never reimplements, Story 4.1's guarded-transition helper**:
- * same `guardedOrderStatusTransition` `PaypalPaymentsService` and
- * `StockHoldExpiryCronService` already use — this is its 4th real
- * caller in this codebase.
+ * same `guardedOrderStatusTransition` the Stripe webhook and
+ * `StockHoldExpiryCronService` already use.
  */
 @Injectable()
 export class PaymentProcessingTimeoutCronService {
@@ -82,9 +71,7 @@ export class PaymentProcessingTimeoutCronService {
   }
 
   async runTimeoutCheck(): Promise<PaymentProcessingTimeoutCheckResult> {
-    const now = Date.now();
-    const cutoff = new Date(now - PAYMENT_PROCESSING_TIMEOUT_MS);
-    const stripeCutoff = new Date(now - STRIPE_PAYMENT_PROCESSING_TIMEOUT_MS);
+    const cutoff = new Date(Date.now() - PAYMENT_PROCESSING_TIMEOUT_MS);
 
     // --- Candidate selection only — same reasoning as
     // StockHoldExpiryCronService's own candidate query: the guarded
@@ -92,13 +79,7 @@ export class PaymentProcessingTimeoutCronService {
     const staleOrders = await this.prisma.order.findMany({
       where: {
         status: OrderStatus.PAYMENT_PROCESSING,
-        OR: [
-          {
-            paymentRail: { not: PaymentRail.STRIPE },
-            createdAt: { lte: cutoff },
-          },
-          { paymentRail: PaymentRail.STRIPE, createdAt: { lte: stripeCutoff } },
-        ],
+        createdAt: { lte: cutoff },
       },
       select: { id: true },
     });
@@ -124,7 +105,7 @@ export class PaymentProcessingTimeoutCronService {
         ordersFailed++;
       } catch (err) {
         if (err instanceof OrderTransitionConflictError) {
-          // A PayPal webhook (or a previous/overlapping cron run) already
+          // The Stripe webhook (or a previous/overlapping cron run) already
           // resolved this Order between the candidate query above and
           // this transaction — safe skip, no history duplicated.
           this.logger.log(

@@ -349,13 +349,10 @@ model FxRateSetting {
   @@map("Fx_Rate_Settings")
 }
 
-/// The payment method a checkout was submitted with. Story 4.1 only wrote
-/// `PAGO_MOVIL`; Story 4.3 wires up `PAYPAL` at the DTO level too
-/// (`CheckoutPaymentRail` in src/checkout/dto), so both are now legal
-/// `POST /api/v1/checkout` inputs.
+/// The payment method a checkout was submitted with (`PAGO_MOVIL` or
+/// `STRIPE`; the old third-party rail was retired in Story 14.6, AD-49).
 enum PaymentRail {
   PAGO_MOVIL
-  PAYPAL
   STRIPE
 }
 
@@ -369,11 +366,7 @@ enum FulfillmentType {
 
 /// AD-7's 8-state Order lifecycle. Story 4.1 only ever writes
 /// `PENDING_VERIFICATION` directly (Pago Móvil never passes through
-/// `PAYMENT_PROCESSING` — that transient state is PayPal-only). Story 4.3
-/// is the first to write `PAYMENT_PROCESSING` (PayPal checkout) and to
-/// transition out of it (`PAYMENT_PROCESSING`->`PAID`/`PAYMENT_FAILED`, via
-/// `PaypalPaymentsService`, reusing `guardedOrderStatusTransition` from
-/// Story 4.1). The full enum is modeled now (not grown incrementally per
+/// `PAYMENT_PROCESSING` — that transient state is Stripe-only). The full enum is modeled now (not grown incrementally per
 /// story) since this schema is the shared source of truth every future
 /// order-transition story (5.2, 9.2, 9.3) reads from — see AD-7 for the
 /// full legal-transition table.
@@ -393,7 +386,6 @@ enum OrderStatus {
 /// introduced that model — see `OrderStatusHistory.adminUserId` below).
 enum OrderActorType {
   SYSTEM
-  PAYPAL_WEBHOOK
   STRIPE_WEBHOOK
   ADMIN
   CRON
@@ -401,7 +393,7 @@ enum OrderActorType {
 
 /// A buyer's order (PRD §3 Glossary). AD-3/AD-4: `totalUsd` is always set;
 /// `fxRateVesPerUsd`/`totalVes` are set once at creation for Pago Móvil
-/// orders only (both stay null for PayPal orders, which never touch VES)
+/// orders only (both stay null for Stripe orders, which never touch VES)
 /// and are never recomputed afterward — the buyer's payment instructions
 /// and the admin's reconciliation view must always agree on the same VES
 /// figure for the life of the order. AD-8: `recipientName`/`recipientPhone`
@@ -434,7 +426,7 @@ model Order {
   country         String?
 
   totalUsd        Decimal  @db.Decimal(10, 2)
-  /// Null for PayPal orders (AD-3) — only ever set, once, for Pago Móvil.
+  /// Null for Stripe orders (AD-3) — only ever set, once, for Pago Móvil.
   fxRateVesPerUsd Decimal? @db.Decimal(18, 4)
   totalVes        Decimal? @db.Decimal(14, 2)
 
@@ -443,20 +435,9 @@ model Order {
   /// never stored.
   accessTokenHash String
 
-  /// Story 4.3: the PayPal Order id returned by `PaypalClient.createOrder`
-  /// (real SDK response, or the fake test double's own generated id) —
-  /// null for every Pago Móvil order, and briefly null for a PayPal order
-  /// too, between the DB transaction that creates this row (status already
-  /// `payment_processing`) and the follow-up (necessarily out-of-
-  /// transaction, see CheckoutService) call to PayPal that fills it in.
-  /// `@unique` so `PaypalPaymentsService`'s webhook handler can map an
-  /// incoming PayPal event straight back to exactly one Order with a plain
-  /// indexed lookup, never a scan.
-  paypalOrderId String? @unique
-
   /// Story 14.3 (AD-44): Stripe Checkout Session id (`cs_...`), the
   /// correlation key for the webhook. Null for other rails and briefly null
-  /// for Stripe between Order creation and the Stripe call (like paypalOrderId).
+  /// for Stripe between Order creation and the Stripe call.
   stripeCheckoutSessionId String? @unique
 
   /// Story 14.3 (AD-44): `pi_...`, only known on completion; not unique and
@@ -534,7 +515,7 @@ model OrderStatusHistory {
   actorType   OrderActorType
   /// Set only when actorType = ADMIN. Story 7.1 adds the FK constraint to
   /// `AdminUser` anticipated by OrderActorType's doc comment above — every
-  /// row written so far has `actorType` in {SYSTEM, PAYPAL_WEBHOOK, CRON}
+  /// row written so far has `actorType` in {SYSTEM, STRIPE_WEBHOOK, CRON}
   /// with `adminUserId = null`, so this FK is safe to add without a data
   /// backfill. `onDelete: SetNull` (not Cascade, not Restrict): an
   /// AdminUser row is never expected to be deleted by anything in this

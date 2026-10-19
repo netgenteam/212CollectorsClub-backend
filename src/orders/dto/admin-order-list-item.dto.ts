@@ -22,7 +22,7 @@ export class AdminOrderListItemDto {
 
   @ApiProperty({
     example: 'pago_movil',
-    enum: ['pago_movil', 'paypal', 'stripe'],
+    enum: ['pago_movil', 'stripe'],
   })
   paymentRail: string;
 
@@ -38,7 +38,7 @@ export class AdminOrderListItemDto {
   @ApiPropertyOptional({
     example: 7289.19,
     nullable: true,
-    description: 'Null for a paypal Order (AD-3).',
+    description: 'Null for a stripe Order (AD-3).',
   })
   totalVes: number | null;
 

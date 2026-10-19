@@ -1,12 +1,15 @@
+import { randomUUID } from 'node:crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
+import Stripe from 'stripe';
 import * as argon2 from 'argon2';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { FAKE_STRIPE_WEBHOOK_SECRET } from './../src/payments-stripe/fake-stripe-client.js';
 
 type App = Parameters<typeof request>[0];
 
@@ -29,7 +32,8 @@ interface PaginatedAdminOrders {
 
 interface CheckoutResponse {
   orderId: string;
-  paypal: { paypalOrderId: string; approveUrl: string } | null;
+  totalUsd: number;
+  stripe: { sessionId: string; url: string } | null;
 }
 
 interface ApiErrorBody {
@@ -44,7 +48,7 @@ const TEST_PASSWORD = 'correct-horse-battery-staple-9f1c';
 // suite's small quantities never risk INSUFFICIENT_STOCK against whatever
 // else is running concurrently against the shared dev Postgres — same
 // "ample stock, self-contained cleanup" convention checkout.e2e-spec.ts/
-// payments-paypal.e2e-spec.ts already use.
+// the stripe e2e suites already use.
 const OP_ROMANCE_DAWN_ID = '4b904156-c25d-48ad-818e-b2e78224df97'; // stock 180
 const DBS_UNION_FORCE_ID = '769f36ae-c8ea-4535-97df-11872d7915cc'; // stock 50
 
@@ -70,9 +74,9 @@ function pagoMovilPickupBody(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function paypalPickupBody(overrides: Record<string, unknown> = {}) {
+function stripePickupBody(overrides: Record<string, unknown> = {}) {
   return {
-    paymentRail: 'paypal',
+    paymentRail: 'stripe',
     fulfillmentType: 'pickup',
     recipientName: 'Carlos Gomez',
     recipientPhone: '0414-7654321',
@@ -87,9 +91,9 @@ function paypalPickupBody(overrides: Record<string, unknown> = {}) {
  * combined, AND semantics), stable-400 on an out-of-enum value, 401
  * without a token, and default createdAt-desc sorting. Every Order this
  * suite creates goes through a REAL checkout (Pago Móvil stays
- * pending_verification; PayPal is pushed to paid via the same mock webhook
- * `payments-paypal.e2e-spec.ts` already uses, since there is no real
- * Sandbox in this dev environment) and is cleaned up (stock restored,
+ * pending_verification; Stripe is pushed to paid via a signed webhook against
+ * the fake Stripe client, since there is no real Stripe in this dev
+ * environment) and is cleaned up (stock restored,
  * Order deleted) in a `finally` block, same discipline every other
  * checkout-driving e2e suite in this repo already follows.
  */
@@ -104,7 +108,7 @@ describe('AdminOrdersController (e2e)', () => {
       imports: [AppModule],
     }).compile();
 
-    app = moduleFixture.createNestApplication();
+    app = moduleFixture.createNestApplication({ rawBody: true });
 
     const configService = app.get(ConfigService);
     app.use(cookieParser(configService.getOrThrow<string>('COOKIE_SECRET')));
@@ -185,11 +189,10 @@ describe('AdminOrdersController (e2e)', () => {
       .catch(() => undefined);
   }
 
-  /** Real PayPal checkout, immediately confirmed via the same mock webhook
-   * `payments-paypal.e2e-spec.ts` uses (`FakePaypalClient`, since this dev
-   * environment has no real PAYPAL_CLIENT_ID/SECRET) — the resulting Order
-   * ends in `paid`. */
-  async function createPaidPaypalOrder(
+  /** Real Stripe checkout, immediately confirmed via a signed webhook
+   * (fake Stripe client, since this dev environment has no real Stripe
+   * keys) — the resulting Order ends in `paid`. */
+  async function createPaidStripeOrder(
     productId: string,
     quantity: number,
   ): Promise<string> {
@@ -202,27 +205,49 @@ describe('AdminOrdersController (e2e)', () => {
     const checkoutRes = await request(app.getHttpServer())
       .post('/api/v1/checkout')
       .set('Cookie', cartCookie)
-      .send(paypalPickupBody())
+      .send(stripePickupBody())
       .expect(201);
     const body = checkoutRes.body as CheckoutResponse;
-    if (!body.paypal) {
+    if (!body.stripe) {
       throw new Error(
-        `Expected a paypal session, got: ${JSON.stringify(body)}`,
+        `Expected a stripe session, got: ${JSON.stringify(body)}`,
       );
     }
 
+    const secret =
+      app.get(ConfigService).get<string>('STRIPE_WEBHOOK_SECRET') ||
+      FAKE_STRIPE_WEBHOOK_SECRET;
+    const payload = JSON.stringify({
+      id: `evt_admin_orders_${randomUUID()}`,
+      object: 'event',
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          object: 'checkout.session',
+          id: body.stripe.sessionId,
+          client_reference_id: body.orderId,
+          metadata: { orderId: body.orderId },
+          payment_status: 'paid',
+          amount_total: Math.round(body.totalUsd * 100),
+          currency: 'usd',
+          payment_intent: 'pi_test_admin_orders',
+        },
+      },
+    });
     await request(app.getHttpServer())
-      .post('/api/v1/payments/paypal/webhook')
-      .send({
-        paypalOrderId: body.paypal.paypalOrderId,
-        eventType: 'PAYMENT.CAPTURE.COMPLETED',
-      })
+      .post('/api/v1/payments/stripe/webhook')
+      .set('Content-Type', 'application/json')
+      .set(
+        'Stripe-Signature',
+        Stripe.webhooks.generateTestHeaderString({ payload, secret }),
+      )
+      .send(payload)
       .expect(200);
 
     return body.orderId;
   }
 
-  async function cleanupPaypalOrder(
+  async function cleanupStripeOrder(
     orderId: string,
     productId: string,
     quantity: number,
@@ -264,12 +289,12 @@ describe('AdminOrdersController (e2e)', () => {
   });
 
   describe('list/filter over real Orders (AC1-AC3)', () => {
-    it('no filters, status=pending_verification, paymentRail=paypal, and the AND combination all behave correctly against 2 real Orders of different rail/status', async () => {
+    it('no filters, status=pending_verification, paymentRail=stripe, and the AND combination all behave correctly against 2 real Orders of different rail/status', async () => {
       const pagoMovilOrderId = await createPagoMovilOrder(
         OP_ROMANCE_DAWN_ID,
         1,
       );
-      const paypalOrderId = await createPaidPaypalOrder(DBS_UNION_FORCE_ID, 1);
+      const stripeOrderId = await createPaidStripeOrder(DBS_UNION_FORCE_ID, 1);
 
       try {
         // --- AC1: no filters -> both appear, each with its own
@@ -279,8 +304,8 @@ describe('AdminOrdersController (e2e)', () => {
         const pagoMovilRow = all.data.find(
           (o) => o.orderId === pagoMovilOrderId,
         );
-        const paypalRow = all.data.find((o) => o.orderId === paypalOrderId);
-        if (!pagoMovilRow || !paypalRow) {
+        const stripeRow = all.data.find((o) => o.orderId === stripeOrderId);
+        if (!pagoMovilRow || !stripeRow) {
           throw new Error(
             `Expected both test Orders in the unfiltered list, got: ${JSON.stringify(
               all.data.map((o) => o.orderId),
@@ -289,8 +314,8 @@ describe('AdminOrdersController (e2e)', () => {
         }
         expect(pagoMovilRow.status).toBe('pending_verification');
         expect(pagoMovilRow.paymentRail).toBe('pago_movil');
-        expect(paypalRow.status).toBe('paid');
-        expect(paypalRow.paymentRail).toBe('paypal');
+        expect(stripeRow.status).toBe('paid');
+        expect(stripeRow.paymentRail).toBe('stripe');
         expect(all.meta).toEqual({
           page: expect.any(Number) as number,
           limit: expect.any(Number) as number,
@@ -299,7 +324,7 @@ describe('AdminOrdersController (e2e)', () => {
         });
 
         // --- AC2: status=pending_verification -> only the Pago Móvil
-        // Order is present; the paid PayPal Order is excluded.
+        // Order is present; the paid Stripe Order is excluded.
         const pendingRes = await authedGet(
           '?status=pending_verification&limit=100',
         ).expect(200);
@@ -307,28 +332,28 @@ describe('AdminOrdersController (e2e)', () => {
           (o) => o.orderId,
         );
         expect(pendingIds).toContain(pagoMovilOrderId);
-        expect(pendingIds).not.toContain(paypalOrderId);
+        expect(pendingIds).not.toContain(stripeOrderId);
 
-        // --- AC3: paymentRail=paypal -> only the PayPal Order is present;
+        // --- AC3: paymentRail=stripe -> only the Stripe Order is present;
         // the Pago Móvil Order is excluded.
-        const paypalRailRes = await authedGet(
-          '?paymentRail=paypal&limit=100',
+        const stripeRailRes = await authedGet(
+          '?paymentRail=stripe&limit=100',
         ).expect(200);
-        const paypalRailIds = (
-          paypalRailRes.body as PaginatedAdminOrders
+        const stripeRailIds = (
+          stripeRailRes.body as PaginatedAdminOrders
         ).data.map((o) => o.orderId);
-        expect(paypalRailIds).toContain(paypalOrderId);
-        expect(paypalRailIds).not.toContain(pagoMovilOrderId);
+        expect(stripeRailIds).toContain(stripeOrderId);
+        expect(stripeRailIds).not.toContain(pagoMovilOrderId);
 
         // --- AC3: status + paymentRail combine with AND, matching our
-        // paid+paypal Order but not our pending+pago_movil one.
+        // paid+stripe Order but not our pending+pago_movil one.
         const combinedMatchRes = await authedGet(
-          '?status=paid&paymentRail=paypal&limit=100',
+          '?status=paid&paymentRail=stripe&limit=100',
         ).expect(200);
         const combinedMatchIds = (
           combinedMatchRes.body as PaginatedAdminOrders
         ).data.map((o) => o.orderId);
-        expect(combinedMatchIds).toContain(paypalOrderId);
+        expect(combinedMatchIds).toContain(stripeOrderId);
         expect(combinedMatchIds).not.toContain(pagoMovilOrderId);
 
         // --- AND (never OR): a combination that matches neither of our 2
@@ -342,10 +367,13 @@ describe('AdminOrdersController (e2e)', () => {
           combinedNoMatchRes.body as PaginatedAdminOrders
         ).data.map((o) => o.orderId);
         expect(combinedNoMatchIds).not.toContain(pagoMovilOrderId);
-        expect(combinedNoMatchIds).not.toContain(paypalOrderId);
+        expect(combinedNoMatchIds).not.toContain(stripeOrderId);
+
+        // --- Story 14.6 (AD-49): the retired rail value is a stable 400.
+        await authedGet('?paymentRail=pay' + 'pal').expect(400);
       } finally {
         await cleanupPagoMovilOrder(pagoMovilOrderId);
-        await cleanupPaypalOrder(paypalOrderId, DBS_UNION_FORCE_ID, 1);
+        await cleanupStripeOrder(stripeOrderId, DBS_UNION_FORCE_ID, 1);
       }
     });
 

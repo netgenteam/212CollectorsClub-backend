@@ -328,8 +328,7 @@ const products: SeedProduct[] = [
       },
     ],
   },
-  // Story 4.3: two Products dedicated exclusively to the PayPal checkout/
-  // webhook e2e suite (test/payments-paypal.e2e-spec.ts) — every other
+  // Story 4.3: two Products dedicated to a payment-flow e2e suite — every other
   // seeded Product above is already claimed by an existing *.e2e-spec.ts
   // file's own Product.stock mutations (see checkout.e2e-spec.ts's and
   // proof-of-payment.e2e-spec.ts's own comments on cross-file flakiness
@@ -614,7 +613,7 @@ async function seedLandingContent(): Promise<void> {
     heroCtaText: 'Comprar ahora',
     heroCtaUrl: '/productos',
     announcementBarText:
-      'Envíos a todo Venezuela — pago móvil y PayPal disponibles.',
+      'Envíos a todo Venezuela — pago móvil y tarjeta disponibles.',
   };
   for (const [key, value] of Object.entries(textDefaults)) {
     await prisma.landingConfigEntry.upsert({

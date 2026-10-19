@@ -49,29 +49,6 @@ export class PagoMovilInstructionsDto {
 }
 
 /**
- * Story 4.3: the PayPal-specific half of a successful `POST /api/v1/checkout`
- * response (`paymentRail=paypal` only — `null` for a Pago Móvil checkout,
- * exactly mirroring how `paymentInstructions` is `null` for a PayPal one).
- * `approveUrl` is what the frontend redirects the buyer to; with the real
- * `@paypal/paypal-server-sdk` client this is PayPal's own hosted-checkout
- * URL, and with the (currently active, in this environment — see the Story
- * 4.3 Dev report) `FakePaypalClient` it is a structurally equivalent
- * placeholder that is never actually reachable.
- */
-export class PaypalCheckoutSessionDto {
-  @ApiProperty({
-    description:
-      "PayPal's own order id for this checkout — also persisted on Order.paypalOrderId, and what the confirmation webhook maps back to this Order.",
-  })
-  paypalOrderId: string;
-
-  @ApiProperty({
-    description: 'Redirect the buyer here to approve payment on PayPal.',
-  })
-  approveUrl: string;
-}
-
-/**
  * Story 14.4 (AD-46): the Stripe half of a successful `POST /api/v1/checkout`
  * (`paymentRail=stripe` only; `null` otherwise). `url` is Stripe's hosted
  * Checkout page; reaching `success_url` afterwards pays nothing, only the
@@ -99,11 +76,10 @@ export class StripeCheckoutSessionDto {
  * (e.g. Story 4.2's Proof-of-Payment upload, Story 5.1's order lookup, both
  * out of this story's scope, will require it).
  *
- * Story 4.3 (AD-3): `fxRateVesPerUsd`/`totalVes`/`paymentInstructions` are
- * `null` for a `paymentRail=paypal` checkout (PayPal orders never touch
- * VES); `paypal` is `null` for a `paymentRail=pago_movil` checkout instead.
- * Exactly one of `paymentInstructions`/`paypal` is ever non-null on any
- * given response — which one tells the frontend which flow to render.
+ * AD-3: `fxRateVesPerUsd`/`totalVes`/`paymentInstructions` are `null` for a
+ * `paymentRail=stripe` checkout (Stripe orders never touch VES); `stripe`
+ * is `null` for a `paymentRail=pago_movil` checkout instead. Exactly one
+ * of `paymentInstructions`/`stripe` is ever non-null on any given response — which one tells the frontend which flow to render.
  */
 export class CheckoutResponseDto {
   @ApiProperty({ format: 'uuid' })
@@ -112,7 +88,7 @@ export class CheckoutResponseDto {
   @ApiProperty({
     example: 'pending_verification',
     description:
-      'The Order status immediately after checkout (AD-7): "pending_verification" for pago_movil, "payment_processing" for paypal and stripe.',
+      'The Order status immediately after checkout (AD-7): "pending_verification" for pago_movil, "payment_processing" for stripe.',
   })
   status: string;
 
@@ -123,14 +99,14 @@ export class CheckoutResponseDto {
     example: 40.5,
     nullable: true,
     description:
-      'VES per 1 USD, snapshotted once from the admin-maintained rate at checkout time (AD-3/AD-4) — never recomputed later. Null for a paypal checkout.',
+      'VES per 1 USD, snapshotted once from the admin-maintained rate at checkout time (AD-3/AD-4) — never recomputed later. Null for a stripe checkout.',
   })
   fxRateVesPerUsd: number | null;
 
   @ApiPropertyOptional({
     example: 7289.19,
     nullable: true,
-    description: 'Null for a paypal checkout.',
+    description: 'Null for a stripe checkout.',
   })
   totalVes: number | null;
 
@@ -140,22 +116,15 @@ export class CheckoutResponseDto {
   @ApiPropertyOptional({
     type: PagoMovilInstructionsDto,
     nullable: true,
-    description: 'Present only for paymentRail=pago_movil; null for paypal.',
+    description: 'Present only for paymentRail=pago_movil; null for stripe.',
   })
   paymentInstructions: PagoMovilInstructionsDto | null;
-
-  @ApiPropertyOptional({
-    type: PaypalCheckoutSessionDto,
-    nullable: true,
-    description: 'Present only for paymentRail=paypal; null for pago_movil.',
-  })
-  paypal: PaypalCheckoutSessionDto | null;
 
   @ApiPropertyOptional({
     type: StripeCheckoutSessionDto,
     nullable: true,
     description:
-      'Present only for paymentRail=stripe (Story 14.4); null for pago_movil and paypal. Exactly one of paymentInstructions/paypal/stripe is non-null.',
+      'Present only for paymentRail=stripe (Story 14.4); null for pago_movil. Exactly one of paymentInstructions/stripe is non-null.',
   })
   stripe: StripeCheckoutSessionDto | null;
 

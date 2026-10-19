@@ -522,4 +522,18 @@ describe('Stripe webhook (e2e, Story 14.5)', () => {
       expect.arrayContaining(['200', '400']),
     );
   });
+
+  it('Story 14.6 (AD-49): the retired webhook route is 404 and Swagger has no trace of it', async () => {
+    const retired = 'pay' + 'pal';
+    await request(server())
+      .post(`/api/v1/payments/${retired}/webhook`)
+      .send({})
+      .expect(404);
+    const { SwaggerModule, DocumentBuilder } = await import('@nestjs/swagger');
+    const doc = SwaggerModule.createDocument(
+      app,
+      new DocumentBuilder().build(),
+    );
+    expect(JSON.stringify(doc).toLowerCase()).not.toContain(retired);
+  });
 });

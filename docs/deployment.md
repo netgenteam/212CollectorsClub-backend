@@ -137,8 +137,15 @@ MANUAL_EMAIL_VERIFY_ENABLED=false
 Set ownership/permissions so only the matching service user (and root) can
 read them: `chown cc212-staging:cc212-staging /opt/212cc/staging/shared/.env && chmod 600 ...` (same pattern for production).
 
-As later stories add PayPal keys, SMTP credentials, etc., they get appended
+As later stories add further keys (SMTP credentials, Stripe keys, etc.), they get appended
 to these same two files — never committed, never templated into the repo.
+
+> **PayPal removal (Story 14.6, AD-49):** PayPal is no longer supported.
+> `POST /api/v1/payments/paypal/webhook` no longer exists (404) and the
+> `PAYPAL_*` variables are ignored; do not configure that webhook endpoint
+> in any PayPal dashboard. The `remove_paypal` migration aborts with
+> `PAYPAL_REMOVAL_ABORTED` if any Order with the old PayPal rail or history
+> row from its webhook still exists; delete or archive those rows first.
 
 ### 1.6 systemd units
 

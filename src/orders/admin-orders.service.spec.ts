@@ -33,7 +33,6 @@ function buildOrder(overrides: Record<string, unknown> = {}) {
     fxRateVesPerUsd: '40.5000',
     totalVes: '7289.19',
     accessTokenHash: 'hash',
-    paypalOrderId: null,
     createdAt: new Date('2026-09-24T17:41:08.000Z'),
     updatedAt: new Date('2026-09-24T17:45:12.000Z'),
     ...overrides,
@@ -129,9 +128,9 @@ describe('AdminOrdersService', () => {
     expect(result.data[0].refundPending).toBe(true);
   });
 
-  it('a paypal Order (totalVes null): mapped through untouched, never coerced to 0', async () => {
+  it('a stripe Order (totalVes null): mapped through untouched, never coerced to 0', async () => {
     const order = buildOrder({
-      paymentRail: 'PAYPAL',
+      paymentRail: 'STRIPE',
       fxRateVesPerUsd: null,
       totalVes: null,
     });
@@ -141,7 +140,7 @@ describe('AdminOrdersService', () => {
     const result = await service.listOrders(buildQuery());
 
     expect(result.data[0].totalVes).toBeNull();
-    expect(result.data[0].paymentRail).toBe('paypal');
+    expect(result.data[0].paymentRail).toBe('stripe');
   });
 
   it('status=pending_verification: maps the lowercase wire value onto the uppercase Prisma enum in the where clause', async () => {
@@ -160,16 +159,16 @@ describe('AdminOrdersService', () => {
     });
   });
 
-  it('paymentRail=paypal: maps the lowercase wire value onto the uppercase Prisma enum', async () => {
+  it('paymentRail=stripe: maps the lowercase wire value onto the uppercase Prisma enum', async () => {
     prisma.order.findMany.mockResolvedValue([]);
     prisma.order.count.mockResolvedValue(0);
 
     await service.listOrders(
-      buildQuery({ paymentRail: AdminOrderPaymentRailFilter.PAYPAL }),
+      buildQuery({ paymentRail: AdminOrderPaymentRailFilter.STRIPE }),
     );
 
     expect(prisma.order.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { paymentRail: 'PAYPAL' } }),
+      expect.objectContaining({ where: { paymentRail: 'STRIPE' } }),
     );
   });
 
@@ -180,13 +179,13 @@ describe('AdminOrdersService', () => {
     await service.listOrders(
       buildQuery({
         status: AdminOrderStatusFilter.PAID,
-        paymentRail: AdminOrderPaymentRailFilter.PAYPAL,
+        paymentRail: AdminOrderPaymentRailFilter.STRIPE,
       }),
     );
 
     expect(prisma.order.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { status: 'PAID', paymentRail: 'PAYPAL' },
+        where: { status: 'PAID', paymentRail: 'STRIPE' },
       }),
     );
   });

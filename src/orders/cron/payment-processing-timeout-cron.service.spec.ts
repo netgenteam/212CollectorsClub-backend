@@ -7,7 +7,7 @@ import { PrismaService } from '../../prisma/prisma.service.js';
  * selection + conflict-skip branching, mirroring
  * `StockHoldExpiryCronService`'s own spec — `PrismaService` mocked the
  * same way `CheckoutService`'s spec mocks it. Full real-Postgres coverage
- * (the actual `payment_failed` transition, the 30-minute cutoff against a
+ * (the actual `payment_failed` transition, the 60-minute cutoff against a
  * real `createdAt`, idempotency across two real cron runs) lives in
  * `test/order-lifecycle-crons.e2e-spec.ts`.
  */
@@ -58,35 +58,25 @@ describe('PaymentProcessingTimeoutCronService', () => {
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
-  it('queries only PAYMENT_PROCESSING Orders: 30-minute cutoff for non-Stripe rails, 60-minute for STRIPE (Story 14.4)', async () => {
+  it('queries only PAYMENT_PROCESSING Orders with a single 60-minute cutoff, no per-rail branching (AD-46/AD-49)', async () => {
     prisma.order.findMany.mockResolvedValue([]);
     const before = Date.now();
 
     await service.runTimeoutCheck();
 
     const args = prisma.order.findMany.mock.calls[0][0] as {
-      where: {
+      where: Record<string, unknown> & {
         status: string;
-        OR: Array<{
-          paymentRail: unknown;
-          createdAt: { lte: Date };
-        }>;
+        createdAt: { lte: Date };
       };
     };
     expect(args.where.status).toBe('PAYMENT_PROCESSING');
-    expect(args.where.OR).toHaveLength(2);
-    const [other, stripe] = args.where.OR;
-    expect(other.paymentRail).toEqual({ not: 'STRIPE' });
-    expect(stripe.paymentRail).toBe('STRIPE');
+    expect(args.where).not.toHaveProperty('OR');
+    expect(args.where).not.toHaveProperty('paymentRail');
     const min = 60 * 1000;
-    expect(before - other.createdAt.lte.getTime()).toBeGreaterThanOrEqual(
-      30 * min,
-    );
-    expect(before - other.createdAt.lte.getTime()).toBeLessThan(31 * min);
-    expect(before - stripe.createdAt.lte.getTime()).toBeGreaterThanOrEqual(
-      60 * min,
-    );
-    expect(before - stripe.createdAt.lte.getTime()).toBeLessThan(61 * min);
+    const age = before - args.where.createdAt.lte.getTime();
+    expect(age).toBeGreaterThanOrEqual(60 * min);
+    expect(age).toBeLessThan(61 * min);
   });
 
   it('a stale Order transitions payment_processing -> payment_failed, never touching stock', async () => {
