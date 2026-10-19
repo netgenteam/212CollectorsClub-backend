@@ -7,5 +7,7 @@ export default defineConfig({
     globals: true,
     root: './',
     include: ['**/*.e2e-spec.ts'],
+    // Shared dev Postgres: specs mutate stock/orders, so files run serially (AD-48).
+    fileParallelism: false,
   },
 });

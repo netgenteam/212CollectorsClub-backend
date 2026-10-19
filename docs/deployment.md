@@ -132,6 +132,10 @@ FRONTEND_URL=https://REPLACE_ME
 # POST /api/v1/admin/customers/verify-email (admin marks a customer's email
 # verified by hand); anything else = route 404s. Set to false/unset once SMTP works.
 MANUAL_EMAIL_VERIFY_ENABLED=false
+# Stripe (Epic 14, see section 7). Keep BOTH empty to run on the in-memory
+# fake client; with a real key STRIPE_WEBHOOK_SECRET is mandatory.
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
 ```
 
 Set ownership/permissions so only the matching service user (and root) can
@@ -140,12 +144,11 @@ read them: `chown cc212-staging:cc212-staging /opt/212cc/staging/shared/.env && 
 As later stories add further keys (SMTP credentials, Stripe keys, etc.), they get appended
 to these same two files — never committed, never templated into the repo.
 
-> **PayPal removal (Story 14.6, AD-49):** PayPal is no longer supported.
-> `POST /api/v1/payments/paypal/webhook` no longer exists (404) and the
-> `PAYPAL_*` variables are ignored; do not configure that webhook endpoint
-> in any PayPal dashboard. The `remove_paypal` migration aborts with
-> `PAYPAL_REMOVAL_ABORTED` if any Order with the old PayPal rail or history
-> row from its webhook still exists; delete or archive those rows first.
+> **Retired payment rail (Story 14.6, AD-49):** the previous third-party
+> payment rail was removed. Its webhook route no longer exists (404) and its
+> environment variables are ignored. The `20261019110000_remove_*` migration aborts with
+> an `*_REMOVAL_ABORTED` exception if any Order or status-history row from the old rail
+> still exists; delete or archive those rows before migrating (see section 7.6).
 
 ### 1.6 systemd units
 
@@ -300,6 +303,96 @@ Per `docs/architecture.md`, "Open Items Carried Forward": no backup/DR
 policy for `uploads/` yet, no formal uptime SLA, SMTP/email provider still
 unconfirmed. None of these block this story, but they matter before a real
 production go-live.
+
+## 7. Stripe payments (Epic 14, AD-45..AD-50)
+
+### 7.1 Environment variables
+
+| Variable | Meaning |
+|---|---|
+| `STRIPE_SECRET_KEY` | `sk_test_...` (staging) / `sk_live_...` (production). Empty => in-memory fake client (local/CI, no network). |
+| `STRIPE_WEBHOOK_SECRET` | Signing secret `whsec_...` of the dashboard webhook endpoint. **Mandatory whenever `STRIPE_SECRET_KEY` is set: the service refuses to boot otherwise.** |
+| `FRONTEND_URL` | Storefront base URL; Stripe's `success_url` / `cancel_url` are built from it. Must be the real public URL per environment. |
+
+Add them to `/opt/212cc/<env>/shared/.env` (never committed; `.env.example` and
+the CI workflow only carry empty placeholders so CI uses the fake client), then
+`sudo systemctl restart 212cc-backend-<env>`. Use test keys on staging and live
+keys only on production.
+
+### 7.2 Register the webhook endpoint in the Stripe dashboard
+
+Developers > Webhooks > Add endpoint:
+
+- URL: `https://api.<DOMAIN>/api/v1/payments/stripe/webhook` (staging: its own host).
+- Events (exactly the four the code handles, `src/payments-stripe/stripe-payments.service.ts`):
+  `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+  `checkout.session.async_payment_failed`, `checkout.session.expired`.
+- Copy the endpoint's signing secret into `STRIPE_WEBHOOK_SECRET` and restart.
+- Every verified event is acknowledged with HTTP 200 (even no-ops), so Stripe does not retry needlessly. Invalid or missing signatures return 400.
+
+**Secret rotation:** Stripe dashboard > endpoint > "Roll secret" (optionally with
+an expiry window for the old one) > update `STRIPE_WEBHOOK_SECRET` > restart.
+Events signed with the old secret are rejected (400, Stripe retries) after the
+restart, so roll with Stripe's overlap window and restart immediately. Rotating
+`STRIPE_SECRET_KEY` follows the same restart procedure.
+
+### 7.3 Local testing with the Stripe CLI
+
+```bash
+stripe listen --forward-to localhost:3000/api/v1/payments/stripe/webhook
+# prints "whsec_..." -> export STRIPE_WEBHOOK_SECRET=whsec_... together with a test STRIPE_SECRET_KEY
+stripe trigger checkout.session.completed   # smoke only: real orders come from POST /api/v1/checkout
+```
+
+Without keys the app uses the fake client and a built-in fake webhook secret
+(the signature is still really verified), which is what the e2e suite does.
+
+### 7.4 Nginx and rate limiting
+
+- `location /` in `deploy/nginx/api.conf.template` and `staging-api.conf.template`
+  is a plain `proxy_pass`: the webhook body is forwarded byte for byte (Stripe
+  signs the raw body; do **not** add `sub_filter`, body rewriting, a WAF that
+  alters JSON, or a gzip/transform step on this path). `client_max_body_size 10m`
+  is far above the event size. `proxy_request_buffering` stays at its default
+  (on), which does not modify content.
+- The webhook route has no application-level throttling (`ThrottlerGuard` is
+  applied only to the contact and customer-auth controllers). If you add
+  Nginx `limit_req` or a firewall/CDN rate limit, exempt
+  `/api/v1/payments/stripe/webhook` so Stripe retries are never rejected.
+
+### 7.5 Manual refund procedure (no automatic refunds, A28 / AD-50)
+
+A payment can be captured while the Order cannot be fulfilled
+(`PAID_BUT_NO_STOCK` / `PAID_AFTER_TERMINAL` logged at ERROR, outcome
+`refund_pending_after_terminal` in `Stripe_Webhook_Events`).
+
+1. Admin panel (or API): `GET /api/v1/admin/orders?refundPending=true` lists the Orders flagged `refundPending`.
+2. For each, take `stripeCheckoutSessionId` / `stripePaymentIntentId` from the Order.
+3. Stripe dashboard > Payments > search by the PaymentIntent (`pi_...`) or Checkout Session (`cs_...`) > Refund.
+4. Notify the customer and note the refund on the Order (internal note / support channel).
+
+### 7.6 Epic 14 migrations (`pnpm prisma:deploy` = `prisma migrate deploy`)
+
+Applied in order: `20261019100000_add_payment_rail_stripe`,
+`20261019100100_add_order_actor_stripe_webhook`,
+`20261019100200_add_order_stripe_columns`,
+`20261019100300_add_stripe_webhook_events`, `20261019110000_remove_*` (the
+retired-rail removal; the exact guard text is in that migration's SQL).
+The last one has a guard that aborts with `<RAIL>_REMOVAL_ABORTED` when any
+Order or history row still references the retired rail: delete or archive those
+rows (Postgres) and re-run `migrate deploy`. Back up the DB first. Smoke afterwards:
+`POST /api/v1/payments/<retired-rail>/webhook` must 404 and Swagger must list only
+`pago_movil` / `stripe` as `paymentRail`.
+
+### 7.7 Confirm before launch (with Nabil; PRD section 15.6)
+
+- [ ] Stripe account owner, business country and whether it can accept USD charges.
+- [ ] Settlement currency (USD) and payout bank account.
+- [ ] Fees (card % + fixed, international/currency-conversion surcharges) and who absorbs them.
+- [ ] Live keys (`sk_live_...`) issued and stored only in the production `.env`; live webhook endpoint created with its own `whsec_...`.
+- [ ] Payment methods enabled in Checkout (async methods need the `async_payment_*` events subscribed).
+- [ ] Refund/dispute policy and who operates the manual refund procedure (7.5).
+- [ ] End-to-end test purchase in staging with test keys, then a small real purchase in production.
 
 ## Verification status (read this before assuming any of the above works)
 
