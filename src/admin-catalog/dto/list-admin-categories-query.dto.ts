@@ -5,6 +5,7 @@ import {
   IsEnum,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
 } from 'class-validator';
 import {
@@ -48,6 +49,15 @@ export class ListAdminCategoriesQueryDto {
   @IsOptional()
   @IsEnum(CategoryDimension)
   dimension?: CategoryDimension;
+
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'Only direct children of this parent (400 if not a uuid; use type=ROOT for roots).',
+  })
+  @IsOptional()
+  @IsUUID()
+  parentId?: string;
 
   @ApiPropertyOptional({ type: Boolean })
   @IsOptional()

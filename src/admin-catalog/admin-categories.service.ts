@@ -146,6 +146,7 @@ export class AdminCategoriesService {
     if (query.type !== undefined) where.type = query.type;
     if (query.dimension !== undefined) where.dimension = query.dimension;
     if (query.isActive !== undefined) where.isActive = query.isActive;
+    if (query.parentId !== undefined) where.parentId = query.parentId;
 
     const term = query.search ?? query.q;
     if (term !== undefined && term !== '') {
@@ -159,7 +160,7 @@ export class AdminCategoriesService {
     const rows = await this.prisma.category.findMany({
       where,
       select: CATEGORY_SELECT,
-      orderBy: { name: 'asc' },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }, { id: 'asc' }],
     });
     return this.withCounts(rows);
   }
@@ -257,7 +258,7 @@ export class AdminCategoriesService {
     }
   }
 
-  /** ROOT => no dimension, no parent; SUBCATEGORY => dimension required. */
+  /** ROOT => no dimension, no parent; SUBCATEGORY => parentId or dimension required (dimension may be null with a parent). */
   private assertMergedState(
     type: CategoryType,
     dimension: CategoryDimension | null,
@@ -276,10 +277,11 @@ export class AdminCategoriesService {
           'A ROOT Category cannot have a parent (send parentId: null when changing a SUBCATEGORY to ROOT).',
         );
       }
-    } else if (dimension === null) {
+    } else if (dimension === null && parentId === null) {
+      // Story 14.1 (AD-41): dimension is optional when a parent is given.
       throw badRequest(
         'CATEGORY_DIMENSION_INVALID',
-        'A SUBCATEGORY requires a dimension.',
+        'A SUBCATEGORY requires a parentId or a dimension.',
       );
     }
   }

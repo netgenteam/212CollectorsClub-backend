@@ -60,7 +60,7 @@ export class CreateCategoryDto {
     enum: CategoryType,
     enumName: 'CategoryType',
     description:
-      'ROOT (no dimension/parent) or SUBCATEGORY (requires dimension). Defaults to ROOT on create.',
+      'ROOT (no dimension/parent) or SUBCATEGORY (requires parentId or dimension). Defaults to ROOT on create.',
   })
   @ValidateIf((_o, v) => v !== undefined)
   @IsEnum(CategoryType)
@@ -71,7 +71,7 @@ export class CreateCategoryDto {
     enumName: 'CategoryDimension',
     nullable: true,
     description:
-      'Taxonomy dimension. Required for SUBCATEGORY, forbidden for ROOT. `null` clears it (PATCH).',
+      'Taxonomy dimension. Optional for SUBCATEGORY with a parentId (persisted as null when omitted); a SUBCATEGORY without parentId requires it; forbidden for ROOT. `null` clears it (PATCH).',
   })
   @IsOptional()
   @IsEnum(CategoryDimension)

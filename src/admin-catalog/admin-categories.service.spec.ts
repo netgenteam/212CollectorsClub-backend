@@ -174,6 +174,27 @@ describe('AdminCategoriesService', () => {
       expect(prisma.category.create).not.toHaveBeenCalled();
     });
 
+    it('allows SUBCATEGORY with parentId and no dimension, persisting null (Story 14.1)', async () => {
+      prisma.$queryRaw.mockResolvedValueOnce([{ id: ID_B }]);
+      prisma.category.create.mockResolvedValue({
+        ...CATEGORY,
+        type: 'SUBCATEGORY',
+        parentId: ID_B,
+      });
+      prisma.$queryRaw.mockResolvedValue([]);
+      await service.create({
+        name: 'S',
+        slug: 's',
+        type: 'SUBCATEGORY',
+        parentId: ID_B,
+      });
+      const arg = prisma.category.create.mock.calls[0][0] as {
+        data: { dimension: unknown; parentId: unknown };
+      };
+      expect(arg.data.dimension).toBeNull();
+      expect(arg.data.parentId).toBe(ID_B);
+    });
+
     it('rejects ROOT + parentId and SUBCATEGORY without dimension before touching the DB', async () => {
       await expect(
         service.create({ name: 'S', slug: 's', parentId: ID_B }),
@@ -190,6 +211,14 @@ describe('AdminCategoriesService', () => {
   });
 
   describe('findAll', () => {
+    it('parentId is ANDed into where (Story 14.1)', async () => {
+      prisma.category.findMany.mockResolvedValue([]);
+      await service.findAll({ parentId: ID_B, isActive: true });
+      expect(prisma.category.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { isActive: true, parentId: ID_B } }),
+      );
+    });
+
     it('search: escapes LIKE wildcards/backslash and passes them as parameters', async () => {
       prisma.$queryRaw.mockResolvedValueOnce([{ id: CATEGORY.id }]);
       prisma.category.findMany.mockResolvedValue([CATEGORY]);
@@ -208,7 +237,7 @@ describe('AdminCategoriesService', () => {
       expect(escapeLike('a\\b%c_d')).toBe('a\\\\b\\%c\\_d');
     });
 
-    it('returns every Category ordered by name', async () => {
+    it('returns every Category ordered by sortOrder, name, id', async () => {
       prisma.category.findMany.mockResolvedValue([CATEGORY]);
 
       await expect(service.findAll()).resolves.toEqual([CATEGORY_OUT]);
@@ -224,7 +253,7 @@ describe('AdminCategoriesService', () => {
           isActive: true,
           sortOrder: true,
         },
-        orderBy: { name: 'asc' },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }, { id: 'asc' }],
       });
     });
   });
