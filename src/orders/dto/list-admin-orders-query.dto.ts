@@ -41,6 +41,7 @@ export enum AdminOrderStatusFilter {
 export enum AdminOrderPaymentRailFilter {
   PAGO_MOVIL = 'pago_movil',
   PAYPAL = 'paypal',
+  STRIPE = 'stripe',
 }
 
 export enum AdminOrdersSortOrder {

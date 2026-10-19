@@ -1,7 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service.js';
-import { OrderActorType, OrderStatus } from '../../generated/prisma/enums.js';
+import {
+  OrderActorType,
+  OrderStatus,
+  PaymentRail,
+} from '../../generated/prisma/enums.js';
 import {
   guardedOrderStatusTransition,
   OrderTransitionConflictError,
@@ -18,6 +22,13 @@ import {
  * "enteredProcessingAt" column is needed to measure this timeout.
  */
 const PAYMENT_PROCESSING_TIMEOUT_MS = 30 * 60 * 1000;
+/**
+ * Story 14.4 (AD-46): Stripe sessions expire at 30 min, so the safety-net cron
+ * waits 60 min for `paymentRail=STRIPE` to avoid racing `checkout.session.
+ * expired`/late-payment webhooks. Collapses to the single cutoff once PayPal
+ * is removed (14.6).
+ */
+const STRIPE_PAYMENT_PROCESSING_TIMEOUT_MS = 60 * 60 * 1000;
 
 export interface PaymentProcessingTimeoutCheckResult {
   /** Orders successfully transitioned payment_processing -> payment_failed. */
@@ -67,7 +78,9 @@ export class PaymentProcessingTimeoutCronService {
   }
 
   async runTimeoutCheck(): Promise<PaymentProcessingTimeoutCheckResult> {
-    const cutoff = new Date(Date.now() - PAYMENT_PROCESSING_TIMEOUT_MS);
+    const now = Date.now();
+    const cutoff = new Date(now - PAYMENT_PROCESSING_TIMEOUT_MS);
+    const stripeCutoff = new Date(now - STRIPE_PAYMENT_PROCESSING_TIMEOUT_MS);
 
     // --- Candidate selection only — same reasoning as
     // StockHoldExpiryCronService's own candidate query: the guarded
@@ -75,7 +88,13 @@ export class PaymentProcessingTimeoutCronService {
     const staleOrders = await this.prisma.order.findMany({
       where: {
         status: OrderStatus.PAYMENT_PROCESSING,
-        createdAt: { lte: cutoff },
+        OR: [
+          {
+            paymentRail: { not: PaymentRail.STRIPE },
+            createdAt: { lte: cutoff },
+          },
+          { paymentRail: PaymentRail.STRIPE, createdAt: { lte: stripeCutoff } },
+        ],
       },
       select: { id: true },
     });

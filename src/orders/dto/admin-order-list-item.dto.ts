@@ -20,7 +20,10 @@ export class AdminOrderListItemDto {
   })
   status: string;
 
-  @ApiProperty({ example: 'pago_movil', enum: ['pago_movil', 'paypal'] })
+  @ApiProperty({
+    example: 'pago_movil',
+    enum: ['pago_movil', 'paypal', 'stripe'],
+  })
   paymentRail: string;
 
   @ApiProperty({ example: 'pickup', enum: ['delivery', 'pickup'] })

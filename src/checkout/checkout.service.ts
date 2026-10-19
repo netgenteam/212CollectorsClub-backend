@@ -1,4 +1,5 @@
 import { HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { hashOrderAccessToken } from '../common/order-access-token.js';
@@ -22,6 +23,12 @@ import type {
   CreatePaypalOrderResult,
   PaypalClient,
 } from '../payments-paypal/paypal-client.interface.js';
+import { STRIPE_CLIENT } from '../payments-stripe/stripe-client.interface.js';
+import type {
+  CreateStripeCheckoutSessionResult,
+  StripeClient,
+} from '../payments-stripe/stripe-client.interface.js';
+import { DEFAULT_FRONTEND_URL } from '../auth-core/customer-mail.js';
 import {
   CheckoutDto,
   CheckoutFulfillmentType,
@@ -32,6 +39,7 @@ import {
   CheckoutResponseDto,
   PagoMovilInstructionsDto,
   PaypalCheckoutSessionDto,
+  StripeCheckoutSessionDto,
 } from './dto/checkout-response.dto.js';
 import { SINGLETON_FX_RATE_ID } from './fx-rate.constants.js';
 import { PAGO_MOVIL_PLACEHOLDER_ACCOUNT } from './pago-movil-instructions.constant.js';
@@ -79,6 +87,33 @@ function paypalOrderCreationFailedException(): ApiException {
     'PAYPAL_ORDER_CREATION_FAILED',
     'Could not create a PayPal order for this checkout — the checkout was not completed. Please try again.',
   );
+}
+
+/** Story 14.4 (AD-46): Stripe's minimum `expires_at` is 30 min from now. */
+const STRIPE_SESSION_TTL_MS = 30 * 60 * 1000;
+/** Stripe limits `product_data.name` to 250 chars. */
+const STRIPE_LINE_NAME_MAX = 250;
+
+/** Story 14.4 (AD-46): 502, upstream (Stripe) failed; the Order is already
+ * moved to payment_failed by the time this is thrown. */
+function stripeSessionCreationFailedException(): ApiException {
+  return new ApiException(
+    HttpStatus.BAD_GATEWAY,
+    'STRIPE_SESSION_CREATION_FAILED',
+    'Could not create a Stripe checkout session for this order — the checkout was not completed. Please try again.',
+  );
+}
+
+/**
+ * Story 14.4: Decimal(10,2) USD -> integer cents without floats
+ * (Decimal -> fixed 2dp string -> digits).
+ */
+export function usdToCents(amount: Prisma.Decimal): number {
+  const fixed = amount.toFixed(2); // e.g. "89.99"
+  const negative = fixed.startsWith('-');
+  const digits = fixed.replace('-', '').replace('.', '');
+  const cents = parseInt(digits, 10);
+  return negative ? -cents : cents;
 }
 
 /**
@@ -130,6 +165,8 @@ interface CheckoutTransactionResult {
   /** Story 4.3 (AD-3): null for a paypal checkout. */
   totalVes: Prisma.Decimal | null;
   rawToken: string;
+  /** Story 14.4: account email (logged-in checkouts only) to prefill Stripe. */
+  customerEmail?: string;
 }
 
 @Injectable()
@@ -139,6 +176,8 @@ export class CheckoutService {
   constructor(
     private readonly prisma: PrismaService,
     @Inject(PAYPAL_CLIENT) private readonly paypalClient: PaypalClient,
+    @Inject(STRIPE_CLIENT) private readonly stripeClient: StripeClient,
+    private readonly config: ConfigService,
   ) {}
 
   /**
@@ -186,11 +225,12 @@ export class CheckoutService {
   ): Promise<CheckoutResponseDto> {
     // Story 12.6 (AD-31): with a session the cart is the ACCOUNT's cart
     // (the anonymous cookie is ignored); without one nothing changes.
+    let accountEmail: string | undefined;
     if (customer) {
       // Read from the DB, not from the session snapshot: no stale "verified".
       const account = await this.prisma.customer.findUnique({
         where: { id: customer.id },
-        select: { emailVerified: true },
+        select: { emailVerified: true, email: true },
       });
       if (!account) {
         throw invalidCustomerTokenException();
@@ -198,12 +238,17 @@ export class CheckoutService {
       if (!account.emailVerified) {
         throw emailNotVerifiedException();
       }
+      accountEmail = account.email;
     } else if (!cartId) {
       throw this.emptyCartException();
     }
 
     const isDelivery = dto.fulfillmentType === CheckoutFulfillmentType.DELIVERY;
     const isPaypal = dto.paymentRail === CheckoutPaymentRail.PAYPAL;
+    // Story 14.4 (AD-46): stripe shares paypal's no-hold / no-VES /
+    // payment_processing shape; only the rail value and the finalizer differ.
+    const isStripe = dto.paymentRail === CheckoutPaymentRail.STRIPE;
+    const isNoHoldRail = isPaypal || isStripe;
 
     const result = await this.prisma.$transaction(
       async (tx): Promise<CheckoutTransactionResult> => {
@@ -290,7 +335,7 @@ export class CheckoutService {
         // total — only pago_movil does. `fxRate`/`totalVes` stay null.
         let fxRate: { vesPerUsd: Prisma.Decimal } | null = null;
         let totalVes: Prisma.Decimal | null = null;
-        if (!isPaypal) {
+        if (!isNoHoldRail) {
           fxRate = await tx.fxRateSetting.findUnique({
             where: { id: SINGLETON_FX_RATE_ID },
           });
@@ -313,14 +358,18 @@ export class CheckoutService {
         // directly; a paypal Order enters the transient payment_processing
         // state instead (Story 4.3's own state, resolved later by
         // PaypalPaymentsService).
-        const initialStatus = isPaypal
+        const initialStatus = isNoHoldRail
           ? OrderStatus.PAYMENT_PROCESSING
           : OrderStatus.PENDING_VERIFICATION;
 
         const order = await tx.order.create({
           data: {
             status: initialStatus,
-            paymentRail: isPaypal ? PaymentRail.PAYPAL : PaymentRail.PAGO_MOVIL,
+            paymentRail: isStripe
+              ? PaymentRail.STRIPE
+              : isPaypal
+                ? PaymentRail.PAYPAL
+                : PaymentRail.PAGO_MOVIL,
             fulfillmentType: isDelivery
               ? FulfillmentType.DELIVERY
               : FulfillmentType.PICKUP,
@@ -348,7 +397,7 @@ export class CheckoutService {
         // story's own design note; the real stock guard for it is the
         // AD-13 guarded decrement PaypalPaymentsService runs at
         // confirmation time, not here.
-        if (!isPaypal) {
+        if (!isNoHoldRail) {
           // `Cart_Items` guarantees at most one row per Product (Story
           // 3.1's `@@unique([cartId, productId])`), so each Product here is
           // guarded exactly once. Zero affected rows on ANY line means that
@@ -438,12 +487,16 @@ export class CheckoutService {
           fxRateVesPerUsd: fxRate?.vesPerUsd ?? null,
           totalVes,
           rawToken,
+          customerEmail: accountEmail,
         };
       },
     );
 
     if (isPaypal) {
       return this.finalizePaypalCheckout(result);
+    }
+    if (isStripe) {
+      return this.finalizeStripeCheckout(result);
     }
     return this.toResponseDto(result, null);
   }
@@ -507,6 +560,67 @@ export class CheckoutService {
     return this.toResponseDto(result, session);
   }
 
+  /**
+   * Story 14.4 (AD-46): mirrors `finalizePaypalCheckout`, strictly AFTER the
+   * checkout transaction committed. The amount comes only from the persisted
+   * OrderLine snapshot (integer cents); nothing client-supplied is read. On
+   * Stripe failure the Order is guardedly moved payment_processing ->
+   * payment_failed (no stock was ever touched: no hold exists) and a 502
+   * STRIPE_SESSION_CREATION_FAILED is thrown. Only the webhook (14.5) pays.
+   */
+  private async finalizeStripeCheckout(
+    result: CheckoutTransactionResult,
+  ): Promise<CheckoutResponseDto> {
+    const frontendUrl = this.config
+      .get<string>('FRONTEND_URL', DEFAULT_FRONTEND_URL)
+      .replace(/\/+$/, '');
+    const orderQuery = `orderId=${encodeURIComponent(result.orderId)}`;
+
+    let session: CreateStripeCheckoutSessionResult;
+    try {
+      session = await this.stripeClient.createCheckoutSession({
+        orderId: result.orderId,
+        lines: result.lines.map((line) => ({
+          name: line.productName.slice(0, STRIPE_LINE_NAME_MAX),
+          // lineCreates always holds the product's Decimal(10,2) price.
+          unitAmountCents: usdToCents(line.unitPriceUsd as Prisma.Decimal),
+          quantity: line.quantity,
+        })),
+        currency: 'usd',
+        customerEmail: result.customerEmail,
+        successUrl: `${frontendUrl}/checkout/success?${orderQuery}`,
+        cancelUrl: `${frontendUrl}/checkout/cancel?${orderQuery}`,
+        expiresAt: new Date(Date.now() + STRIPE_SESSION_TTL_MS),
+      });
+    } catch (err) {
+      this.logger.error(
+        `Stripe session creation failed for Order ${result.orderId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      await this.prisma
+        .$transaction((tx) =>
+          guardedOrderStatusTransition(tx, {
+            orderId: result.orderId,
+            fromStatus: OrderStatus.PAYMENT_PROCESSING,
+            toStatus: OrderStatus.PAYMENT_FAILED,
+            actorType: OrderActorType.SYSTEM,
+          }),
+        )
+        .catch((transitionErr: unknown) => {
+          this.logger.error(
+            `Also failed to auto-fail Order ${result.orderId} after the Stripe session-creation error above: ${transitionErr instanceof Error ? transitionErr.message : String(transitionErr)}`,
+          );
+        });
+      throw stripeSessionCreationFailedException();
+    }
+
+    await this.prisma.order.update({
+      where: { id: result.orderId },
+      data: { stripeCheckoutSessionId: session.sessionId },
+    });
+
+    return this.toResponseDto(result, null, session);
+  }
+
   private emptyCartException(): ApiException {
     // 422, not 400/409: the request body itself is syntactically valid (a
     // well-formed CheckoutDto), and this is not a conflict with another
@@ -529,6 +643,7 @@ export class CheckoutService {
   private toResponseDto(
     result: CheckoutTransactionResult,
     paypalSession: CreatePaypalOrderResult | null,
+    stripeSession: CreateStripeCheckoutSessionResult | null = null,
   ): CheckoutResponseDto {
     const lineDtos: CheckoutOrderLineResponseDto[] = result.lines.map(
       (line) => ({
@@ -540,20 +655,25 @@ export class CheckoutService {
       }),
     );
 
-    const isPaypal = result.paymentRail === PaymentRail.PAYPAL;
+    const hasInstructions = result.paymentRail === PaymentRail.PAGO_MOVIL;
 
-    const paymentInstructions: PagoMovilInstructionsDto | null = isPaypal
-      ? null
-      : {
-          ...PAGO_MOVIL_PLACEHOLDER_ACCOUNT,
-          reference: result.orderId,
-        };
+    const paymentInstructions: PagoMovilInstructionsDto | null =
+      !hasInstructions
+        ? null
+        : {
+            ...PAGO_MOVIL_PLACEHOLDER_ACCOUNT,
+            reference: result.orderId,
+          };
 
     const paypal: PaypalCheckoutSessionDto | null = paypalSession
       ? {
           paypalOrderId: paypalSession.paypalOrderId,
           approveUrl: paypalSession.approveUrl,
         }
+      : null;
+
+    const stripe: StripeCheckoutSessionDto | null = stripeSession
+      ? { sessionId: stripeSession.sessionId, url: stripeSession.url }
       : null;
 
     return {
@@ -566,6 +686,7 @@ export class CheckoutService {
       lines: lineDtos,
       paymentInstructions,
       paypal,
+      stripe,
       orderAccessToken: result.rawToken,
     };
   }

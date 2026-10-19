@@ -26,6 +26,8 @@ import {
 export enum CheckoutPaymentRail {
   PAGO_MOVIL = 'pago_movil',
   PAYPAL = 'paypal',
+  /** Story 14.4 (AD-46): Stripe Checkout Session. */
+  STRIPE = 'stripe',
 }
 
 /**
@@ -70,7 +72,7 @@ export class CheckoutDto {
     enum: CheckoutPaymentRail,
     example: CheckoutPaymentRail.PAGO_MOVIL,
     description:
-      'Payment rail for this checkout. "pago_movil" (Story 4.1) creates a stock hold and enters pending_verification. "paypal" (Story 4.3) never holds stock, enters payment_processing, and the response includes a paypal.approveUrl to redirect the buyer to.',
+      'Payment rail for this checkout. "pago_movil" (Story 4.1) creates a stock hold and enters pending_verification. "paypal" (Story 4.3) never holds stock, enters payment_processing, and the response includes a paypal.approveUrl to redirect the buyer to. "stripe" (Story 14.4) never holds stock, enters payment_processing, and the response includes stripe.url (Stripe-hosted payment page) to redirect the buyer to; the amount is always computed server-side.',
   })
   @IsEnum(CheckoutPaymentRail)
   paymentRail: CheckoutPaymentRail;

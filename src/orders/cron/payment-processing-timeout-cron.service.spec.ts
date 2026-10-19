@@ -53,18 +53,35 @@ describe('PaymentProcessingTimeoutCronService', () => {
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
-  it('queries only PAYMENT_PROCESSING Orders older than the 30-minute cutoff', async () => {
+  it('queries only PAYMENT_PROCESSING Orders: 30-minute cutoff for non-Stripe rails, 60-minute for STRIPE (Story 14.4)', async () => {
     prisma.order.findMany.mockResolvedValue([]);
+    const before = Date.now();
 
     await service.runTimeoutCheck();
 
-    expect(prisma.order.findMany).toHaveBeenCalledWith({
+    const args = prisma.order.findMany.mock.calls[0][0] as {
       where: {
-        status: 'PAYMENT_PROCESSING',
-        createdAt: { lte: expect.any(Date) as unknown },
-      },
-      select: { id: true },
-    });
+        status: string;
+        OR: Array<{
+          paymentRail: unknown;
+          createdAt: { lte: Date };
+        }>;
+      };
+    };
+    expect(args.where.status).toBe('PAYMENT_PROCESSING');
+    expect(args.where.OR).toHaveLength(2);
+    const [other, stripe] = args.where.OR;
+    expect(other.paymentRail).toEqual({ not: 'STRIPE' });
+    expect(stripe.paymentRail).toBe('STRIPE');
+    const min = 60 * 1000;
+    expect(before - other.createdAt.lte.getTime()).toBeGreaterThanOrEqual(
+      30 * min,
+    );
+    expect(before - other.createdAt.lte.getTime()).toBeLessThan(31 * min);
+    expect(before - stripe.createdAt.lte.getTime()).toBeGreaterThanOrEqual(
+      60 * min,
+    );
+    expect(before - stripe.createdAt.lte.getTime()).toBeLessThan(61 * min);
   });
 
   it('a stale Order transitions payment_processing -> payment_failed, never touching stock', async () => {

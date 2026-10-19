@@ -11,7 +11,10 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
  * money actually collected with money that was only ever attempted.
  */
 export class ReconciliationBreakdownEntryDto {
-  @ApiProperty({ example: 'pago_movil', enum: ['pago_movil', 'paypal'] })
+  @ApiProperty({
+    example: 'pago_movil',
+    enum: ['pago_movil', 'paypal', 'stripe'],
+  })
   paymentRail: string;
 
   @ApiProperty({
@@ -41,7 +44,10 @@ export class ReconciliationBreakdownEntryDto {
 /** Same shape as one breakdown entry, minus `status` — the per-rail
  * subtotal across every status in the period. */
 export class ReconciliationRailTotalDto {
-  @ApiProperty({ example: 'pago_movil', enum: ['pago_movil', 'paypal'] })
+  @ApiProperty({
+    example: 'pago_movil',
+    enum: ['pago_movil', 'paypal', 'stripe'],
+  })
   paymentRail: string;
 
   @ApiProperty({ example: 6 })

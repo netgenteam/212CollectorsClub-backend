@@ -3,6 +3,8 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { CheckoutService } from './checkout.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { Prisma } from '../generated/prisma/client.js';
+import { ConfigService } from '@nestjs/config';
+import { STRIPE_CLIENT } from '../payments-stripe/stripe-client.interface.js';
 import { PAYPAL_CLIENT } from '../payments-paypal/paypal-client.interface.js';
 import {
   CheckoutDto,
@@ -117,6 +119,11 @@ describe('CheckoutService', () => {
         CheckoutService,
         { provide: PrismaService, useValue: prisma },
         { provide: PAYPAL_CLIENT, useValue: paypalClient },
+        {
+          provide: STRIPE_CLIENT,
+          useValue: { createCheckoutSession: vi.fn() },
+        },
+        { provide: ConfigService, useValue: { get: vi.fn() } },
       ],
     }).compile();
 

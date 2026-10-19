@@ -72,6 +72,26 @@ export class PaypalCheckoutSessionDto {
 }
 
 /**
+ * Story 14.4 (AD-46): the Stripe half of a successful `POST /api/v1/checkout`
+ * (`paymentRail=stripe` only; `null` otherwise). `url` is Stripe's hosted
+ * Checkout page; reaching `success_url` afterwards pays nothing, only the
+ * signed webhook (14.5) does.
+ */
+export class StripeCheckoutSessionDto {
+  @ApiProperty({
+    example: 'cs_test_a1b2c3',
+    description:
+      "Stripe's Checkout Session id — also persisted on Order.stripeCheckoutSessionId.",
+  })
+  sessionId: string;
+
+  @ApiProperty({
+    description: "Redirect the buyer here: Stripe's hosted payment page.",
+  })
+  url: string;
+}
+
+/**
  * Story 4.1: response body of a successful `POST /api/v1/checkout`.
  * `orderAccessToken` is the one-time opaque token (AD-17) — this is the
  * ONLY time the raw value is ever exposed; only its SHA-256 hash is
@@ -92,7 +112,7 @@ export class CheckoutResponseDto {
   @ApiProperty({
     example: 'pending_verification',
     description:
-      'The Order status immediately after checkout (AD-7): "pending_verification" for pago_movil, "payment_processing" for paypal.',
+      'The Order status immediately after checkout (AD-7): "pending_verification" for pago_movil, "payment_processing" for paypal and stripe.',
   })
   status: string;
 
@@ -130,6 +150,14 @@ export class CheckoutResponseDto {
     description: 'Present only for paymentRail=paypal; null for pago_movil.',
   })
   paypal: PaypalCheckoutSessionDto | null;
+
+  @ApiPropertyOptional({
+    type: StripeCheckoutSessionDto,
+    nullable: true,
+    description:
+      'Present only for paymentRail=stripe (Story 14.4); null for pago_movil and paypal. Exactly one of paymentInstructions/paypal/stripe is non-null.',
+  })
+  stripe: StripeCheckoutSessionDto | null;
 
   @ApiProperty({
     description:

@@ -165,18 +165,22 @@ describe('Order-lifecycle crons: StockHold expiry + payment_processing timeout (
    * `createdAt` backdated to simulate elapsed time without waiting. */
   async function createPaymentProcessingOrder(opts: {
     createdAt: Date;
+    rail?: 'PAYPAL' | 'STRIPE';
   }): Promise<string> {
     const tokenHash = hashOrderAccessToken(randomUUID());
     const order = await prisma.order.create({
       data: {
         status: OrderStatus.PAYMENT_PROCESSING,
-        paymentRail: PaymentRail.PAYPAL,
+        paymentRail:
+          opts.rail === 'STRIPE' ? PaymentRail.STRIPE : PaymentRail.PAYPAL,
         fulfillmentType: FulfillmentType.PICKUP,
         recipientName: 'Story 5.2 Test Buyer',
         recipientPhone: '0412-0000000',
         totalUsd: new Prisma.Decimal('10.00'),
         accessTokenHash: tokenHash,
-        paypalOrderId: `story-5-2-test-${randomUUID()}`,
+        ...(opts.rail === 'STRIPE'
+          ? { stripeCheckoutSessionId: `cs_test_story_14_4_${randomUUID()}` }
+          : { paypalOrderId: `story-5-2-test-${randomUUID()}` }),
         createdAt: opts.createdAt,
         statusHistory: {
           create: [
@@ -403,6 +407,33 @@ describe('Order-lifecycle crons: StockHold expiry + payment_processing timeout (
         where: { id: orderId },
       });
       expect(order.status).toBe(OrderStatus.PAYMENT_PROCESSING);
+    });
+
+    it('Story 14.4: a STRIPE Order at 45 min is left untouched (60-min cutoff), at 61 min it fails (actorType=CRON); PayPal still fails at 31 min', async () => {
+      const stripeYoung = await createPaymentProcessingOrder({
+        rail: 'STRIPE',
+        createdAt: new Date(Date.now() - 45 * 60 * 1000),
+      });
+      const stripeOld = await createPaymentProcessingOrder({
+        rail: 'STRIPE',
+        createdAt: new Date(Date.now() - 61 * 60 * 1000),
+      });
+      const paypalOld = await createPaymentProcessingOrder({
+        createdAt: new Date(Date.now() - 31 * 60 * 1000),
+      });
+
+      await paymentTimeoutCron.runTimeoutCheck();
+
+      const statusOf = async (id: string) =>
+        (await prisma.order.findUniqueOrThrow({ where: { id } })).status;
+      expect(await statusOf(stripeYoung)).toBe(OrderStatus.PAYMENT_PROCESSING);
+      expect(await statusOf(stripeOld)).toBe(OrderStatus.PAYMENT_FAILED);
+      expect(await statusOf(paypalOld)).toBe(OrderStatus.PAYMENT_FAILED);
+      const hist = await prisma.orderStatusHistory.findMany({
+        where: { orderId: stripeOld },
+        orderBy: { createdAt: 'asc' },
+      });
+      expect(hist[1]).toMatchObject({ actorType: OrderActorType.CRON });
     });
 
     it('running the cron twice in a row over the same already-timed-out Order: the second run is a safe no-op — no double transition', async () => {

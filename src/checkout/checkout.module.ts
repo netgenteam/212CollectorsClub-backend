@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { CartModule } from '../cart/cart.module.js';
 import { PaymentsPaypalModule } from '../payments-paypal/payments-paypal.module.js';
+import { PaymentsStripeModule } from '../payments-stripe/payments-stripe.module.js';
 import { CheckoutController } from './checkout.controller.js';
 import { CheckoutService } from './checkout.service.js';
 
@@ -13,7 +14,7 @@ import { CheckoutService } from './checkout.service.js';
 // createOrder call — the module that OWNS the PayPal integration and the
 // webhook/confirmation side is `payments-paypal`, never duplicated here.
 @Module({
-  imports: [CartModule, PaymentsPaypalModule],
+  imports: [CartModule, PaymentsPaypalModule, PaymentsStripeModule],
   controllers: [CheckoutController],
   providers: [CheckoutService],
 })

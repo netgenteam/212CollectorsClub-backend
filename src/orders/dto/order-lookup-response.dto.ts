@@ -94,7 +94,10 @@ export class OrderDetailResponseDto {
   })
   status: string;
 
-  @ApiProperty({ example: 'pago_movil', enum: ['pago_movil', 'paypal'] })
+  @ApiProperty({
+    example: 'pago_movil',
+    enum: ['pago_movil', 'paypal', 'stripe'],
+  })
   paymentRail: string;
 
   @ApiProperty({ type: OrderFulfillmentDto })
@@ -151,7 +154,7 @@ export class OrderStatusHistoryEntryDto {
 
   @ApiProperty({
     example: 'admin',
-    enum: ['system', 'paypal_webhook', 'admin', 'cron'],
+    enum: ['system', 'paypal_webhook', 'stripe_webhook', 'admin', 'cron'],
   })
   actorType: string;
 
