@@ -238,6 +238,68 @@ model MasterCard {
   @@map("Master_Cards")
 }
 
+/// Story 15.4 (AD-55): ingestion progress of one set.
+enum TcgIngestStatus {
+  PENDING
+  IN_PROGRESS
+  DONE
+}
+
+/// Story 15.4 (AD-55): per (game, set) resumable cursor of the master card
+/// ingestion. `nextPage` only advances after the page is stored.
+model TcgIngestCursor {
+  id              String          @id @default(uuid()) @db.Uuid
+  gameSlug        String
+  setId           String
+  setName         String
+  /// Not in AD-55: lets `--sets` accept a slug without another API call.
+  setSlug         String?
+  releaseDate     DateTime?       @db.Date
+  cardCount       Int?
+  nextPage        Int             @default(1)
+  status          TcgIngestStatus @default(PENDING)
+  lastPriceSyncAt DateTime?       @db.Timestamptz
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@unique([gameSlug, setId])
+  @@map("Tcg_Ingest_Cursors")
+}
+
+enum TcgSyncKind {
+  NIGHTLY
+  INGEST
+}
+
+enum TcgSyncStatus {
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  FAILED
+}
+
+/// Story 15.4 (AD-58): audit + multi-instance lock. A partial unique index
+/// (manual SQL in the migration) allows a single `RUNNING` row.
+model TcgSyncRun {
+  id              String        @id @default(uuid()) @db.Uuid
+  kind            TcgSyncKind
+  status          TcgSyncStatus @default(RUNNING)
+  startedAt       DateTime      @default(now()) @db.Timestamptz
+  finishedAt      DateTime?     @db.Timestamptz
+  requestsUsed    Int           @default(0)
+  cardsSynced     Int           @default(0)
+  productsUpdated Int           @default(0)
+  errorCount      Int           @default(0)
+  errorSummary    String?
+  quotaExhausted  Boolean       @default(false)
+  bigVariations   Json?
+  /// Full `{created, updated, skipped, errors, requests, quotaExhausted}`.
+  summary         Json?
+
+  @@index([kind, startedAt])
+  @@map("Tcg_Sync_Runs")
+}
+
 /// Story 11.4 (FR-34, AD-18/AD-23): external market-price providers a
 /// Product can link to. Native Postgres enum.
 enum MarketProvider {
