@@ -47,3 +47,27 @@ export function derivedTagSlugs(
   if (t) slugs.push(t);
   return slugs;
 }
+
+/**
+ * Story 15.1 (FR-62, AD-51): the 3 standard ROOT categories, keyed by the
+ * dimension of the subcategories they parent. The migration
+ * `epic15_standard_taxonomy` creates exactly these slugs (drift guarded by a
+ * unit test); the seed upserts them too.
+ */
+export const STANDARD_ROOTS = {
+  FRANCHISE: { slug: 'franquicia-tcg', name: 'Franquicia TCG', sortOrder: 0 },
+  SEALED_FORMAT: {
+    slug: 'formato-sellado',
+    name: 'Formato Sellado',
+    sortOrder: 1,
+  },
+  EDITION_LANGUAGE: {
+    slug: 'idioma-edicion',
+    name: 'Idioma / Edición',
+    sortOrder: 2,
+  },
+} as const;
+
+export const STANDARD_ROOT_SLUGS: readonly string[] = Object.values(
+  STANDARD_ROOTS,
+).map((r) => r.slug);

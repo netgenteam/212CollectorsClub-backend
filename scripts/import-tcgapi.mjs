@@ -19,7 +19,8 @@
  *   TCG_QUERY        texto de búsqueda, >= 2 chars (default: charizard)
  *   TCG_TYPE         Cards | Sealed Products (default: Cards)
  *   LIMIT            productos a crear (default: 10)
- *   CATEGORY_ID      uuid de categoría; si falta se usa la primera pública
+ *   CATEGORY_ID      uuid de categoría (override); si falta se resuelve por slug:
+ *                    cartas-sueltas (Cards) o sobres-y-cajas (Sealed Products)
  *   STOCK            stock inicial por producto (default: 5)
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -102,7 +103,24 @@ function slugify(text) {
     .replace(/-+$/, '');
 }
 
-function toProductFields(card, categoryId, stock) {
+// Story 15.1 (FR-63 iv, A31): slug de la subcategoría de franquicia (etiqueta).
+// Un single lleva SOLO la etiqueta de franquicia, nunca una de formato.
+const FRANCHISE_TAG_SLUG = {
+  POKEMON: 'franchise-pokemon',
+  ONE_PIECE: 'franchise-one-piece',
+  MAGIC_THE_GATHERING: 'franchise-magic-the-gathering',
+  YU_GI_OH: 'franchise-yu-gi-oh',
+  DRAGON_BALL_SUPER: 'franchise-dragon-ball-super',
+  NARUTO: 'franchise-naruto',
+};
+const ROOT_SLUG_BY_TYPE = { 'Sealed Products': 'sobres-y-cajas' };
+const DEFAULT_ROOT_SLUG = 'cartas-sueltas';
+
+function franchiseOf(card) {
+  return FRANCHISE_BY_GAME[card.game_slug ?? process.env.TCG_GAME] ?? 'OTHER';
+}
+
+function toProductFields(card, categoryId, stock, franchiseTagId) {
   const setPart = card.set_name ? ` (${card.set_name})` : '';
   const numberPart = card.number ? ` #${card.number}` : '';
   // El id de tcgapi al final hace el slug único y la importación idempotente:
@@ -119,7 +137,7 @@ function toProductFields(card, categoryId, stock) {
     ]
       .filter(Boolean)
       .join(' '),
-    franchise: FRANCHISE_BY_GAME[card.game_slug ?? process.env.TCG_GAME] ?? 'OTHER',
+    franchise: franchiseOf(card),
     productType: mapProductType(card),
     rarity: mapRarity(card.rarity),
     editionLanguage: 'EN',
@@ -127,6 +145,7 @@ function toProductFields(card, categoryId, stock) {
     stock: String(stock),
     categoryId,
   };
+  if (franchiseTagId) fields.categoryIds = JSON.stringify([franchiseTagId]);
   if (card.tcgplayer_url?.startsWith('https://')) {
     fields.marketReferences = JSON.stringify([
       { provider: 'TCGPLAYER', label: 'TCGplayer', url: card.tcgplayer_url },
@@ -188,15 +207,27 @@ async function login() {
   return body.accessToken;
 }
 
+async function listCategories(query) {
+  const { res, body } = await api(`/categories?${query}`);
+  const list = Array.isArray(body) ? body : body?.data;
+  if (!res.ok || !Array.isArray(list)) fail(`GET /categories?${query} falló (${res.status})`);
+  return list;
+}
+
+// Resuelve por slug (no por "la primera pública"). CATEGORY_ID sigue como override.
 async function resolveCategoryId() {
   if (process.env.CATEGORY_ID) return process.env.CATEGORY_ID;
-  const { res, body } = await api('/categories');
-  const list = Array.isArray(body) ? body : body?.data;
-  if (!res.ok || !list?.length) {
-    fail('No hay categorías públicas; crea una o define CATEGORY_ID');
-  }
-  console.log(`Usando categoría "${list[0].name}" (${list[0].id})`);
-  return list[0].id;
+  const slug = ROOT_SLUG_BY_TYPE[env('TCG_TYPE', 'Cards')] ?? DEFAULT_ROOT_SLUG;
+  const root = (await listCategories('type=ROOT')).find((c) => c.slug === slug);
+  if (!root) fail(`No existe la categoría "${slug}"; aplica la migración epic15 o define CATEGORY_ID`);
+  console.log(`Usando categoría "${root.name}" (${root.id})`);
+  return root.id;
+}
+
+// Mapa slug -> id de las subcategorías de franquicia (1 sola petición).
+async function resolveFranchiseTagIds() {
+  const list = await listCategories('type=SUBCATEGORY&dimension=FRANCHISE');
+  return new Map(list.map((c) => [c.slug, c.id]));
 }
 
 async function downloadImage(url) {
@@ -215,11 +246,13 @@ async function runImport() {
   if (!cards.length) fail('tcgapi.dev no devolvió cartas con imagen para esa búsqueda');
 
   const categoryId = await resolveCategoryId();
+  const franchiseTagIds = await resolveFranchiseTagIds();
+  const tagIdOf = (card) => franchiseTagIds.get(FRANCHISE_TAG_SLUG[franchiseOf(card)]);
   const stock = Number(env('STOCK', '5'));
 
   if (DRY_RUN) {
     for (const card of cards) {
-      const { description, ...rest } = toProductFields(card, categoryId, stock);
+      const { description, ...rest } = toProductFields(card, categoryId, stock, tagIdOf(card));
       console.log(rest);
     }
     console.log(`\n[dry-run] ${cards.length} productos mapeados, nada escrito.`);
@@ -232,7 +265,7 @@ async function runImport() {
 
   try {
     for (const card of cards) {
-      const fields = toProductFields(card, categoryId, stock);
+      const fields = toProductFields(card, categoryId, stock, tagIdOf(card));
       try {
         const { blob, filename } = await downloadImage(card.image_url);
         const form = new FormData();

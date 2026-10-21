@@ -24,6 +24,10 @@ import {
   ProductType,
   Rarity,
 } from '../src/generated/prisma/client.js';
+import {
+  derivedTagSlugs,
+  STANDARD_ROOTS,
+} from '../src/admin-catalog/seeded-taxonomy.js';
 import { SINGLETON_FX_RATE_ID } from '../src/checkout/fx-rate.constants.js';
 import {
   LANDING_SECTION_BANNERS,
@@ -776,6 +780,32 @@ async function main(): Promise<void> {
     categoryIdBySlug.set(row.slug, row.id);
   }
 
+  // Story 15.1 (FR-62, AD-51): 3 standard roots (by slug) and the existing
+  // subcategories parented by dimension. Never recreates empty/obsolete roots.
+  console.log('Seeding standard taxonomy roots...');
+  for (const [dimension, root] of Object.entries(STANDARD_ROOTS)) {
+    const row = await prisma.category.upsert({
+      where: { slug: root.slug },
+      create: {
+        name: root.name,
+        slug: root.slug,
+        type: 'ROOT',
+        isActive: true,
+        sortOrder: root.sortOrder,
+      },
+      update: {},
+    });
+    await prisma.category.updateMany({
+      where: {
+        type: 'SUBCATEGORY',
+        parentId: null,
+        dimension: dimension as
+          'FRANCHISE' | 'SEALED_FORMAT' | 'EDITION_LANGUAGE',
+      },
+      data: { parentId: row.id },
+    });
+  }
+
   console.log(`Seeding ${products.length} products (with their images)...`);
   for (const product of products) {
     const categoryId = categoryIdBySlug.get(product.categorySlug);
@@ -807,6 +837,24 @@ async function main(): Promise<void> {
       create: { id: product.id, ...productFields },
       update: productFields,
     });
+
+    // Story 15.1 (FR-63): derived franchise/format tags (singles carry the
+    // franchise tag and never a format tag; `derivedTagSlugs` guarantees it).
+    const tagRows = await prisma.category.findMany({
+      where: {
+        slug: { in: derivedTagSlugs(product.franchise, product.productType) },
+      },
+      select: { id: true },
+    });
+    for (const tag of tagRows) {
+      await prisma.productCategory.upsert({
+        where: {
+          productId_categoryId: { productId: product.id, categoryId: tag.id },
+        },
+        create: { productId: product.id, categoryId: tag.id },
+        update: {},
+      });
+    }
 
     for (const image of product.images) {
       const imageFields = {

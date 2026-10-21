@@ -6,6 +6,8 @@ import {
   derivedTagSlugs,
   SEEDED_SLUGS,
   SEEDED_TAXONOMY,
+  STANDARD_ROOTS,
+  STANDARD_ROOT_SLUGS,
 } from './seeded-taxonomy.js';
 
 const SQL = readFileSync(
@@ -63,5 +65,44 @@ describe('SEEDED_TAXONOMY (Story 13.5 drift guard)', () => {
       'franchise-pokemon',
     ]);
     expect(derivedTagSlugs('OTHER', 'SINGLE_CARD')).toEqual([]);
+  });
+});
+
+const EPIC15_SQL = readFileSync(
+  join(
+    process.cwd(),
+    'prisma/migrations/20261020100000_epic15_standard_taxonomy/migration.sql',
+  ),
+  'utf8',
+);
+
+describe('STANDARD_ROOT_SLUGS (Story 15.1 drift guard)', () => {
+  it('has the 3 roots, one per dimension', () => {
+    expect([...STANDARD_ROOT_SLUGS].sort()).toEqual([
+      'formato-sellado',
+      'franquicia-tcg',
+      'idioma-edicion',
+    ]);
+    expect(Object.keys(STANDARD_ROOTS).sort()).toEqual([
+      'EDITION_LANGUAGE',
+      'FRANCHISE',
+      'SEALED_FORMAT',
+    ]);
+  });
+
+  it('every root slug and dimension mapping appears in the migration SQL', () => {
+    for (const [dimension, root] of Object.entries(STANDARD_ROOTS)) {
+      expect(EPIC15_SQL).toContain(`'${root.slug}'`);
+      expect(EPIC15_SQL).toContain(`('${dimension}'`);
+    }
+  });
+
+  it('the SQL creates no other root slug', () => {
+    const created = [
+      ...EPIC15_SQL.matchAll(
+        /\(gen_random_uuid\(\), '[^']*',\s*'([a-z0-9-]+)',\s*'ROOT'/g,
+      ),
+    ].map((m) => m[1]);
+    expect(created.sort()).toEqual([...STANDARD_ROOT_SLUGS].sort());
   });
 });

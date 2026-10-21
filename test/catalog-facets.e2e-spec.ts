@@ -40,7 +40,7 @@ interface Facets {
 const TEST_USERNAME = 'e2e-admin-story-13-7';
 const TEST_EMAIL = 'e2e-admin-story-13-7@212collectorsclub.test';
 const TEST_PASSWORD = 'correct-horse-battery-staple-13a7';
-const SEEDED_ROOT_ID = '7bfd9c58-b7c4-490c-8232-6a463b87c262';
+const SEEDED_ROOT_ID = 'dd848f24-aac0-4346-ae25-b672bb0d7e14';
 const IMAGE_FIXTURE_PATH = join(
   import.meta.dirname,
   'fixtures',

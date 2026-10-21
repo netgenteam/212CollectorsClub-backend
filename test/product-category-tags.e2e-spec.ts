@@ -206,7 +206,8 @@ describe('Product category tags (e2e, Story 13.5)', () => {
           { slug: { startsWith: 'format-' } },
         ],
         type: 'SUBCATEGORY',
-        parentId: null,
+        // Story 15.1: these now hang under the standard roots (parentId set).
+        parentId: { not: null },
       },
       orderBy: { sortOrder: 'asc' },
     });

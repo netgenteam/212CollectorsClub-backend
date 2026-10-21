@@ -58,9 +58,12 @@ describe('CatalogController (e2e)', () => {
         const slugs = body.map((category) => category.slug).sort();
         const expectedSlugs = [
           'cartas-sueltas',
-          'ediciones-especiales',
-          'mazos-preconstruidos',
           'sobres-y-cajas',
+          // Story 15.1: standard roots; the obsolete in-use roots
+          // (ediciones-especiales, mazos-preconstruidos) are deactivated.
+          'franquicia-tcg',
+          'formato-sellado',
+          'idioma-edicion',
         ];
         for (const expectedSlug of expectedSlugs) {
           if (!slugs.includes(expectedSlug)) {
