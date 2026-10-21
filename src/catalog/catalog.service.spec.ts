@@ -159,7 +159,14 @@ describe('CatalogService', () => {
             },
           },
         ],
-        meta: { page: 1, limit: 20, total: 1, totalPages: 1 },
+        meta: {
+          page: 1,
+          limit: 20,
+          total: 1,
+          totalPages: 1,
+          hasNextPage: false,
+          hasPreviousPage: false,
+        },
       });
       expect(prisma.productImage.findMany).toHaveBeenCalledWith({
         where: { productId: { in: ['f65915f5-2931-4e50-af95-630b1fd7b950'] } },
@@ -233,7 +240,14 @@ describe('CatalogService', () => {
 
       expect(result).toEqual({
         data: [],
-        meta: { page: 1, limit: 20, total: 0, totalPages: 0 },
+        meta: {
+          page: 1,
+          limit: 20,
+          total: 0,
+          totalPages: 0,
+          hasNextPage: false,
+          hasPreviousPage: false,
+        },
       });
       expect(prisma.productImage.findMany).not.toHaveBeenCalled();
     });
@@ -252,6 +266,8 @@ describe('CatalogService', () => {
         limit: 10,
         total: 45,
         totalPages: 5,
+        hasNextPage: true,
+        hasPreviousPage: true,
       });
     });
   });

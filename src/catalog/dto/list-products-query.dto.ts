@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Transform, Type } from 'class-transformer';
+import { Expose, Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
@@ -37,6 +37,26 @@ const toBoolean = ({ value }: { value: unknown }): unknown => {
   if (value === 'true' || value === true) return true;
   if (value === 'false' || value === false) return false;
   return value;
+};
+
+/**
+ * Story 15.2 (FR-64, AD-52): Express' simple query parser delivers the
+ * bracket form as the literal key `categoryId[]` (which `whitelist` would
+ * drop). Merge it with `categoryId` (dedupe) before validation so the uuid
+ * check and the 20-id cap apply to the union. `obj` is the raw query.
+ */
+export const mergeCategoryIdAlias = ({
+  value,
+  obj,
+}: {
+  value: unknown;
+  obj: Record<string, unknown>;
+}): unknown => {
+  const bracket = obj['categoryId[]'];
+  if (bracket === undefined) return toArray({ value });
+  const toList = (v: unknown): unknown[] =>
+    v === undefined ? [] : Array.isArray(v) ? v : [v];
+  return [...new Set([...toList(value), ...toList(bracket)])];
 };
 
 export const DEFAULT_PAGE = 1;
@@ -177,10 +197,11 @@ export class ListProductsQueryDto {
     isArray: true,
     maxItems: MAX_MULTI_VALUES,
     description:
-      'Filter by one or more Category ids (max 20, OR). Includes descendants at any depth; a product matches by its main category or any of its tags. Bracket form `categoryId[]=` is not supported and is ignored.',
+      'Filter by one or more Category ids (max 20, OR). Includes descendants at any depth; a product matches by its main category or any of its tags. The bracket form `categoryId[]=` is accepted as an alias; both forms can be mixed (merged and de-duplicated before the 20-id cap).',
   })
   @IsOptional()
-  @Transform(toArray)
+  @Expose()
+  @Transform(mergeCategoryIdAlias)
   @IsArray()
   @ArrayMaxSize(MAX_MULTI_VALUES)
   @IsUUID('all', { each: true })

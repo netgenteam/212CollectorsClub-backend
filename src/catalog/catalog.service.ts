@@ -1,3 +1,4 @@
+import { buildPageMeta } from '../common/pagination.js';
 import { buildMarketReferences } from './market-references.js';
 import type { MarketReferenceDto } from './dto/market-reference.dto.js';
 import { Injectable, NotFoundException } from '@nestjs/common';
@@ -377,12 +378,7 @@ export class CatalogService {
     const total = Number(countRows[0]?.count ?? 0);
     const data = await this.toListItems(rows);
 
-    const meta: PaginationMetaDto = {
-      page,
-      limit,
-      total,
-      totalPages: total === 0 ? 0 : Math.ceil(total / limit),
-    };
+    const meta: PaginationMetaDto = buildPageMeta(page, limit, total);
 
     return { data, meta };
   }

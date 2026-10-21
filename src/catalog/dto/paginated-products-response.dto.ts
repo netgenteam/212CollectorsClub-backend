@@ -19,6 +19,19 @@ export class PaginationMetaDto {
     description: 'Total pages for this filter/search combination.',
   })
   totalPages: number;
+
+  @ApiProperty({
+    example: false,
+    description: 'True when a page after the current one exists.',
+  })
+  hasNextPage: boolean;
+
+  @ApiProperty({
+    example: false,
+    description:
+      'True when the current page is beyond the first (page > 1), including out-of-range pages.',
+  })
+  hasPreviousPage: boolean;
 }
 
 /**
