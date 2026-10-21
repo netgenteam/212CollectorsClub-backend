@@ -1,0 +1,45 @@
+{
+  "data": [
+    {
+      "id": 1100077,
+      "name": "Starter Deck 36: YELLOW Eustass”Captain”Kid",
+      "slug": "starter-deck-36-yellow-eustass”captain”kid",
+      "tcgplayer_id": 1100077,
+      "abbreviation": null,
+      "release_date": "2026-07-31",
+      "card_count": 2,
+      "image_tcgplayer_id": null,
+      "tcg_group_id": 24754,
+      "game_name": "One Piece Card Game",
+      "game_slug": "one-piece-card-game",
+      "image_url": null,
+      "set_icon_url": "https://tcgplayer-cdn.tcgplayer.com/set_icon/24754StarterDeck36YELLOWEustassCaptainKid.png"
+    },
+    {
+      "id": 1100100,
+      "name": "ST-11: Starter Deck 11 Uta",
+      "slug": "st-11-starter-deck-11-uta",
+      "tcgplayer_id": 1100100,
+      "abbreviation": null,
+      "release_date": "2024-02-02",
+      "card_count": 8,
+      "image_tcgplayer_id": 533879,
+      "tcg_group_id": 23250,
+      "game_name": "One Piece Card Game",
+      "game_slug": "one-piece-card-game",
+      "image_url": "https://product-images.tcgplayer.com/fit-in/400x400/533879.jpg",
+      "set_icon_url": "https://tcgplayer-cdn.tcgplayer.com/set_icon/23250ST11StarterDeck11Uta.png"
+    }
+  ],
+  "meta": {
+    "total": 2,
+    "page": 1,
+    "per_page": 100,
+    "has_more": false
+  },
+  "rate_limit": {
+    "daily_limit": 100,
+    "daily_remaining": 98,
+    "daily_reset": "2026-10-22T00:00:00.000Z"
+  }
+}

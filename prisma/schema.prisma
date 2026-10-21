@@ -91,17 +91,17 @@ model Category {
   updatedAt DateTime @updatedAt
 
   /// Story 13.2 (AD-33): taxonomy. ROOT rows carry no dimension/parent (SQL CHECK).
-  type      CategoryType      @default(ROOT)
+  type      CategoryType       @default(ROOT)
   dimension CategoryDimension?
-  parentId  String?           @db.Uuid
-  isActive  Boolean           @default(true)
-  sortOrder Int               @default(0)
+  parentId  String?            @db.Uuid
+  isActive  Boolean            @default(true)
+  sortOrder Int                @default(0)
 
   /// Self-relation; ON DELETE RESTRICT so the DB is the guard of 409 CATEGORY_HAS_CHILDREN.
   parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
   children Category[] @relation("CategoryTree")
 
-  products Product[]
+  products    Product[]
   /// Story 13.5 (AD-33): products tagged with this category (n:m).
   productTags ProductCategory[]
 
@@ -113,21 +113,21 @@ model Category {
 /// A sellable catalog item — a single card, a booster pack, a box, etc.
 /// (PRD §3 Glossary). Backed by the `Products` table.
 model Product {
-  id          String      @id @default(uuid()) @db.Uuid
-  name        String
-  slug        String      @unique
-  description String
-  franchise   Franchise
-  productType ProductType
-  rarity      Rarity
+  id              String          @id @default(uuid()) @db.Uuid
+  name            String
+  slug            String          @unique
+  description     String
+  franchise       Franchise
+  productType     ProductType
+  rarity          Rarity
   /// Story 13.4 (FR-49, AD-33): edition language; existing rows default to EN.
   editionLanguage ProductLanguage @default(EN)
-  priceUsd    Decimal     @db.Decimal(10, 2)
-  stock       Int
+  priceUsd        Decimal         @db.Decimal(10, 2)
+  stock           Int
   /// Placeholder for Epic 4 (AD-6 stock holds), added now so that story only
   /// needs to add the `StockHold` table later, not alter Product again
   /// mid-checkout-epic. Effective available stock = stock - heldQty.
-  heldQty     Int         @default(0)
+  heldQty         Int             @default(0)
   /// Story 8.2 (FR-22): closes the gap Stories 2.1/2.3 flagged ("deactivated
   /// Product" had no real field yet). Defaults `true` so every Story 1.4
   /// seed row stays publicly visible after this migration with no data
@@ -140,24 +140,31 @@ model Product {
   /// historical `OrderLine`/`CartItem`/`StockHold` rows referencing it (see
   /// that service's own doc comment for the full delete-vs-deactivate
   /// policy writeup).
-  isActive    Boolean     @default(true)
+  isActive        Boolean         @default(true)
   /// Story 11.1 (FR-35, AD-18): preorder flag; `releaseDate` is informational only.
-  isPreorder  Boolean     @default(false)
-  releaseDate DateTime?   @db.Timestamptz
+  isPreorder      Boolean         @default(false)
+  releaseDate     DateTime?       @db.Timestamptz
   /// Story 11.1 (AD-18): PSA|BGS|CGC|RAW, validated at DTO level (varchar, not a
   /// Prisma enum, so new grading houses need no `ALTER TYPE`).
-  gradingCompany String?  @db.VarChar(10)
-  gradeValue     String?  @db.VarChar(20)
-  certNumber     String?  @db.VarChar(50)
+  gradingCompany  String?         @db.VarChar(10)
+  gradeValue      String?         @db.VarChar(20)
+  certNumber      String?         @db.VarChar(50)
 
-  categoryId String   @db.Uuid
-  category   Category @relation(fields: [categoryId], references: [id])
+  categoryId   String            @db.Uuid
+  category     Category          @relation(fields: [categoryId], references: [id])
   /// Story 13.5 (AD-33): taxonomy tags; `categoryId` stays the single main category.
   taxonomyTags ProductCategory[]
 
   images           ProductImage[]
   /// Story 11.4 (FR-34, AD-18): stored external market reference links.
   marketReferences ProductMarketReference[]
+  /// Story 15.3 (FR-65, AD-53): optional link to the external master card;
+  /// SET NULL when the master card is deleted. Existing rows: manual, unlinked.
+  masterCardId     String?                  @db.Uuid
+  masterCard       MasterCard?              @relation(fields: [masterCardId], references: [id], onDelete: SetNull)
+  isManual         Boolean                  @default(true)
+  autoSyncPrice    Boolean                  @default(false)
+  lastMarketSyncAt DateTime?                @db.Timestamptz
   /// Story 3.1: every CartItem row referencing this Product, across every
   /// guest Cart. Read-only back-reference — CartService never traverses it,
   /// but Prisma requires the relation declared on both sides.
@@ -186,7 +193,49 @@ model Product {
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
   @@index([description(ops: raw("gin_trgm_ops"))], type: Gin)
   @@index([editionLanguage])
+  @@index([masterCardId])
   @@map("Products")
+}
+
+/// Story 15.3 (FR-65, AD-53): local catalog of external master cards (tcgapi.dev).
+/// NOT a Product: never listed by /products, facets or counts. Fake-client rows
+/// use externalProvider 'FAKE' so they never collide with 'TCGAPI_DEV'.
+model MasterCard {
+  id               String          @id @default(uuid()) @db.Uuid
+  externalProvider String
+  externalId       String
+  name             String
+  cleanName        String
+  /// lowercase, NFKD, no accents: cleanName + setName + cardNumber.
+  searchText       String
+  franchise        Franchise
+  gameSlug         String
+  setId            String
+  setName          String
+  cardNumber       String?
+  /// Raw API rarity (mapped on demand by mapRarity).
+  rarity           String?
+  editionLanguage  ProductLanguage @default(EN)
+  printing         String?
+  tcgplayerId      Int?
+  imageSmall       String?
+  imageLarge       String?
+  marketPriceUsd   Decimal?        @db.Decimal(10, 2)
+  lowPriceUsd      Decimal?        @db.Decimal(10, 2)
+  /// Replaces the PRD's highPriceUsd: the API has no high price.
+  medianPriceUsd   Decimal?        @db.Decimal(10, 2)
+  priceAsOf        DateTime?       @db.Date
+  rawApiData       Json
+  lastSyncedAt     DateTime        @default(now()) @db.Timestamptz
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  products         Product[]
+
+  @@unique([externalProvider, externalId])
+  @@index([searchText(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([franchise, setId])
+  @@index([setId])
+  @@map("Master_Cards")
 }
 
 /// Story 11.4 (FR-34, AD-18/AD-23): external market-price providers a
@@ -227,10 +276,10 @@ model ProductMarketReference {
 /// stock-hold expiry cron) — an expired Cart is simply treated as if it
 /// didn't exist by CartService; a future maintenance job may reap them.
 model Cart {
-  id        String   @id @default(uuid()) @db.Uuid
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  expiresAt DateTime
+  id         String    @id @default(uuid()) @db.Uuid
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  expiresAt  DateTime
   /// Story 12.5 (AD-29): owner account; null = anonymous (cookie) cart.
   customerId String?   @unique @db.Uuid
   customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
@@ -791,10 +840,10 @@ model LandingConfigEntry {
 /// Anonymous wishlist (Story 11.5, FR-36, AD-22), identified by a signed
 /// `wishlistId` cookie. `expiresAt` is a 30-day sliding window, filtered on read.
 model Wishlist {
-  id        String   @id @default(uuid()) @db.Uuid
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  expiresAt DateTime
+  id         String    @id @default(uuid()) @db.Uuid
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  expiresAt  DateTime
   /// Story 12.5 (AD-29): owner account; null = anonymous (cookie) wishlist.
   customerId String?   @unique @db.Uuid
   customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)

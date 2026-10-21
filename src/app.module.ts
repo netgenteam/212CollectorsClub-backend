@@ -10,6 +10,7 @@ import { CartModule } from './cart/cart.module.js';
 import { ContactModule } from './contact/contact.module.js';
 import { CheckoutModule } from './checkout/checkout.module.js';
 import { OrdersModule } from './orders/orders.module.js';
+import { TcgModule } from './tcg/tcg.module.js';
 import { PaymentsStripeModule } from './payments-stripe/payments-stripe.module.js';
 import { AdminAuthModule } from './admin-auth/admin-auth.module.js';
 import { AdminCatalogModule } from './admin-catalog/admin-catalog.module.js';
@@ -36,6 +37,7 @@ import { WishlistModule } from './wishlist/wishlist.module.js';
     CartModule,
     ContactModule,
     PaymentsStripeModule,
+    TcgModule,
     CheckoutModule,
     OrdersModule,
     // Story 7.1: registered once, here — instantiates AdminJwtStrategy
