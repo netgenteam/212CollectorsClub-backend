@@ -246,6 +246,7 @@ describe('Admin master card search (e2e, Story 15.5)', () => {
         'setName',
         'cardNumber',
         'rarity',
+        'printing',
         'editionLanguage',
         'imageSmall',
         'imageLarge',
@@ -325,6 +326,35 @@ describe('Admin master card search (e2e, Story 15.5)', () => {
       .get('/api/v1/admin/tcg-master-cards/search')
       .expect(401);
     await request(server()).get('/api/v1/tcg-master-cards/search').expect(404);
+  });
+
+  it('Story 15.6: exposes printing and treats % and _ in set literally', async () => {
+    await mk('p1', { name: 'Printy', setName: 'Set 100% Real_X' });
+    await mk('p2', { name: 'Printy Other', setName: 'Set 100 Realtor' });
+    await prisma.masterCard.updateMany({
+      where: { externalId: `${PREFIX}p1` },
+      data: { printing: 'Foil' },
+    });
+    const res = await get('q=printy');
+    const body = res.body as {
+      data: Array<Item & { printing: string | null }>;
+    };
+    expect(
+      body.data.find((d) => d.externalId === `${PREFIX}p1`)?.printing,
+    ).toBe('Foil');
+    expect(
+      body.data.find((d) => d.externalId === `${PREFIX}p2`)?.printing,
+    ).toBeNull();
+    const lit = (await get(`set=${encodeURIComponent('100% Real_X')}`))
+      .body as Body;
+    expect(lit.data.map((d) => d.externalId)).toEqual([`${PREFIX}p1`]);
+    const wild = (await get(`q=printy&set=${encodeURIComponent('%')}`))
+      .body as Body;
+    // Literal '%': only the set whose name really contains it.
+    expect(wild.data.map((d) => d.externalId)).toEqual([`${PREFIX}p1`]);
+    const under = (await get(`q=printy&set=${encodeURIComponent('Real_')}`))
+      .body as Body;
+    expect(under.data.map((d) => d.externalId)).toEqual([`${PREFIX}p1`]);
   });
 
   it('AC10: Swagger documents the endpoint DTOs', async () => {

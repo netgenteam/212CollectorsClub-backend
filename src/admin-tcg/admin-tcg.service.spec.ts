@@ -11,6 +11,7 @@ const card = (id: string, price: string | null) => ({
   setName: 'Set One',
   cardNumber: '1/10',
   rarity: 'Rare',
+  printing: 'Foil',
   editionLanguage: 'EN',
   imageSmall: null,
   imageLarge: null,
@@ -40,6 +41,23 @@ describe('AdminTcgService', () => {
       ],
     }).compile();
     service = module.get(AdminTcgService);
+  });
+
+  it('escapes ILIKE wildcards in set but not in the exact setId', async () => {
+    prisma.masterCard.count.mockResolvedValue(0);
+    prisma.masterCard.findMany.mockResolvedValue([]);
+    await service.searchMasterCards({ set: '50%_x\\', page: 1, limit: 20 });
+    const arg = prisma.masterCard.findMany.mock.calls[0][0] as {
+      where: { AND: unknown[] };
+    };
+    expect(arg.where.AND).toEqual([
+      {
+        OR: [
+          { setId: '50%_x\\' },
+          { setName: { contains: '50\\%\\_x\\\\', mode: 'insensitive' } },
+        ],
+      },
+    ]);
   });
 
   it('builds one AND clause per normalized token plus franchise and set', async () => {
@@ -89,6 +107,7 @@ describe('AdminTcgService', () => {
     expect(prisma.product.groupBy).toHaveBeenCalledTimes(1);
     expect(res.data[0]).toMatchObject({
       apiPriceUsd: 12.5,
+      printing: 'Foil',
       alreadyInInventory: true,
       currentInventoryStock: 7,
     });

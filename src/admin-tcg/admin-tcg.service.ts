@@ -21,16 +21,18 @@ export class AdminTcgService {
     const tokens = normalizeSearchText(query.q ?? '')
       .split(' ')
       .filter(Boolean);
-    const set = query.set?.trim();
+    const rawSet = query.set?.trim();
+    // ILIKE wildcards in the user's `set` must match literally.
+    const escapedSet = rawSet?.replace(/[\\%_]/g, '\\$&');
 
     const and: Prisma.MasterCardWhereInput[] = tokens.map((t) => ({
       searchText: { contains: t },
     }));
-    if (set) {
+    if (rawSet && escapedSet) {
       and.push({
         OR: [
-          { setId: set },
-          { setName: { contains: set, mode: 'insensitive' } },
+          { setId: rawSet },
+          { setName: { contains: escapedSet, mode: 'insensitive' } },
         ],
       });
     }
@@ -82,6 +84,7 @@ export class AdminTcgService {
           setName: c.setName,
           cardNumber: c.cardNumber,
           rarity: c.rarity,
+          printing: c.printing,
           editionLanguage: c.editionLanguage,
           imageSmall: c.imageSmall,
           imageLarge: c.imageLarge,

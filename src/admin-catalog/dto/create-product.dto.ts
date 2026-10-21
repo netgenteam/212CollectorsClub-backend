@@ -40,6 +40,9 @@ import {
 } from '../../catalog/grading-company.js';
 import { RequiresGradedCompany } from './requires-graded-company.validator.js';
 
+/** Story 15.6 (AD-57): with `masterCardId` these fields are ignored. */
+const notFromMasterCard = (o: CreateProductDto): boolean => !o.masterCardId;
+
 /**
  * Story 8.2 (FR-22, NFR-3, NFR-4; AD-2). The text fields of
  * `POST /api/v1/admin/products` — a `multipart/form-data` request (the
@@ -63,7 +66,17 @@ import { RequiresGradedCompany } from './requires-graded-company.validator.js';
  * `AdminCategoriesService`.
  */
 export class CreateProductDto {
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'Story 15.6 (FR-69): create a SINGLE_CARD from this master card. name, slug, description, franchise, productType, rarity, editionLanguage, priceUsd (= marketPriceUsd as is), categoryId (cartas-sueltas) and the image (downloaded from the card) come from the master card; any of those sent together with it, plus uploaded images and marketReferences, are ignored. Accepted with it: stock (required), isActive, categoryIds (extra tags), gradingCompany, gradeValue, certNumber, isPreorder, releaseDate. singleCondition does not exist.',
+  })
+  @IsOptional()
+  @IsUUID()
+  masterCardId?: string;
+
   @ApiProperty({ example: 'Blastoise VMAX', maxLength: 200 })
+  @ValidateIf(notFromMasterCard)
   @IsString()
   @IsNotEmpty()
   @MaxLength(200)
@@ -75,6 +88,7 @@ export class CreateProductDto {
       'URL-safe, unique slug: lowercase letters, digits and single hyphens between segments.',
     maxLength: 200,
   })
+  @ValidateIf(notFromMasterCard)
   @IsString()
   @IsNotEmpty()
   @MaxLength(200)
@@ -87,16 +101,19 @@ export class CreateProductDto {
   @ApiProperty({
     example: 'Carta individual Blastoise VMAX, ilustración a página completa.',
   })
+  @ValidateIf(notFromMasterCard)
   @IsString()
   @IsNotEmpty()
   @MaxLength(5000)
   description: string;
 
   @ApiProperty({ enum: Franchise, enumName: 'Franchise' })
+  @ValidateIf(notFromMasterCard)
   @IsEnum(Franchise)
   franchise: Franchise;
 
   @ApiProperty({ enum: ProductType, enumName: 'ProductType' })
+  @ValidateIf(notFromMasterCard)
   @IsEnum(ProductType)
   productType: ProductType;
 
@@ -110,6 +127,7 @@ export class CreateProductDto {
   editionLanguage?: ProductLanguage;
 
   @ApiProperty({ enum: Rarity, enumName: 'Rarity' })
+  @ValidateIf(notFromMasterCard)
   @IsEnum(Rarity)
   rarity: Rarity;
 
@@ -118,6 +136,7 @@ export class CreateProductDto {
     minimum: 0,
     description: 'Price in USD. Negative values are rejected (400).',
   })
+  @ValidateIf(notFromMasterCard)
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
@@ -138,6 +157,7 @@ export class CreateProductDto {
     format: 'uuid',
     description: 'Category this Product belongs to.',
   })
+  @ValidateIf(notFromMasterCard)
   @IsUUID()
   categoryId: string;
 
@@ -187,6 +207,17 @@ export class CreateProductDto {
     message: 'certNumber must be alphanumeric (1-50 chars)',
   })
   certNumber?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Visible in the storefront when stock > 0 (default true). false hides it.',
+  })
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    value === 'true' ? true : value === 'false' ? false : value,
+  )
+  @IsBoolean()
+  isActive?: boolean;
 
   @CategoryIdsInput()
   categoryIds?: string[];

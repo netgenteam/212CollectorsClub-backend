@@ -28,6 +28,15 @@ export class MasterCardSearchItemDto {
   @ApiProperty({ nullable: true, type: String, description: 'Raw API rarity.' })
   rarity: string | null;
 
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    example: 'Foil',
+    description:
+      'Printing of this entry (Normal/Foil...): one entry exists per printing, so it tells same-name results apart.',
+  })
+  printing: string | null;
+
   @ApiProperty({ enum: ProductLanguage, enumName: 'ProductLanguage' })
   editionLanguage: ProductLanguage;
 

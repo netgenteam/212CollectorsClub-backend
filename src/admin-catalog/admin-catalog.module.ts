@@ -1,9 +1,14 @@
 import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PassportModule } from '@nestjs/passport';
 import { AdminCategoriesController } from './admin-categories.controller.js';
 import { AdminCategoriesService } from './admin-categories.service.js';
 import { AdminProductsController } from './admin-products.controller.js';
 import { AdminProductsService } from './admin-products.service.js';
+import {
+  HttpMasterCardImageDownloader,
+  MASTER_CARD_IMAGE_DOWNLOADER,
+} from './master-card-image-downloader.js';
 
 // PrismaService is provided by the global PrismaModule (see
 // src/prisma/prisma.module.ts) — no need to re-import it here.
@@ -37,6 +42,16 @@ import { AdminProductsService } from './admin-products.service.js';
   // comment documents, and matches the Architecture Spine's module map
   // (Catalog --> AdminCatalog, singular).
   controllers: [AdminCategoriesController, AdminProductsController],
-  providers: [AdminCategoriesService, AdminProductsService],
+  providers: [
+    AdminCategoriesService,
+    AdminProductsService,
+    // Story 15.6 (AD-57): swappable in tests so no real network is used.
+    {
+      provide: MASTER_CARD_IMAGE_DOWNLOADER,
+      useFactory: (config: ConfigService) =>
+        new HttpMasterCardImageDownloader(config),
+      inject: [ConfigService],
+    },
+  ],
 })
 export class AdminCatalogModule {}

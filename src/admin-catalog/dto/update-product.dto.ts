@@ -140,6 +140,15 @@ export class UpdateProductDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Story 15.6 (A36, AD-57): only for Products linked to a master card (otherwise 409 NOT_A_LINKED_PRODUCT). false stops the nightly price sync so priceUsd can be set manually; true lets the sync overwrite priceUsd again.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  autoSyncPrice?: boolean;
+
   @ApiPropertyOptional({
     description: 'Preorder flag (default false).',
   })

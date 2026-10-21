@@ -2,6 +2,7 @@ import { Logger, NotFoundException } from '@nestjs/common';
 import { AdminProductsService } from './admin-products.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import type { CreateProductDto } from './dto/create-product.dto.js';
+import { MasterCardImageUnavailableError } from './master-card-image-downloader.js';
 
 const unlinkMock = vi.fn().mockResolvedValue(undefined);
 vi.mock('node:fs/promises', () => ({
@@ -99,7 +100,9 @@ const CREATE_DTO: CreateProductDto = {
  */
 describe('AdminProductsService', () => {
   let service: AdminProductsService;
+  let downloader: { download: ReturnType<typeof vi.fn> };
   let prisma: {
+    masterCard: { findUnique: ReturnType<typeof vi.fn> };
     product: {
       create: ReturnType<typeof vi.fn>;
       findMany: ReturnType<typeof vi.fn>;
@@ -108,6 +111,7 @@ describe('AdminProductsService', () => {
       delete: ReturnType<typeof vi.fn>;
     };
     productImage: {
+      create: ReturnType<typeof vi.fn>;
       createMany: ReturnType<typeof vi.fn>;
       aggregate: ReturnType<typeof vi.fn>;
       findFirst: ReturnType<typeof vi.fn>;
@@ -116,7 +120,11 @@ describe('AdminProductsService', () => {
       delete: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
     };
-    category: { findMany: ReturnType<typeof vi.fn> };
+    category: {
+      findMany: ReturnType<typeof vi.fn>;
+      findUnique: ReturnType<typeof vi.fn>;
+    };
+    productMarketReference: { createMany: ReturnType<typeof vi.fn> };
     productCategory: {
       deleteMany: ReturnType<typeof vi.fn>;
       createMany: ReturnType<typeof vi.fn>;
@@ -128,6 +136,7 @@ describe('AdminProductsService', () => {
   beforeEach(() => {
     unlinkMock.mockClear();
     prisma = {
+      masterCard: { findUnique: vi.fn() },
       product: {
         create: vi.fn(),
         findMany: vi.fn(),
@@ -136,6 +145,7 @@ describe('AdminProductsService', () => {
         delete: vi.fn(),
       },
       productImage: {
+        create: vi.fn(),
         createMany: vi.fn(),
         aggregate: vi.fn(),
         findFirst: vi.fn(),
@@ -145,7 +155,11 @@ describe('AdminProductsService', () => {
         update: vi.fn(),
       },
       // Story 13.5: tag replacement runs inside the create transaction.
-      category: { findMany: vi.fn().mockResolvedValue([]) },
+      category: {
+        findMany: vi.fn().mockResolvedValue([]),
+        findUnique: vi.fn().mockResolvedValue({ id: CATEGORY.id }),
+      },
+      productMarketReference: { createMany: vi.fn() },
       productCategory: {
         deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
         createMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -155,7 +169,8 @@ describe('AdminProductsService', () => {
         cb(prisma),
       ),
     };
-    service = new AdminProductsService(prisma as never);
+    downloader = { download: vi.fn() };
+    service = new AdminProductsService(prisma as never, downloader as never);
   });
 
   describe('create', () => {
@@ -302,6 +317,171 @@ describe('AdminProductsService', () => {
 
       await expect(service.create(CREATE_DTO, [file])).rejects.toBe(dbDown);
       expect(unlinkMock).toHaveBeenCalledWith(file.path);
+    });
+  });
+
+  describe('create from a master card (Story 15.6, AD-57)', () => {
+    const CARD_ID = '0b8f6c52-6d0e-4a3e-9d57-2b6f6f1c1111';
+    const card = (over: Record<string, unknown> = {}) => ({
+      id: CARD_ID,
+      externalId: '12345',
+      name: 'Charizard ex',
+      franchise: 'POKEMON',
+      setName: '151',
+      cardNumber: '199/165',
+      rarity: 'Special Illustration Rare',
+      printing: 'Normal',
+      editionLanguage: 'EN',
+      tcgplayerId: 777,
+      imageLarge: 'https://product-images.tcgplayer.com/l.jpg',
+      imageSmall: 'https://product-images.tcgplayer.com/s.jpg',
+      marketPriceUsd: '12.34',
+      ...over,
+    });
+    const dto = { masterCardId: CARD_ID, stock: 3 } as CreateProductDto;
+    const downloaded = {
+      filename: 'dl-1.jpg',
+      path: '/tmp/uploads/public/products/dl-1.jpg',
+    };
+
+    beforeEach(() => {
+      prisma.masterCard.findUnique.mockResolvedValue(card());
+      downloader.download.mockResolvedValue(downloaded);
+      prisma.product.create.mockResolvedValue(buildProductRow());
+      prisma.productImage.create.mockResolvedValue({});
+      prisma.product.findUnique.mockResolvedValue(buildProductRow());
+    });
+
+    it('maps the card, takes priceUsd as is and removes ignored uploaded files', async () => {
+      const uploaded = buildFile();
+      await service.create(dto, [uploaded]);
+
+      expect(unlinkMock).toHaveBeenCalledWith(uploaded.path);
+      expect(downloader.download).toHaveBeenCalledWith([
+        'https://product-images.tcgplayer.com/l.jpg',
+        'https://product-images.tcgplayer.com/s.jpg',
+      ]);
+      const data = (
+        prisma.product.create.mock.calls[0][0] as {
+          data: Record<string, unknown>;
+        }
+      ).data;
+      expect(data).toMatchObject({
+        name: 'Charizard ex',
+        slug: 'charizard-ex-151-199-165-tcg-12345',
+        franchise: 'POKEMON',
+        productType: 'SINGLE_CARD',
+        rarity: 'SECRET_RARE',
+        editionLanguage: 'EN',
+        priceUsd: '12.34',
+        stock: 3,
+        categoryId: CATEGORY.id,
+        masterCardId: CARD_ID,
+        isManual: false,
+        autoSyncPrice: true,
+      });
+      expect(data.lastMarketSyncAt).toBeInstanceOf(Date);
+      expect(prisma.productImage.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          url: '/uploads/public/products/dl-1.jpg',
+          sortOrder: 0,
+        }) as unknown,
+      });
+      expect(prisma.productMarketReference.createMany).toHaveBeenCalledWith({
+        data: [
+          expect.objectContaining({
+            provider: 'TCGPLAYER',
+            url: 'https://www.tcgplayer.com/product/777',
+          }),
+        ],
+      });
+    });
+
+    it('404 MASTER_CARD_NOT_FOUND without downloading anything', async () => {
+      prisma.masterCard.findUnique.mockResolvedValue(null);
+      await expect(service.create(dto, [])).rejects.toMatchObject({
+        status: 404,
+        response: { errorCode: 'MASTER_CARD_NOT_FOUND' },
+      });
+      expect(downloader.download).not.toHaveBeenCalled();
+    });
+
+    it('422 MASTER_CARD_NO_PRICE for a card without market price', async () => {
+      prisma.masterCard.findUnique.mockResolvedValue(
+        card({ marketPriceUsd: null }),
+      );
+      await expect(service.create(dto, [])).rejects.toMatchObject({
+        status: 422,
+        response: { errorCode: 'MASTER_CARD_NO_PRICE' },
+      });
+      expect(downloader.download).not.toHaveBeenCalled();
+    });
+
+    it('502 MASTER_CARD_IMAGE_UNAVAILABLE and no transaction when the download fails', async () => {
+      downloader.download.mockRejectedValue(
+        new MasterCardImageUnavailableError('nope'),
+      );
+      await expect(service.create(dto, [])).rejects.toMatchObject({
+        status: 502,
+        response: { errorCode: 'MASTER_CARD_IMAGE_UNAVAILABLE' },
+      });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('deletes the downloaded file when the transaction fails (R5)', async () => {
+      prisma.productImage.create.mockRejectedValue(new Error('boom'));
+      await expect(service.create(dto, [])).rejects.toThrow('boom');
+      expect(unlinkMock).toHaveBeenCalledWith(downloaded.path);
+    });
+
+    it('retries the slug with -2 on P2002 (second product of the same card)', async () => {
+      prisma.product.create
+        .mockRejectedValueOnce(knownRequestError('P2002'))
+        .mockResolvedValueOnce(buildProductRow());
+      await service.create(dto, []);
+      const slugs = prisma.product.create.mock.calls.map(
+        (c) => (c[0] as { data: { slug: string } }).data.slug,
+      );
+      expect(slugs).toEqual([
+        'charizard-ex-151-199-165-tcg-12345',
+        'charizard-ex-151-199-165-tcg-12345-2',
+      ]);
+      expect(unlinkMock).not.toHaveBeenCalled();
+    });
+
+    it('gives up with 409 PRODUCT_SLUG_TAKEN after 5 slug attempts and removes the file', async () => {
+      prisma.product.create.mockRejectedValue(knownRequestError('P2002'));
+      await expect(service.create(dto, [])).rejects.toMatchObject({
+        status: 409,
+        response: { errorCode: 'PRODUCT_SLUG_TAKEN' },
+      });
+      expect(prisma.product.create).toHaveBeenCalledTimes(5);
+      expect(unlinkMock).toHaveBeenCalledWith(downloaded.path);
+    });
+  });
+
+  describe('update autoSyncPrice (Story 15.6, A36)', () => {
+    it('409 NOT_A_LINKED_PRODUCT when the Product has no masterCardId', async () => {
+      prisma.product.findUnique.mockResolvedValue({ masterCardId: null });
+      await expect(
+        service.update('p1', { autoSyncPrice: false }),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: { errorCode: 'NOT_A_LINKED_PRODUCT' },
+      });
+      expect(prisma.product.update).not.toHaveBeenCalled();
+    });
+
+    it('persists autoSyncPrice on a linked Product', async () => {
+      prisma.product.findUnique
+        .mockResolvedValueOnce({ masterCardId: 'mc' })
+        .mockResolvedValue(buildProductRow());
+      prisma.product.update.mockResolvedValue(buildProductRow());
+      await service.update('p1', { autoSyncPrice: false });
+      expect(prisma.product.update).toHaveBeenCalledWith({
+        where: { id: 'p1' },
+        data: { autoSyncPrice: false },
+      });
     });
   });
 

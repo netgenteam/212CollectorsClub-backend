@@ -80,19 +80,18 @@ export class AdminProductsController {
   @ApiBody({
     schema: {
       type: 'object',
-      required: [
-        'name',
-        'slug',
-        'description',
-        'franchise',
-        'productType',
-        'rarity',
-        'priceUsd',
-        'stock',
-        'categoryId',
-        'images',
-      ],
+      // Manual creation also requires name, slug, description, franchise,
+      // productType, rarity, priceUsd, categoryId and >=1 image; with
+      // masterCardId (Story 15.6) only stock is required.
+      required: ['stock'],
       properties: {
+        masterCardId: {
+          type: 'string',
+          format: 'uuid',
+          description:
+            'Story 15.6 (FR-69): create a SINGLE_CARD from this master card. Name, slug, description, franchise, rarity, editionLanguage, category, price (marketPriceUsd as is) and image come from the card; name/slug/description/franchise/productType/rarity/editionLanguage/priceUsd/categoryId, uploaded images and marketReferences sent with it are ignored. Accepted: stock (required), isActive, categoryIds, gradingCompany, gradeValue, certNumber, isPreorder, releaseDate. singleCondition does not exist.',
+        },
+        isActive: { type: 'boolean', default: true },
         name: { type: 'string' },
         slug: { type: 'string' },
         description: { type: 'string' },
@@ -114,7 +113,7 @@ export class AdminProductsController {
   @ApiOperation({
     summary: 'Create a Product (with at least one image)',
     description:
-      'Multipart create: Franchise/Product Type/Rarity/price/stock/category plus >=1 image file under the repeated "images" field. Immediately visible via the public GET /api/v1/products (Epic 2) once created (isActive defaults true, no cache to invalidate, AD-10). Negative priceUsd/stock are rejected (400) before anything is persisted.',
+      'Multipart create: Franchise/Product Type/Rarity/price/stock/category plus >=1 image file under the repeated "images" field. Immediately visible via the public GET /api/v1/products (Epic 2) once created (isActive defaults true, no cache to invalidate, AD-10). Negative priceUsd/stock are rejected (400) before anything is persisted. With masterCardId (Story 15.6, FR-69) the Product is built from the master card: send only masterCardId + stock (+ optional isActive/categoryIds/gradingCompany/gradeValue/certNumber); the image is downloaded server-side from an allowlisted https host and stored in uploads/. singleCondition does not exist and is not accepted.',
   })
   @ApiResponse({ status: HttpStatus.CREATED, type: AdminProductResponseDto })
   @ApiResponse({
@@ -126,6 +125,19 @@ export class AdminProductsController {
     status: HttpStatus.CONFLICT,
     description:
       'errorCode PRODUCT_SLUG_TAKEN — the given slug is already in use.',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'errorCode MASTER_CARD_NOT_FOUND (masterCardId).',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description: 'errorCode MASTER_CARD_NO_PRICE (masterCardId).',
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_GATEWAY,
+    description:
+      'errorCode MASTER_CARD_IMAGE_UNAVAILABLE — the card image could not be downloaded safely; no Product was created.',
   })
   @ApiResponse({
     status: HttpStatus.UNAUTHORIZED,
@@ -176,7 +188,7 @@ export class AdminProductsController {
   @ApiOperation({
     summary: 'Update a Product (including deactivate/reactivate via isActive)',
     description:
-      'Partial update. PATCH { "isActive": false } deactivates the Product (hidden from the public catalog, still fully visible/editable here) without ever touching historical OrderLine snapshots; PATCH { "isActive": true } reactivates it.',
+      'Partial update. PATCH { "isActive": false } deactivates the Product (hidden from the public catalog, still fully visible/editable here) without ever touching historical OrderLine snapshots; PATCH { "isActive": true } reactivates it. PATCH { "autoSyncPrice": false } (Products linked to a master card only, else 409 NOT_A_LINKED_PRODUCT) stops the nightly price sync.',
   })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiResponse({ status: HttpStatus.OK, type: AdminProductResponseDto })
@@ -186,7 +198,8 @@ export class AdminProductsController {
   })
   @ApiResponse({
     status: HttpStatus.CONFLICT,
-    description: 'errorCode PRODUCT_SLUG_TAKEN.',
+    description:
+      'errorCode PRODUCT_SLUG_TAKEN, or NOT_A_LINKED_PRODUCT (autoSyncPrice sent for a Product without masterCardId).',
   })
   @ApiResponse({
     status: HttpStatus.BAD_REQUEST,

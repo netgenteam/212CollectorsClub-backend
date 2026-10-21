@@ -2,6 +2,7 @@ import { unlink } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import {
   HttpStatus,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
@@ -15,6 +16,15 @@ import type {
   ProductMarketReference,
 } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { mapRarity, slugify } from '../tcg/tcg-mappings.js';
+import {
+  MASTER_CARD_IMAGE_DOWNLOADER,
+  MasterCardImageUnavailableError,
+} from './master-card-image-downloader.js';
+import type {
+  DownloadedImage,
+  MasterCardImageDownloader,
+} from './master-card-image-downloader.js';
 import type { GradingCompany } from '../catalog/grading-company.js';
 import type { Franchise, ProductType } from '../generated/prisma/enums.js';
 import { derivedTagSlugs, SEEDED_SLUGS } from './seeded-taxonomy.js';
@@ -133,6 +143,11 @@ function tagCategoryNotFoundException(ids: readonly string[]): ApiException {
   );
 }
 
+/** Story 15.6 (AD-57): slug of the standard category singles are filed under. */
+const SINGLES_CATEGORY_SLUG = 'cartas-sueltas';
+/** Slug attempts for a repeated master card: base, -2, -3, -4, -5 (A34). */
+const MASTER_CARD_SLUG_MAX_ATTEMPTS = 5;
+
 function productImageRequiredException(): ApiException {
   return new ApiException(
     HttpStatus.BAD_REQUEST,
@@ -191,12 +206,21 @@ async function cleanupUploadedFiles(
 export class AdminProductsService {
   private readonly logger = new Logger(AdminProductsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Inject(MASTER_CARD_IMAGE_DOWNLOADER)
+    private readonly imageDownloader: MasterCardImageDownloader,
+  ) {}
 
   async create(
     dto: CreateProductDto,
     files: readonly Express.Multer.File[],
   ): Promise<AdminProductResponseDto> {
+    if (dto.masterCardId) {
+      // R4: images sent next to a masterCardId are ignored and removed.
+      await cleanupUploadedFiles(files);
+      return this.createFromMasterCard(dto, dto.masterCardId);
+    }
     if (files.length === 0) {
       throw productImageRequiredException();
     }
@@ -217,6 +241,7 @@ export class AdminProductsService {
             priceUsd: dto.priceUsd,
             stock: dto.stock,
             categoryId: dto.categoryId,
+            isActive: dto.isActive,
             isPreorder: dto.isPreorder,
             releaseDate: dto.releaseDate
               ? new Date(dto.releaseDate)
@@ -265,6 +290,168 @@ export class AdminProductsService {
     }
   }
 
+  /**
+   * Story 15.6 (FR-69, AD-57, A33, A34). Single-card Product from a master
+   * card: price = `marketPriceUsd` as is, image downloaded BEFORE the
+   * transaction (R5) and deleted if the Product is not created.
+   */
+  private async createFromMasterCard(
+    dto: CreateProductDto,
+    masterCardId: string,
+  ): Promise<AdminProductResponseDto> {
+    const card = await this.prisma.masterCard.findUnique({
+      where: { id: masterCardId },
+    });
+    if (!card) {
+      throw new ApiException(
+        HttpStatus.NOT_FOUND,
+        'MASTER_CARD_NOT_FOUND',
+        `Master card ${masterCardId} does not exist.`,
+      );
+    }
+    if (card.marketPriceUsd === null) {
+      throw new ApiException(
+        HttpStatus.UNPROCESSABLE_ENTITY,
+        'MASTER_CARD_NO_PRICE',
+        `Master card ${masterCardId} has no market price, so a Product cannot be created from it.`,
+      );
+    }
+    const category = await this.prisma.category.findUnique({
+      where: { slug: SINGLES_CATEGORY_SLUG },
+      select: { id: true },
+    });
+    if (!category) {
+      throw new ApiException(
+        HttpStatus.INTERNAL_SERVER_ERROR,
+        'SINGLES_CATEGORY_MISSING',
+        `Category "${SINGLES_CATEGORY_SLUG}" does not exist; run the seed/migrations.`,
+      );
+    }
+
+    let image: DownloadedImage;
+    try {
+      image = await this.imageDownloader.download(
+        [card.imageLarge, card.imageSmall].filter(
+          (u): u is string => typeof u === 'string' && u.length > 0,
+        ),
+      );
+    } catch (err) {
+      if (err instanceof MasterCardImageUnavailableError) {
+        throw new ApiException(
+          HttpStatus.BAD_GATEWAY,
+          'MASTER_CARD_IMAGE_UNAVAILABLE',
+          'The master card image could not be downloaded; no Product was created.',
+        );
+      }
+      throw err;
+    }
+
+    const baseSlug = slugify(
+      `${card.name} ${card.setName} ${card.cardNumber ?? ''}`,
+    )
+      .slice(0, 150)
+      .replace(/-+$/, '');
+    const slugBase = `${baseSlug}-tcg-${slugify(card.externalId)}`;
+    const numberPart = card.cardNumber ? ` #${card.cardNumber}` : '';
+    const description = [
+      `${card.name}${numberPart} (${card.setName}).`,
+      card.rarity ? `Rareza: ${card.rarity}.` : '',
+      card.printing ? `Impresión: ${card.printing}.` : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const market = card.tcgplayerId
+      ? [
+          {
+            provider: 'TCGPLAYER' as const,
+            label: 'TCGplayer',
+            url: `https://www.tcgplayer.com/product/${card.tcgplayerId}`,
+          },
+        ]
+      : [];
+
+    let createdId: string | undefined;
+    try {
+      for (
+        let attempt = 1;
+        attempt <= MASTER_CARD_SLUG_MAX_ATTEMPTS;
+        attempt++
+      ) {
+        const slug = attempt === 1 ? slugBase : `${slugBase}-${attempt}`;
+        try {
+          const created = await this.prisma.$transaction(async (tx) => {
+            const product = await tx.product.create({
+              data: {
+                name: card.name.slice(0, 200),
+                slug,
+                description,
+                franchise: card.franchise,
+                productType: 'SINGLE_CARD',
+                editionLanguage: card.editionLanguage,
+                rarity: mapRarity(card.rarity),
+                priceUsd: card.marketPriceUsd!,
+                stock: dto.stock,
+                categoryId: category.id,
+                isActive: dto.isActive,
+                isPreorder: dto.isPreorder,
+                releaseDate: dto.releaseDate
+                  ? new Date(dto.releaseDate)
+                  : undefined,
+                gradingCompany: dto.gradingCompany,
+                gradeValue: dto.gradeValue,
+                certNumber: dto.certNumber,
+                masterCardId: card.id,
+                isManual: false,
+                autoSyncPrice: true,
+                lastMarketSyncAt: new Date(),
+              },
+            });
+            await tx.productImage.create({
+              data: {
+                productId: product.id,
+                url: buildProductImagePublicUrl(image.filename),
+                altText: null,
+                sortOrder: 0,
+              },
+            });
+            if (market.length > 0) {
+              await tx.productMarketReference.createMany({
+                data: toMarketReferenceRows(product.id, market),
+              });
+            }
+            await this.replaceTags(
+              tx,
+              product.id,
+              dto.categoryIds ?? [],
+              card.franchise,
+              'SINGLE_CARD',
+            );
+            return product;
+          });
+          createdId = created.id;
+          break;
+        } catch (err) {
+          // A taken slug (second product of the same card, A34) retries
+          // with a suffix; the aborted transaction left nothing behind.
+          if (
+            isPrismaKnownError(err, 'P2002') &&
+            attempt < MASTER_CARD_SLUG_MAX_ATTEMPTS
+          ) {
+            continue;
+          }
+          throw err;
+        }
+      }
+    } catch (err) {
+      await unlink(image.path).catch(() => undefined);
+      if (isPrismaKnownError(err, 'P2002')) {
+        throw productSlugTakenException(slugBase);
+      }
+      throw err;
+    }
+    return this.findOne(createdId!);
+  }
+
   /** Admin listing — every Product regardless of `isActive` (unlike the
    * public `GET /api/v1/products`, Story 2.2, which Story 8.2 now filters
    * to `isActive: true` only). No pagination/search — out of this story's
@@ -311,6 +498,22 @@ export class AdminProductsService {
         dto.releaseDate === null ? null : new Date(dto.releaseDate);
     if (dto.gradeValue !== undefined) data.gradeValue = dto.gradeValue;
     if (dto.certNumber !== undefined) data.certNumber = dto.certNumber;
+    if (dto.autoSyncPrice !== undefined) {
+      // Story 15.6 (A36, AD-57): only meaningful for a linked Product.
+      const linked = await this.prisma.product.findUnique({
+        where: { id },
+        select: { masterCardId: true },
+      });
+      if (!linked) throw productNotFoundException(id);
+      if (linked.masterCardId === null) {
+        throw new ApiException(
+          HttpStatus.CONFLICT,
+          'NOT_A_LINKED_PRODUCT',
+          'autoSyncPrice can only be changed on a Product created from a master card.',
+        );
+      }
+      data.autoSyncPrice = dto.autoSyncPrice;
+    }
 
     // Story 11.1 (AD-18): grade/cert only make sense with a real grading
     // house. Validate against the RESULTING company (body, else stored) and
@@ -764,6 +967,10 @@ export class AdminProductsService {
       gradingCompany: product.gradingCompany as GradingCompany | null,
       gradeValue: product.gradeValue,
       certNumber: product.certNumber,
+      masterCardId: product.masterCardId,
+      isManual: product.isManual,
+      autoSyncPrice: product.autoSyncPrice,
+      lastMarketSyncAt: product.lastMarketSyncAt?.toISOString() ?? null,
       category: {
         id: product.category.id,
         name: product.category.name,

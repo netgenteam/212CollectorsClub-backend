@@ -124,6 +124,33 @@ export class AdminProductResponseDto {
   @ApiProperty({ nullable: true, example: null, type: String })
   certNumber: string | null;
 
+  @ApiProperty({
+    format: 'uuid',
+    nullable: true,
+    type: String,
+    description: 'Story 15.6: master card this Product was created from.',
+  })
+  masterCardId: string | null;
+
+  @ApiProperty({
+    example: true,
+    description: 'true = created by hand; false = created from a master card.',
+  })
+  isManual: boolean;
+
+  @ApiProperty({
+    example: false,
+    description: 'true = the nightly sync overwrites priceUsd (AD-57/58).',
+  })
+  autoSyncPrice: boolean;
+
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    description: 'Last time priceUsd was taken from the market price.',
+  })
+  lastMarketSyncAt: string | null;
+
   @ApiProperty({ type: AdminProductCategoryDto })
   category: AdminProductCategoryDto;
 
