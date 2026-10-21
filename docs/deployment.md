@@ -430,9 +430,12 @@ the next run resumes from the per-set cursors.
 ### 8.3 Running the ingestion in production
 
 ```bash
+# As the service user (sudo -u cc212-production -i). The CLI only reads a .env in its
+# working directory; in production the env file lives outside the git tree and only
+# systemd loads it, so export it explicitly first:
 cd /opt/212cc/production/app
 pnpm build                      # the CLI runs from dist/
-# loads the same .env as the service (run as the service user)
+set -a; . /opt/212cc/production/shared/.env; set +a
 pnpm tcg:ingest                                           # defaults from the env vars
 pnpm tcg:ingest --games pokemon --sets <setId-or-slug> --max-requests 40
 pnpm tcg:ingest --set-limit 10 --dry-run                  # no writes
@@ -462,8 +465,8 @@ FROM "Tcg_Sync_Runs" ORDER BY "startedAt" DESC LIMIT 10;
 
 ### 8.5 Rotating the key
 
-Edit `TCGAPI_KEY` in the environment `.env`, `sudo systemctl restart 212cc-backend-<env>`, then run `pnpm tcg:ingest --dry-run` (or wait for the next nightly row) and
-confirm `Tcg_Sync_Runs` shows no new `errorSummary`. The old key must be revoked in the tcgapi.dev dashboard. `scripts/.env.import` (git-ignored) is only for the local import script.
+Edit `TCGAPI_KEY` in the environment `.env`, `sudo systemctl restart 212cc-backend-<env>`, then run a real, small `pnpm tcg:ingest --max-requests 3` (after loading the env as in 8.3; `--dry-run` writes no `Tcg_Sync_Runs` row, so it cannot confirm anything in the audit table) or wait for the next nightly row, and
+confirm the newest `Tcg_Sync_Runs` row has no `errorSummary`. The old key must be revoked in the tcgapi.dev dashboard. `scripts/.env.import` (git-ignored) is only for the local import script.
 
 ### 8.6 Taxonomy data migration (Story 15.1)
 
