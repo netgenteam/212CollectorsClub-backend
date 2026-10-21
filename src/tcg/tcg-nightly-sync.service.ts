@@ -40,6 +40,7 @@ interface SetWork {
   gameSlug: string;
   setId: string;
   setName: string;
+  cursorId: string | null;
 }
 
 /** Internal signal: budget/reserve reached before issuing a request. */
@@ -147,39 +148,35 @@ export class TcgNightlySyncService implements OnModuleInit {
 
     try {
       for (const work of await this.selectSets()) {
-        let page = 1;
-        for (let n = 0; n < MAX_PAGES_PER_SET; n++) {
-          guard();
-          result.requests += 1;
-          const res = await this.client.listSetCards(work.setId, page, {
-            setName: work.setName,
-            gameSlug: work.gameSlug,
+        if (!work.cursorId) {
+          // No cursor row => nothing to advance, it would be first every
+          // night. Audit it and move on without spending requests.
+          this.recordSetError(
+            result,
+            work,
+            new Error(
+              'no Tcg_Ingest_Cursors row for this set (run the ingest)',
+            ),
+          );
+          continue;
+        }
+        try {
+          await this.syncSet(work, result, threshold, guard, (r) => {
+            remaining = r;
           });
-          if (res.rateLimit.remaining !== null) {
-            remaining = res.rateLimit.remaining;
+        } catch (err) {
+          if (err instanceof QuotaStop || err instanceof TcgApiRateLimitError) {
+            throw err;
           }
-          const stored = await this.upsert.upsertPage(res.items, {
-            provider: this.client.provider,
-            gameSlug: work.gameSlug,
-            setName: work.setName,
-          });
-          result.cardsSynced += stored.created + stored.updated;
-          const ids = res.items.filter((c) => !c.skip).map((c) => c.externalId);
-          const changes = await this.applyProductPrices(ids);
-          result.productsUpdated += changes.length;
-          this.recordVariations(changes, threshold, result);
-
-          const done = !res.hasMore || res.items.length === 0;
-          page += 1;
-          if (done) {
-            // Cursor moves per set, only once the whole set was refreshed.
-            await this.prisma.tcgIngestCursor.updateMany({
+          // Non-quota failure (e.g. persistent 404): audit, skip the set and
+          // push it to the back of the queue so it is not first every night.
+          this.recordSetError(result, work, err);
+          await this.prisma.tcgIngestCursor
+            .updateMany({
               where: { gameSlug: work.gameSlug, setId: work.setId },
               data: { lastPriceSyncAt: new Date() },
-            });
-            result.setsCompleted += 1;
-            break;
-          }
+            })
+            .catch(() => undefined);
         }
       }
     } catch (err) {
@@ -234,6 +231,63 @@ export class TcgNightlySyncService implements OnModuleInit {
     return result;
   }
 
+  private recordSetError(
+    result: NightlySyncResult,
+    work: SetWork,
+    err: unknown,
+  ): void {
+    const msg =
+      err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    result.errorCount += 1;
+    const line = `set ${work.gameSlug}/${work.setId}: ${msg}`;
+    result.errorSummary = [result.errorSummary, line]
+      .filter(Boolean)
+      .join(' | ')
+      .slice(0, 500);
+    this.logger.error(`Nightly sync skipped ${line}`);
+  }
+
+  private async syncSet(
+    work: SetWork,
+    result: NightlySyncResult,
+    threshold: number,
+    guard: () => void,
+    setRemaining: (r: number) => void,
+  ): Promise<void> {
+    let page = 1;
+    for (let n = 0; n < MAX_PAGES_PER_SET; n++) {
+      guard();
+      result.requests += 1;
+      const res = await this.client.listSetCards(work.setId, page, {
+        setName: work.setName,
+        gameSlug: work.gameSlug,
+      });
+      if (res.rateLimit.remaining !== null)
+        setRemaining(res.rateLimit.remaining);
+      const stored = await this.upsert.upsertPage(res.items, {
+        provider: this.client.provider,
+        gameSlug: work.gameSlug,
+        setName: work.setName,
+      });
+      result.cardsSynced += stored.created + stored.updated;
+      const ids = res.items.filter((c) => !c.skip).map((c) => c.externalId);
+      const changes = await this.applyProductPrices(ids);
+      result.productsUpdated += changes.length;
+      this.recordVariations(changes, threshold, result);
+
+      page += 1;
+      if (!res.hasMore || res.items.length === 0) {
+        // Cursor moves per set, only once the whole set was refreshed.
+        await this.prisma.tcgIngestCursor.updateMany({
+          where: { gameSlug: work.gameSlug, setId: work.setId },
+          data: { lastPriceSyncAt: new Date() },
+        });
+        result.setsCompleted += 1;
+        return;
+      }
+    }
+  }
+
   /**
    * Linked sets first (any cursor status), then the other DONE sets; each
    * group by `lastPriceSyncAt ASC NULLS FIRST`. Only master cards of the
@@ -242,13 +296,14 @@ export class TcgNightlySyncService implements OnModuleInit {
   private async selectSets(): Promise<SetWork[]> {
     const provider = this.client.provider;
     const linked = await this.prisma.$queryRaw<SetWork[]>`
-      SELECT m."gameSlug", m."setId", min(m."setName") AS "setName"
+      SELECT m."gameSlug", m."setId", min(m."setName") AS "setName",
+        c.id AS "cursorId"
       FROM "Products" p
       JOIN "Master_Cards" m ON m.id = p."masterCardId"
       LEFT JOIN "Tcg_Ingest_Cursors" c
         ON c."gameSlug" = m."gameSlug" AND c."setId" = m."setId"
       WHERE m."externalProvider" = ${provider}
-      GROUP BY m."gameSlug", m."setId", c."lastPriceSyncAt"
+      GROUP BY m."gameSlug", m."setId", c.id, c."lastPriceSyncAt"
       ORDER BY c."lastPriceSyncAt" ASC NULLS FIRST, m."gameSlug", m."setId"
     `;
     const seen = new Set(linked.map((s) => `${s.gameSlug}:${s.setId}`));
@@ -268,6 +323,7 @@ export class TcgNightlySyncService implements OnModuleInit {
           gameSlug: c.gameSlug,
           setId: c.setId,
           setName: c.setName,
+          cursorId: c.id,
         })),
     ];
   }
@@ -292,6 +348,7 @@ export class TcgNightlySyncService implements OnModuleInit {
           AND m."marketPriceUsd" IS NOT NULL
           AND m."externalProvider" = ${this.client.provider}
           AND m."externalId" = ANY(${externalIds}::text[])
+        ORDER BY p.id
         FOR UPDATE OF p
       )
       UPDATE "Products" p

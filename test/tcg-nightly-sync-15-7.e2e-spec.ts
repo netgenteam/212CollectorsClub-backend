@@ -321,6 +321,58 @@ describe('TCG nightly sync (e2e, Story 15.7)', () => {
     expect(failed.status).toBe('FAILED');
   });
 
+  it('Story 15.8: a set failing with a non-quota error is audited, skipped and moved to the back; the others still sync', async () => {
+    const a = await link(1, 1, { priceUsd: '1.00' });
+    const b = await link(2, 1, { priceUsd: '1.00' });
+    const c = await link(3, 1, { priceUsd: '1.00' });
+    await prisma.tcgIngestCursor.update({
+      where: { gameSlug_setId: { gameSlug: GAME, setId: SET(1) } },
+      data: { lastPriceSyncAt: new Date('2020-01-01T00:00:00Z') },
+    });
+    fake.setPrice(CARD(1, 1), 5);
+    fake.setPrice(CARD(2, 1), 6);
+    fake.setPrice(CARD(3, 1), 7);
+    const original = fake.listSetCards.bind(fake);
+    fake.listSetCards = (...args: Parameters<typeof original>) =>
+      args[0] === SET(1)
+        ? Promise.reject(new Error('HTTP 404 set gone'))
+        : original(...args);
+    const res = await nightly.runNightlySync();
+    expect(res).toMatchObject({ status: 'PARTIAL', errorCount: 1 });
+    expect(res.errorSummary).toContain(SET(1));
+    expect(res.errorSummary).toContain('404');
+    expect(await price(a.id)).toBe(1);
+    expect(await price(b.id)).toBe(6);
+    expect(await price(c.id)).toBe(7);
+    const cur = await prisma.tcgIngestCursor.findUniqueOrThrow({
+      where: { gameSlug_setId: { gameSlug: GAME, setId: SET(1) } },
+    });
+    expect(cur.lastPriceSyncAt!.getFullYear()).toBeGreaterThanOrEqual(2026);
+    const run = await prisma.tcgSyncRun.findFirstOrThrow();
+    expect(run).toMatchObject({ status: 'PARTIAL', errorCount: 1 });
+
+    // Next night the broken set is no longer first.
+    fake.calls.length = 0;
+    await nightly.runNightlySync();
+    expect(fake.calls[0]).not.toContain(`listSetCards:${SET(1)}`);
+  });
+
+  it('Story 15.8: a linked set without cursor row is audited and skipped without requests', async () => {
+    await link(1, 1, { priceUsd: '1.00' });
+    const b = await link(2, 1, { priceUsd: '1.00' });
+    await prisma.tcgIngestCursor.delete({
+      where: { gameSlug_setId: { gameSlug: GAME, setId: SET(1) } },
+    });
+    fake.setPrice(CARD(2, 1), 6);
+    const res = await nightly.runNightlySync();
+    expect(res).toMatchObject({ status: 'PARTIAL', errorCount: 1 });
+    expect(res.errorSummary).toContain('no Tcg_Ingest_Cursors row');
+    expect(fake.calls.some((c) => c.includes(`listSetCards:${SET(1)}`))).toBe(
+      false,
+    );
+    expect(await price(b.id)).toBe(6);
+  });
+
   it('AC10: concurrent runs => exactly one proceeds; excludes the ingest; stale RUNNING recovered', async () => {
     await link(1, 1, { priceUsd: '1.00' });
     const [a, b] = await Promise.all([

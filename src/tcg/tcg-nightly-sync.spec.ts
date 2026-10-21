@@ -55,7 +55,9 @@ describe('TcgNightlySyncService (Story 15.7)', () => {
     const prisma = {
       $queryRaw: vi
         .fn()
-        .mockResolvedValue([{ gameSlug: 'g', setId: '1', setName: 'S' }]),
+        .mockResolvedValue([
+          { gameSlug: 'g', setId: '1', setName: 'S', cursorId: 'c1' },
+        ]),
       tcgIngestCursor: { findMany: vi.fn().mockResolvedValue([]) },
     };
     const { svc, syncRuns } = make(

@@ -390,6 +390,112 @@ Smoke afterwards: `POST /api/v1/payments/paypal/webhook` must answer 404 after t
 - [ ] Refund/dispute policy and who operates the manual refund procedure (7.5).
 - [ ] End-to-end test purchase in staging with test keys, then a small real purchase in production.
 
+## 8. tcgapi.dev, TCG ingestion and taxonomy (Epic 15, AD-51..AD-59)
+
+### 8.1 Environment variables
+
+Add to the same `/opt/212cc/<env>/shared/.env` files as the Stripe keys (the systemd units already load them with
+`EnvironmentFile=`, so nothing else in `deploy/` changes). Never commit a value; the key is sent only in the `X-API-Key` header and is never logged.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TCGAPI_KEY` | empty | Empty = in-memory `FakeTcgApiClient` (no network). Set = real tcgapi.dev client. |
+| `TCG_INGEST_GAMES` | `pokemon` | Comma-separated game slugs for `pnpm tcg:ingest`. |
+| `TCG_INGEST_SETS` | empty | Comma-separated set ids or slugs. Empty = the `TCG_INGEST_DEFAULT_SET_LIMIT` most recent sets per game. |
+| `TCG_INGEST_DEFAULT_SET_LIMIT` | `5` | Sets per game when `TCG_INGEST_SETS` is empty. |
+| `TCG_MAX_REQUESTS_PER_RUN` | `60` | Request budget of one ingest run. |
+| `TCG_REQUEST_RESERVE` | `20` | Runs stop when the API reports `remaining <=` this value (shared by ingest and nightly sync). |
+| `TCG_IMAGE_ALLOWED_HOSTS` | `product-images.tcgplayer.com,tcgplayer-cdn.tcgplayer.com` | Hosts the backend may download card images from (https/443 only). If tcgapi.dev serves images from another CDN, creating a product from a master card answers 502 until the host is added. |
+| `TCG_NIGHTLY_SYNC_ENABLED` | `false` | Must be exactly `true` (case-insensitive) to run the 03:00 UTC cron. |
+| `TCG_NIGHTLY_MAX_REQUESTS` | `50` | Request budget of one nightly run. |
+| `TCG_PRICE_ALERT_PCT` | `25` | Price changes above this percent are logged and stored in `Tcg_Sync_Runs.bigVariations`. |
+
+(`TCG_API_CLIENT` is an internal test switch; do not set it in production.)
+
+### 8.2 Plan quotas and impact
+
+| Plan | Requests/day |
+|---|---|
+| Free | 100 |
+| Hobby | 1 000 |
+| Starter | 2 500 |
+| Pro | 10 000 |
+
+The counter resets at 00:00 UTC. On the **Free plan (100/day)** a whole game cannot be ingested: each set costs about `ceil(cards/100)` requests plus
+the set listing, which is why the default is the 5 most recent sets. The nightly worker re-lists whole set pages (there is no bulk endpoint) and its budget
+(50) plus the reserve (20) must fit in what the ingest left for the day. If you ingest and keep the nightly worker on the same key,
+ingest first with a budget that leaves headroom, or raise the plan. Runs stop cleanly (status `PARTIAL`, `quotaExhausted=true`) on the budget, the reserve or HTTP 429;
+the next run resumes from the per-set cursors.
+
+### 8.3 Running the ingestion in production
+
+```bash
+cd /opt/212cc/production/app
+pnpm build                      # the CLI runs from dist/
+# loads the same .env as the service (run as the service user)
+pnpm tcg:ingest                                           # defaults from the env vars
+pnpm tcg:ingest --games pokemon --sets <setId-or-slug> --max-requests 40
+pnpm tcg:ingest --set-limit 10 --dry-run                  # no writes
+pnpm tcg:ingest --refresh-sets                            # re-read the set list
+```
+
+Resumable: each set keeps a cursor in `Tcg_Ingest_Cursors`; a run cut by quota ends `PARTIAL` (exit 0) and the next run continues without duplicates.
+Only one ingest/nightly run can be active (partial unique index on `Tcg_Sync_Runs`); a `RUNNING` row older than 2 h is marked `FAILED`. A network/DB error exits with code 1.
+Ingestion only writes `Master_Cards`; it never creates or changes Products.
+
+### 8.4 Nightly price sync
+
+- Cron `tcg-nightly-sync`, `0 3 * * *` UTC, registered always but a no-op unless `TCG_NIGHTLY_SYNC_ENABLED=true`.
+- It refreshes `Master_Cards` of sets that have linked products first, then other `DONE` sets, and updates `Products.priceUsd` only where `autoSyncPrice = true` and `isManual = false`
+  and the API price is not null. Order line snapshots are never touched.
+- A set that fails with a non-quota error (for example a persistent 404) or has no cursor row is recorded in `errorSummary`/`errorCount`, skipped, and moved to the back
+  of the queue (`lastPriceSyncAt` advanced); the remaining sets still run.
+- **Do not forget to enable it in production**: with the flag off, prices of linked products stay frozen at the value they had when the product was created.
+
+Read the audit with SQL (`psql`):
+
+```sql
+SELECT "startedAt", kind, status, "requestsUsed", "cardsSynced", "productsUpdated",
+       "errorCount", "quotaExhausted", "errorSummary", "bigVariations"
+FROM "Tcg_Sync_Runs" ORDER BY "startedAt" DESC LIMIT 10;
+```
+
+### 8.5 Rotating the key
+
+Edit `TCGAPI_KEY` in the environment `.env`, `sudo systemctl restart 212cc-backend-<env>`, then run `pnpm tcg:ingest --dry-run` (or wait for the next nightly row) and
+confirm `Tcg_Sync_Runs` shows no new `errorSummary`. The old key must be revoked in the tcgapi.dev dashboard. `scripts/.env.import` (git-ignored) is only for the local import script.
+
+### 8.6 Taxonomy data migration (Story 15.1)
+
+Migration `20261020100000_epic15_standard_taxonomy` (data only, idempotent, no fixed UUIDs); `pnpm prisma:deploy` applies it. On deploy it:
+- creates the 3 standard ROOT categories by slug when missing: `franquicia-tcg`, `formato-sellado`, `idioma-edicion` (`cartas-sueltas` and `sobres-y-cajas` already exist and are protected);
+- gives orphan SUBCATEGORY rows the root of their dimension as `parentId` (FRANCHISE, SEALED_FORMAT, EDITION_LANGUAGE);
+- cleans obsolete childless roots: **deletes** them if no product uses them (e.g. `Prueba-categoria` when unused) and **deactivates** them (`isActive=false`, not deleted) if any product references them. In particular `ediciones-especiales` and `mazos-preconstruidos` are deactivated when they have products, so those products keep their category;
+- removes SEALED_FORMAT tags from SINGLE_CARD products and adds the franchise tag to products of the 5 supported games.
+The NOTICE lines list each root as deleted/deactivated and repeat "deactivated" on re-runs (cosmetic). A clean seeded DB still creates `ediciones-especiales`/`mazos-preconstruidos` active (the seed products reference them).
+
+### 8.7 Deployment checklist
+
+- [ ] Back up the DB, then `pnpm prisma:deploy`; `pnpm prisma migrate status` reports up to date.
+- [ ] Verify roots/children: `GET /api/v1/categories?type=ROOT` and `GET /api/v1/catalog/facets` (`franquicia-tcg`, `formato-sellado` groups).
+- [ ] Disable the leftover `Prueba-categoria` (and any other test category) in the admin if it survived the migration (it is only deactivated when products use it).
+- [ ] Check that the two deactivated roots (8.6) are what the owners expect.
+- [ ] `TCGAPI_KEY` set in the environment `.env` only; `grep -r` of the repo for the key value returns nothing.
+- [ ] Run the first `pnpm tcg:ingest` with a small `--max-requests`, then confirm a `Tcg_Sync_Runs` row and `Master_Cards` rows.
+- [ ] Set `TCG_NIGHTLY_SYNC_ENABLED=true` in production and restart; confirm the next 03:00 UTC `NIGHTLY` row exists.
+- [ ] Confirm `TCG_IMAGE_ALLOWED_HOSTS` covers the image hosts that really appear in `Master_Cards.imageLarge`.
+- [ ] Smoke: boot without `TCGAPI_KEY` (fake client) is fine for staging; production must have the key.
+
+### 8.8 Contract changes for the frontend (all additive except where noted)
+
+- Pagination `meta` on `GET /products` and the other paginated lists adds `hasNextPage` / `hasPreviousPage` (`GET /me/orders` keeps its original four fields).
+- Category filter: `categoryId[]` is accepted as an alias of `categoryId` (merged, deduplicated, uuid, max 20). **Behaviour change:** `?categoryId[]=` (empty) now answers 400, like `?categoryId=`; before it was ignored.
+- New `GET /admin/tcg-master-cards/search` (admin auth): response `{ data, meta }` where each item has `id`, `externalId`, name, set, number, rarity, `printing` (Normal/Foil are separate entries), images, `apiPriceUsd`, `alreadyInInventory`, `currentInventoryStock`.
+- `POST /admin/products` accepts `masterCardId` + `stock` (multipart; also `isActive`, `categoryIds`, grading fields, `isPreorder`, `releaseDate`). Name, slug, description, franchise, type, rarity, language, price, category and images are derived from the master card; any of those sent alongside are ignored (uploaded files are deleted). `singleCondition` is **not** accepted. The manual creation flow is unchanged (image and price required).
+- Admin product responses include `masterCardId`, `isManual`, `autoSyncPrice`, `lastMarketSyncAt`. `PATCH /admin/products/:id` accepts `autoSyncPrice` (boolean).
+- New errors on creation from a master card: 404 `MASTER_CARD_NOT_FOUND`, 422 `MASTER_CARD_NO_PRICE`, 502 `MASTER_CARD_IMAGE_UNAVAILABLE`, 409 `PRODUCT_SLUG_TAKEN`; `PATCH autoSyncPrice` on a product without master card gives 409 `NOT_A_LINKED_PRODUCT`; missing `cartas-sueltas` category gives 500 `SINGLES_CATEGORY_MISSING`.
+- Public contracts of `GET /products`, `/catalog/facets`, `/categories` are otherwise unchanged (Epic 13/14 regression suites pass unmodified).
+
 ## Verification status (read this before assuming any of the above works)
 
 **Verified in this sandbox (no VPS, no SSH, no real GitHub secrets available):**
