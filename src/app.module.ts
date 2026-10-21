@@ -17,6 +17,7 @@ import { AdminCatalogModule } from './admin-catalog/admin-catalog.module.js';
 import { AdminLandingModule } from './admin-landing/admin-landing.module.js';
 import { CustomerAuthModule } from './customer-auth/customer-auth.module.js';
 import { AdminCustomersModule } from './admin-customers/admin-customers.module.js';
+import { AdminTcgModule } from './admin-tcg/admin-tcg.module.js';
 import { WishlistModule } from './wishlist/wishlist.module.js';
 
 @Module({
@@ -61,6 +62,8 @@ import { WishlistModule } from './wishlist/wishlist.module.js';
     CustomerAuthModule,
     // Story 13.1 (FR-53): TEMPORARY manual email verification, flag-gated.
     AdminCustomersModule,
+    // Story 15.5 (FR-68, AD-56): admin master card search.
+    AdminTcgModule,
   ],
   controllers: [AppController],
   providers: [AppService],
