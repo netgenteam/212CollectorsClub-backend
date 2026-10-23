@@ -18,6 +18,7 @@ import { TcgCliModule } from './../src/tcg/cli/tcg-cli.module.js';
 import {
   snapshotSyncRuns,
   restoreSyncRuns,
+  stashCursors,
   type SyncRuns,
 } from './helpers/db-snapshot.js';
 
@@ -73,6 +74,9 @@ describe('TCG ingestion (e2e, Story 15.4)', () => {
 
   // Pre-existing real sync runs: snapshotted once, restored after cleaning.
   let runsSnapshot: SyncRuns | null = null;
+  // Foreign real `pokemon` cursors, removed while a test runs so set discovery
+  // happens, then re-created verbatim.
+  let unstash: (() => Promise<void>) | null = null;
   const clean = async () => {
     await prisma.masterCard.deleteMany({
       where: {
@@ -108,11 +112,16 @@ describe('TCG ingestion (e2e, Story 15.4)', () => {
     prisma = app.get(PrismaService);
     ingest = app.get(TcgIngestService);
     await clean();
+    unstash = await stashCursors(prisma, {
+      gameSlug: 'pokemon',
+      NOT: { setName: { startsWith: 'Fake pokemon' } },
+    });
   });
 
   afterEach(async () => {
     await clean();
     await restoreSyncRuns(prisma, runsSnapshot ?? []);
+    await unstash?.();
     await app.close();
   });
 

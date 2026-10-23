@@ -101,3 +101,22 @@ export async function parkForeignDoneCursors(
       });
   };
 }
+
+/**
+ * Ingestion only discovers a game's sets when it has NO cursors, so a suite
+ * that exercises discovery for a real game slug must not see foreign ones.
+ * Removes the cursors matching `where` and returns a function that
+ * re-creates them verbatim (status, nextPage, updatedAt, ...).
+ */
+export async function stashCursors(
+  prisma: PrismaService,
+  where: Prisma.TcgIngestCursorWhereInput,
+): Promise<() => Promise<void>> {
+  const rows = await prisma.tcgIngestCursor.findMany({ where });
+  await prisma.tcgIngestCursor.deleteMany({
+    where: { id: { in: rows.map((r) => r.id) } },
+  });
+  return async () => {
+    if (rows.length) await prisma.tcgIngestCursor.createMany({ data: rows });
+  };
+}
