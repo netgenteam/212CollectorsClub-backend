@@ -406,11 +406,12 @@ Add to the same `/opt/212cc/<env>/shared/.env` files as the Stripe keys (the sys
 | `TCG_MAX_REQUESTS_PER_RUN` | `60` | Request budget of one ingest run. |
 | `TCG_REQUEST_RESERVE` | `20` | Runs stop when the API reports `remaining <=` this value (shared by ingest and nightly sync). |
 | `TCG_IMAGE_ALLOWED_HOSTS` | `product-images.tcgplayer.com,tcgplayer-cdn.tcgplayer.com` | Hosts the backend may download card images from (https/443 only). If tcgapi.dev serves images from another CDN, creating a product from a master card answers 502 until the host is added. |
+| `TCG_REMOTE_INGEST_MAX_CARDS` | `10` | **Temporary dev/testing limit** (Story 15.9 AC12): max cards stored per run started through `POST /admin/tcg-master-cards/ingest` (a body `maxCards` above it is clamped). Does not apply to `pnpm tcg:ingest` or the nightly worker. Raise it (e.g. `1000000`) when moving to production. |
 | `TCG_NIGHTLY_SYNC_ENABLED` | `false` | Must be exactly `true` (case-insensitive) to run the 03:00 UTC cron. |
 | `TCG_NIGHTLY_MAX_REQUESTS` | `50` | Request budget of one nightly run. |
 | `TCG_PRICE_ALERT_PCT` | `25` | Price changes above this percent are logged and stored in `Tcg_Sync_Runs.bigVariations`. |
 
-(`TCG_API_CLIENT` is an internal test switch; do not set it in production.)
+(`TCG_API_CLIENT` and `TCG_ALLOW_FAKE_REMOTE_INGEST` are internal test switches; never set them in production.)
 
 ### 8.2 Plan quotas and impact
 
@@ -445,6 +446,20 @@ pnpm tcg:ingest --refresh-sets                            # re-read the set list
 Resumable: each set keeps a cursor in `Tcg_Ingest_Cursors`; a run cut by quota ends `PARTIAL` (exit 0) and the next run continues without duplicates.
 Only one ingest/nightly run can be active (partial unique index on `Tcg_Sync_Runs`); a `RUNNING` row older than 2 h is marked `FAILED`. A network/DB error exits with code 1.
 Ingestion only writes `Master_Cards`; it never creates or changes Products.
+
+#### Remote ingestion (no SSH, Story 15.9)
+
+The production env must contain `TCGAPI_KEY`; without it the endpoint answers `503 TCG_API_NOT_CONFIGURED` and creates nothing. From your machine:
+
+```bash
+# scripts/.env.import (or inline env): API_BASE_URL, ADMIN_USER, ADMIN_PASSWORD  (no TCGAPI_KEY needed)
+node scripts/ingest-master-cards.mjs --games pokemon --sets <setId-or-slug> --max-requests 40
+node scripts/ingest-master-cards.mjs --status      # only prints Master_Cards stats
+```
+
+Endpoints (admin token): `POST /api/v1/admin/tcg-master-cards/ingest` (202 `{runId, status:'RUNNING'}`, 409 `TCG_SYNC_ALREADY_RUNNING`, 503 `TCG_API_NOT_CONFIGURED`), `GET .../runs/:id`, `GET .../stats`.
+The run continues in the background on the server; the script polls it (exit 0 on `SUCCEEDED`/`PARTIAL`, 1 on `FAILED`/error).
+**Temporary cap:** each remote run stores at most `TCG_REMOTE_INGEST_MAX_CARDS` cards (default 10) and ends `PARTIAL` with `summary.cardCapReached`; run again to continue (cursors are kept, no duplicates or gaps). Raise it for production.
 
 ### 8.4 Nightly price sync
 

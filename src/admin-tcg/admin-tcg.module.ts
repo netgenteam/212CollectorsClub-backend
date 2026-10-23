@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { PassportModule } from '@nestjs/passport';
+import { TcgModule } from '../tcg/tcg.module.js';
 import { AdminTcgController } from './admin-tcg.controller.js';
 import { AdminTcgService } from './admin-tcg.service.js';
 
@@ -8,7 +9,10 @@ import { AdminTcgService } from './admin-tcg.service.js';
  * `AuthModuleOptions` reason as `AdminCatalogModule` / `AdminCustomersModule`.
  */
 @Module({
-  imports: [PassportModule.register({ defaultStrategy: 'admin-jwt' })],
+  imports: [
+    PassportModule.register({ defaultStrategy: 'admin-jwt' }),
+    TcgModule,
+  ],
   controllers: [AdminTcgController],
   providers: [AdminTcgService],
 })

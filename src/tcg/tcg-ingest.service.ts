@@ -20,6 +20,11 @@ export interface IngestOptions {
   refreshSets: boolean;
   /** Bound used when `sets` is not given (never walks a whole game). */
   setLimit: number;
+  /**
+   * Story 15.9 (AC12): stop once this many cards were stored in the run.
+   * Undefined = no cap (CLI, nightly worker).
+   */
+  maxCards?: number;
 }
 
 export interface IngestSummary {
@@ -29,6 +34,8 @@ export interface IngestSummary {
   errors: number;
   requests: number;
   quotaExhausted: boolean;
+  /** Present (true) only when a `maxCards` cap ended the run. */
+  cardCapReached?: boolean;
 }
 
 export interface IngestPlanEntry {
@@ -50,6 +57,15 @@ export interface IngestResult {
   plan: IngestPlanEntry[];
   runId: string | null;
   errorSummary: string | null;
+}
+
+export interface StartedRun {
+  opts: IngestOptions;
+  /** Null for dry runs and when another run is active. */
+  runId: string | null;
+  alreadyRunning: boolean;
+  /** Id of the RUNNING row that blocked this start, when known. */
+  activeRunId?: string | null;
 }
 
 export const DEFAULT_INGEST_GAMES = ['pokemon'];
@@ -74,6 +90,9 @@ interface CursorLike {
 
 /** Internal signal: budget/reserve reached before issuing a request. */
 class QuotaStop extends Error {}
+
+/** Internal signal: the per-run `maxCards` cap was reached (Story 15.9). */
+class CardCapStop extends Error {}
 
 interface RunState {
   summary: IngestSummary;
@@ -136,6 +155,9 @@ export class TcgIngestService {
         ),
       dryRun: overrides.dryRun ?? false,
       refreshSets: overrides.refreshSets ?? false,
+      ...(overrides.maxCards !== undefined
+        ? { maxCards: overrides.maxCards }
+        : {}),
       setLimit:
         overrides.setLimit ??
         positiveInt(
@@ -145,8 +167,34 @@ export class TcgIngestService {
     };
   }
 
-  async run(overrides: Partial<IngestOptions> = {}): Promise<IngestResult> {
+  /**
+   * Story 15.9: registers the run (synchronously, so a caller can return its
+   * id) without executing it. Pair with `execute()`. A dry run writes no row.
+   */
+  async startRun(overrides: Partial<IngestOptions> = {}): Promise<StartedRun> {
     const opts = this.resolveOptions(overrides);
+    if (opts.dryRun) return { opts, runId: null, alreadyRunning: false };
+    const row = await this.syncRuns.tryStart('INGEST');
+    if (!row) {
+      this.logger.warn('Another sync run is already running — exiting.');
+      const active = await this.syncRuns.findRunning();
+      return {
+        opts,
+        runId: null,
+        alreadyRunning: true,
+        activeRunId: active?.id ?? null,
+      };
+    }
+    return { opts, runId: row.id, alreadyRunning: false };
+  }
+
+  async run(overrides: Partial<IngestOptions> = {}): Promise<IngestResult> {
+    return this.execute(await this.startRun(overrides));
+  }
+
+  /** Runs a started ingestion to completion and closes its audit row. */
+  async execute(started: StartedRun): Promise<IngestResult> {
+    const { opts, runId } = started;
     const state: RunState = {
       summary: {
         created: 0,
@@ -162,23 +210,17 @@ export class TcgIngestService {
       discoveredGames: new Set(),
     };
 
-    let runId: string | null = null;
-    if (!opts.dryRun) {
-      const row = await this.syncRuns.tryStart('INGEST');
-      if (!row) {
-        this.logger.warn('Another sync run is already running — exiting.');
-        return {
-          alreadyRunning: true,
-          status: 'ALREADY_RUNNING',
-          summary: state.summary,
-          remainingQuota: null,
-          setsCompleted: 0,
-          plan: [],
-          runId: null,
-          errorSummary: null,
-        };
-      }
-      runId = row.id;
+    if (started.alreadyRunning) {
+      return {
+        alreadyRunning: true,
+        status: 'ALREADY_RUNNING',
+        summary: state.summary,
+        remainingQuota: null,
+        setsCompleted: 0,
+        plan: [],
+        runId: null,
+        errorSummary: null,
+      };
     }
 
     let errorSummary: string | null = null;
@@ -187,7 +229,13 @@ export class TcgIngestService {
         await this.processGame(game, opts, state);
       }
     } catch (err) {
-      if (err instanceof QuotaStop || err instanceof TcgApiRateLimitError) {
+      if (err instanceof CardCapStop) {
+        state.summary.cardCapReached = true;
+        this.logger.warn(`Stopping cleanly: ${err.message}`);
+      } else if (
+        err instanceof QuotaStop ||
+        err instanceof TcgApiRateLimitError
+      ) {
         state.summary.quotaExhausted = true;
         this.logger.warn(
           err instanceof QuotaStop
@@ -206,7 +254,7 @@ export class TcgIngestService {
     const status =
       state.summary.errors > 0
         ? 'FAILED'
-        : state.summary.quotaExhausted
+        : state.summary.quotaExhausted || state.summary.cardCapReached
           ? 'PARTIAL'
           : 'SUCCEEDED';
 
@@ -218,7 +266,12 @@ export class TcgIngestService {
         errorCount: state.summary.errors,
         errorSummary,
         quotaExhausted: state.summary.quotaExhausted,
-        summary: { ...state.summary },
+        summary: {
+          ...state.summary,
+          ...(state.remaining !== null
+            ? { quotaRemaining: state.remaining }
+            : {}),
+        },
       });
     }
 
@@ -390,7 +443,31 @@ export class TcgIngestService {
           gameSlug: cursor.gameSlug,
         }),
       );
-      const stored = await this.upsert.upsertPage(res.items, {
+      let items = res.items;
+      // Story 15.9 (AC12): with a card cap only not-yet-stored cards count and
+      // the cursor moves past this page only once all of them were stored, so
+      // a later run neither duplicates nor skips cards.
+      let pageComplete = true;
+      if (opts.maxCards !== undefined) {
+        const room = opts.maxCards - this.storedCount(state);
+        const known = new Set(
+          (
+            await this.prisma.masterCard.findMany({
+              where: {
+                externalProvider: this.client.provider,
+                externalId: { in: res.items.map((c) => c.externalId) },
+              },
+              select: { externalId: true },
+            })
+          ).map((c) => c.externalId),
+        );
+        const fresh = res.items.filter(
+          (c) => !c.skip && !known.has(c.externalId),
+        );
+        items = fresh.slice(0, room);
+        pageComplete = fresh.length <= room;
+      }
+      const stored = await this.upsert.upsertPage(items, {
         provider: this.client.provider,
         gameSlug: cursor.gameSlug,
         setName: cursor.setName,
@@ -398,6 +475,16 @@ export class TcgIngestService {
       state.summary.created += stored.created;
       state.summary.updated += stored.updated;
       state.summary.skipped += stored.skipped;
+
+      if (!pageComplete) {
+        await this.prisma.tcgIngestCursor.update({
+          where: {
+            gameSlug_setId: { gameSlug: cursor.gameSlug, setId: cursor.setId },
+          },
+          data: { status: 'IN_PROGRESS' },
+        });
+        throw new CardCapStop(`card cap reached (${opts.maxCards})`);
+      }
 
       // Empty page with has_more=true would loop forever: treat as the end.
       const done = !res.hasMore || res.items.length === 0;
@@ -418,12 +505,22 @@ export class TcgIngestService {
     }
   }
 
+  private storedCount(state: RunState): number {
+    return state.summary.created + state.summary.updated;
+  }
+
   /** Quota guard + request counter around every tcgapi.dev call. */
   private async request<T>(
     opts: IngestOptions,
     state: RunState,
     fn: () => Promise<TcgPage<T>>,
   ): Promise<TcgPage<T>> {
+    if (
+      opts.maxCards !== undefined &&
+      this.storedCount(state) >= opts.maxCards
+    ) {
+      throw new CardCapStop(`card cap reached (${opts.maxCards})`);
+    }
     if (state.summary.requests >= opts.maxRequests) {
       throw new QuotaStop(`request budget reached (${opts.maxRequests})`);
     }

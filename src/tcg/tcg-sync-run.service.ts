@@ -47,6 +47,11 @@ export class TcgSyncRunService {
     }
   }
 
+  /** The currently active run (any kind), if any. */
+  findRunning() {
+    return this.prisma.tcgSyncRun.findFirst({ where: { status: 'RUNNING' } });
+  }
+
   async failStaleRuns(): Promise<number> {
     const { count } = await this.prisma.tcgSyncRun.updateMany({
       where: {
