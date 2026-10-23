@@ -3,6 +3,7 @@ import { ApiException } from '../common/api-exception.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { LANDING_SECTION_PACK_SIMULATOR } from '../admin-landing/landing-content.constants.js';
+import { SimulatorPoolCache } from './pool-cache.js';
 import { parseSimulatorConfig } from './simulator-config.validation.js';
 import {
   defaultSimulatorConfig,
@@ -13,7 +14,10 @@ export const SIMULATOR_CONFIG_KEY = 'config';
 
 @Injectable()
 export class SimulatorConfigService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly poolCache: SimulatorPoolCache,
+  ) {}
 
   /** Effective config: the stored one, or the defaults when absent/corrupt. */
   async getEffective(): Promise<SimulatorConfig> {
@@ -83,6 +87,7 @@ export class SimulatorConfigService {
       },
       update: { valueType: 'json', value, updatedById: adminUserId },
     });
+    this.poolCache.clear(); // AD-67: pools and public sets list rebuilt on next use
     return cfg;
   }
 }

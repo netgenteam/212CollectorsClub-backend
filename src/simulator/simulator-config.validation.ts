@@ -14,6 +14,8 @@ export const MAX_SETS = 50;
 export const MAX_CARDS_PER_PACK = 15;
 const LANDING_IMAGE_RE = /^\/uploads\/public\/landing\/[A-Za-z0-9_\-./]+$/;
 const SLUG_RE = /^[A-Za-z0-9_.-]{1,100}$/;
+/** Would pollute/shadow Object.prototype when used as an object key. */
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj =>
@@ -70,8 +72,10 @@ function parseTemplate(v: unknown, path: string): Template {
       for (const [tier, w] of Object.entries(raw.odds)) {
         if (!RARE_SLOT_TIERS.includes(tier as PackTier))
           invalid(`${p}.odds.${tier}`, 'tier not allowed in a rare slot');
-        if (typeof w !== 'number' || !Number.isFinite(w) || w < 0 || w > 100)
-          invalid(`${p}.odds.${tier}`, 'must be a number 0..100');
+        // Values > 100 are not a shape error: the sum is then != 100, which
+        // AD-66 reports as SIMULATOR_ODDS_INVALID_SUM (checked in checkOddsSum).
+        if (typeof w !== 'number' || !Number.isFinite(w) || w < 0)
+          invalid(`${p}.odds.${tier}`, 'must be a non-negative number');
         odds[tier as PackTier] = w;
       }
       rareCount++;
@@ -111,7 +115,8 @@ export function parseSimulatorConfig(body: unknown): SimulatorConfig {
   if (!isObj(body.templates)) invalid('templates', 'must be an object');
   const templates: Record<string, Template> = {};
   for (const [game, t] of Object.entries(body.templates)) {
-    if (!SLUG_RE.test(game)) invalid(`templates.${game}`, 'invalid game slug');
+    if (FORBIDDEN_KEYS.has(game) || !SLUG_RE.test(game))
+      invalid(`templates.${game}`, 'invalid game slug');
     templates[game] = parseTemplate(t, `templates.${game}`);
   }
   if (!Array.isArray(body.sets) || body.sets.length > MAX_SETS)
@@ -125,7 +130,11 @@ export function parseSimulatorConfig(body: unknown): SimulatorConfig {
       ['gameSlug', 'setId', 'displayName', 'imageUrl', 'template'],
       p,
     );
-    if (typeof raw.gameSlug !== 'string' || !SLUG_RE.test(raw.gameSlug))
+    if (
+      typeof raw.gameSlug !== 'string' ||
+      FORBIDDEN_KEYS.has(raw.gameSlug) ||
+      !SLUG_RE.test(raw.gameSlug)
+    )
       invalid(`${p}.gameSlug`, 'invalid');
     if (typeof raw.setId !== 'string' || !raw.setId || raw.setId.length > 100)
       invalid(`${p}.setId`, 'invalid');

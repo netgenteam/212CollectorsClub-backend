@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { parseSimulatorConfig } from './simulator-config.validation.js';
-import { defaultSimulatorConfig } from './simulator-defaults.js';
+import {
+  defaultPokemonTemplate,
+  defaultSimulatorConfig,
+} from './simulator-defaults.js';
 
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 const code = (fn: () => unknown): string => {
@@ -46,9 +49,27 @@ describe('parseSimulatorConfig', () => {
     expect(code(() => parseSimulatorConfig(withOdds({ COMMON: 100 })))).toBe(
       'SIMULATOR_CONFIG_INVALID',
     );
-    expect(code(() => parseSimulatorConfig(withOdds({ RARE: 101 })))).toBe(
+    expect(code(() => parseSimulatorConfig(withOdds({ RARE: -1 })))).toBe(
       'SIMULATOR_CONFIG_INVALID',
     );
+  });
+  it('a single tier with value > 100 is a bad SUM (AD-66), not a shape error', () => {
+    expect(code(() => parseSimulatorConfig(withOdds({ RARE: 101 })))).toBe(
+      'SIMULATOR_ODDS_INVALID_SUM',
+    );
+    expect(code(() => parseSimulatorConfig(withOdds({ RARE: 1e9 })))).toBe(
+      'SIMULATOR_ODDS_INVALID_SUM',
+    );
+  });
+  it('rejects prototype-polluting game slugs with 400 instead of dropping them', () => {
+    for (const slug of ['__proto__', 'constructor', 'prototype']) {
+      const body = JSON.parse(
+        `{"templates":{"${slug}":${JSON.stringify(defaultPokemonTemplate())}},"sets":[]}`,
+      ) as unknown;
+      expect(code(() => parseSimulatorConfig(body))).toBe(
+        'SIMULATOR_CONFIG_INVALID',
+      );
+    }
   });
   it('slot structure rules', () => {
     const rare = { kind: 'rare', odds: { RARE: 100 } };
