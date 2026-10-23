@@ -601,3 +601,20 @@ are a TEMPORARY workaround until real SMTP exists (PRD §10). Before launch:
 - [ ] Until real SMTP exists, confirm `MANUAL_EMAIL_VERIFY_ENABLED` is `false`
       or absent in staging and production (the endpoint then answers 404; this
       is asserted by the "flag off" block of that e2e spec).
+
+## Simulator: validating rarity mapping (Story 16.3, assumption (f) unverified)
+
+`mapPackTier` (`src/simulator/pack-tiers.ts`) and the reverse-holo detection
+(`REVERSE_PRINTING_PATTERN`, `/reverse/i` over `Master_Cards.printing`) are based on
+Pokemon Scarlet & Violet knowledge, NOT on real tcgapi data: the local DB had 0
+`Master_Cards` when written. After the **first real ingestion** of a Pokemon set
+(never in tests; they use fixtures/`FakeTcgApiClient`):
+
+1. `SELECT rarity, count(*) FROM "Master_Cards" WHERE "gameSlug"='pokemon' GROUP BY 1 ORDER BY 2 DESC;`
+2. `SELECT DISTINCT printing FROM "Master_Cards";`
+3. Call `GET /api/v1/admin/simulator/sets` (admin) and review, per set,
+   `unmappedRarities` (raw values mapped to `null`, i.e. excluded from packs) and
+   `hasReversePrintings` (false means the printing label differs from `reverse`).
+4. Adjust **only the tables** in `pack-tiers.ts` (`EXACT_TIERS`, `FALLBACK_RULES`,
+   `REVERSE_PRINTING_PATTERN`, and the matching `~* 'reverse'` in
+   `simulator-sets.service.ts`) and re-check `tierCoverage`.

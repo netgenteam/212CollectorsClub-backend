@@ -243,6 +243,14 @@ export class LandingContentService {
       );
     }
 
+    if (key === 'config') {
+      throw new ApiException(
+        HttpStatus.BAD_REQUEST,
+        'LANDING_KEY_RESERVED',
+        'The pack_simulator "config" key is reserved: use PUT /api/v1/admin/simulator/config (validated endpoint).',
+      );
+    }
+
     assertPackSimulatorValueWithinLimits(dto.value);
 
     return this.prisma.landingConfigEntry.upsert({
