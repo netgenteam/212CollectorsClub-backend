@@ -70,3 +70,14 @@ export const MAX_PRODUCT_IMAGE_BYTES = 10 * 1024 * 1024;
  * (either `POST .../products` at creation, or `POST .../products/:id/
  * images`) — a sane upper bound, not a fixed AC. */
 export const MAX_PRODUCT_IMAGES_PER_REQUEST = 10;
+
+/**
+ * Story 16.2 (AD-64): landing CMS images. Under `uploads/public/` (not
+ * `uploads/landing/`) because only that root is statically served.
+ */
+export const LANDING_IMAGES_SUBDIR = 'landing';
+export const LANDING_IMAGES_DIR = join(
+  UPLOADS_PUBLIC_ROOT,
+  LANDING_IMAGES_SUBDIR,
+);
+export const LANDING_IMAGES_URL_PREFIX = `${PUBLIC_STATIC_PREFIX}${LANDING_IMAGES_SUBDIR}/`;

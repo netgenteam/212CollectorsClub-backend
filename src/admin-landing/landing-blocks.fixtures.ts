@@ -31,7 +31,7 @@ export function validBlock(
         cardImageUrls: [
           '/img/card-1.webp',
           '/img/card-2.png',
-          '/uploads/public/landing/0b5d6a3e-1c1e-4b57-9d0a-2a8f2c7e9a10.webp',
+          '/img/card-3.webp',
         ],
       };
     case 'manifesto':

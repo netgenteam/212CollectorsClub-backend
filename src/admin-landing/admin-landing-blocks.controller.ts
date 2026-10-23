@@ -51,7 +51,7 @@ const UNKNOWN_BLOCK = {
  * `home/*` blocks with a draft/publish cycle. Shares the
  * `admin/landing-content` prefix with the legacy controller; the routes
  * (`blocks/...`, `publish`) never collide with its `texts|banners|...` ones.
- * `GET draft` and `vitrina` resolution arrive in Story 16.2.
+ * Story 16.2 adds `GET draft` (effective values, vitrina expanded).
  */
 @ApiTags('admin-landing')
 @ApiBearerAuth('admin-jwt')
@@ -70,6 +70,19 @@ export class AdminLandingBlocksController {
   @ApiResponse(UNAUTHORIZED)
   listBlocks(): Promise<LandingBlockListResponseDto> {
     return this.blocksService.listBlocks();
+  }
+
+  @Get('draft')
+  @ApiOperation({
+    summary:
+      'Effective Home content for the preview (draft if any, else published)',
+    description:
+      'Returns { blocks, draftBlocks }: per block the draft when it exists, otherwise the published value (blocks with neither are omitted); vitrina carries the expanded in-stock `products` like the public GET.',
+  })
+  @ApiResponse({ status: HttpStatus.OK })
+  @ApiResponse(UNAUTHORIZED)
+  getDraft() {
+    return this.blocksService.getEffectiveDraft();
   }
 
   @Get('blocks/:block')

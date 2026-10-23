@@ -133,14 +133,29 @@ describe('validateLandingBlock', () => {
 
   it('rejects heroScene urls outside the allowed shapes', async () => {
     const base = validBlock('heroScene') as { cardImageUrls: string[] };
-    const errors = await errorsOf('heroScene', {
-      ...base,
-      packImageUrl: 'https://evil.com/x.png',
-      cardImageUrls: ['/img/a.webp', '/etc/passwd', '/img/c.gif'],
+    for (const url of [
+      'https://evil.com/x.png',
+      '/uploads/products/x.png',
+      '/img/../etc/x.png',
+      '/img/c.gif',
+    ]) {
+      await expect(
+        validateLandingBlock('heroScene', { ...base, packImageUrl: url }),
+      ).rejects.toMatchObject({
+        response: { errorCode: 'LANDING_URL_NOT_ALLOWED' },
+      });
+    }
+    await expect(
+      validateLandingBlock('heroScene', {
+        ...base,
+        cardImageUrls: ['/img/a.webp', '/etc/passwd', '/img/c.avif'],
+      }),
+    ).rejects.toMatchObject({
+      response: {
+        errorCode: 'LANDING_URL_NOT_ALLOWED',
+        details: { errors: [{ path: 'cardImageUrls.1' }] },
+      },
     });
-    expect(errors.map((e) => e.path)).toEqual(
-      expect.arrayContaining(['packImageUrl', 'cardImageUrls']),
-    );
   });
 
   it('rejects payloads over 20 KB', async () => {

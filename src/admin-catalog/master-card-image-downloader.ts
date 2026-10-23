@@ -3,6 +3,7 @@ import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { detectImageMime } from '../common/image-mime.js';
 import {
   ALLOWED_PRODUCT_IMAGE_MIME_TYPES,
   MAX_PRODUCT_IMAGE_BYTES,
@@ -50,20 +51,7 @@ type FetchLike = (
   init: { redirect: 'manual'; signal: AbortSignal; headers: HeadersInit },
 ) => Promise<Response>;
 
-/** Declared mime type of the bytes, from their magic number. */
-export function detectImageMime(bytes: Uint8Array): string | null {
-  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-    return 'image/jpeg';
-  }
-  const png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-  if (png.every((b, i) => bytes[i] === b)) return 'image/png';
-  const ascii = (from: number, to: number) =>
-    String.fromCharCode(...bytes.subarray(from, to));
-  if (bytes.length >= 12 && ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') {
-    return 'image/webp';
-  }
-  return null;
-}
+export { detectImageMime };
 
 /**
  * Story 15.6 (AD-57, A33, R5). Downloads a master card image into the product

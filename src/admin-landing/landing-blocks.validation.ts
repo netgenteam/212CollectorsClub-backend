@@ -1,6 +1,7 @@
 import { HttpStatus } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate, type ValidationError } from 'class-validator';
+import { HERO_SCENE_URL_PATTERN } from './dto/blocks/home-blocks.dto.js';
 import { ApiException } from '../common/api-exception.js';
 import {
   TITLE_LINES_MAX_SEGMENTS,
@@ -153,5 +154,41 @@ export async function validateLandingBlock(
   if (errors.length > 0) {
     throw invalid(errors);
   }
+  if (block === 'heroScene') assertHeroSceneUrls(body);
   return body;
+}
+
+/**
+ * Story 16.2 (AD-64): every heroScene url must be `/img/<file>.<ext>` or a
+ * landing upload (`/uploads/public/landing/<uuid>.<ext>`); anything else
+ * (absolute urls, other upload folders, `..`) -> 400 `LANDING_URL_NOT_ALLOWED`.
+ */
+function assertHeroSceneUrls(body: Record<string, unknown>): void {
+  const bad: LandingBlockValidationError[] = [];
+  const check = (path: string, url: unknown) => {
+    if (
+      typeof url !== 'string' ||
+      url.includes('..') ||
+      !HERO_SCENE_URL_PATTERN.test(url)
+    ) {
+      bad.push({
+        path,
+        messages: [
+          'url must be /img/<file>.(webp|png|jpg|avif) or /uploads/public/landing/<uuid>.<ext>',
+        ],
+      });
+    }
+  };
+  check('packImageUrl', body.packImageUrl);
+  (body.cardImageUrls as unknown[]).forEach((u, i) =>
+    check(`cardImageUrls.${i}`, u),
+  );
+  if (bad.length > 0) {
+    throw new ApiException(
+      HttpStatus.BAD_REQUEST,
+      'LANDING_URL_NOT_ALLOWED',
+      'Some image urls are not allowed.',
+      { errors: bad },
+    );
+  }
 }

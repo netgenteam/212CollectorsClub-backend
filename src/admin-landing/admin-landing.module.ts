@@ -1,5 +1,11 @@
 import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PassportModule } from '@nestjs/passport';
+import { MulterModule } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
+import { CatalogModule } from '../catalog/catalog.module.js';
+import { AdminLandingImagesController } from './admin-landing-images.controller.js';
+import { LandingImagesService } from './landing-images.service.js';
 import { AdminLandingContentController } from './admin-landing-content.controller.js';
 import { AdminLandingBlocksController } from './admin-landing-blocks.controller.js';
 import { LandingBlocksService } from './landing-blocks.service.js';
@@ -22,7 +28,24 @@ import { LandingContentService } from './landing-content.service.js';
 // is not available in the AdminLandingModule module` — confirmed
 // empirically, same as every prior Epic 8/9/10 module.
 @Module({
-  imports: [PassportModule.register({ defaultStrategy: 'admin-jwt' })],
+  imports: [
+    PassportModule.register({ defaultStrategy: 'admin-jwt' }),
+    // Story 16.2 (AD-63): vitrina expansion uses CatalogService.
+    CatalogModule,
+    // Story 16.2 (AD-64): in-memory multipart, 1 file, size from env.
+    MulterModule.registerAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        storage: memoryStorage(),
+        limits: {
+          files: 1,
+          fileSize:
+            Number(config.get<string>('LANDING_IMAGE_MAX_BYTES')) ||
+            2 * 1024 * 1024,
+        },
+      }),
+    }),
+  ],
   // Story 10.1: the public GET (LandingContentController, no guard) and the
   // guarded admin PUTs (AdminLandingContentController) both live in this
   // one module — mirrors AdminCatalogModule's "public + admin controllers,
@@ -42,8 +65,13 @@ import { LandingContentService } from './landing-content.service.js';
   controllers: [
     AdminLandingContentController,
     AdminLandingBlocksController,
+    AdminLandingImagesController,
     LandingContentController,
   ],
-  providers: [LandingContentService, LandingBlocksService],
+  providers: [
+    LandingContentService,
+    LandingBlocksService,
+    LandingImagesService,
+  ],
 })
 export class AdminLandingModule {}

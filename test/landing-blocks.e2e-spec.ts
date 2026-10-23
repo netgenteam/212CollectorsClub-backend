@@ -339,12 +339,15 @@ describe('Landing blocks draft/publish (e2e)', () => {
       await expectInvalid('hero', h2, 'panels.0.titleLines.1.0.text');
     });
 
-    it('heroScene with a disallowed url', () =>
-      expectInvalid(
-        'heroScene',
-        { ...validBlock('heroScene'), packImageUrl: 'https://evil.com/a.png' },
-        'packImageUrl',
-      ));
+    it('heroScene with a disallowed url', async () => {
+      const res = await put('heroScene', {
+        ...validBlock('heroScene'),
+        packImageUrl: 'https://evil.com/a.png',
+      }).expect(400);
+      const body = res.body as ErrBody;
+      expect(body.errorCode).toBe('LANDING_URL_NOT_ALLOWED');
+      expect(body.details?.errors?.[0].path).toBe('packImageUrl');
+    });
 
     it('manifesto with an unknown field', () =>
       expectInvalid(
@@ -461,7 +464,7 @@ describe('Landing blocks draft/publish (e2e)', () => {
         slug: `e2e-16-1-${randomUUID().slice(0, 8)}`,
         description: 'Created by e2e 16.1.',
         franchise: 'POKEMON',
-        productType: 'SEALED',
+        productType: 'BOOSTER_PACK',
         rarity: 'COMMON',
         priceUsd: '9.99',
         stock: 1,

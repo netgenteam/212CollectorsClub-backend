@@ -13,7 +13,11 @@ const ROOTS = [
 ];
 const FRANCHISES = [
   { id: 'id-franchise-pokemon', slug: 'franchise-pokemon', name: 'Pokemon' },
-  { id: 'id-franchise-yu-gi-oh', slug: 'franchise-yu-gi-oh', name: 'Yu-Gi-Oh!' },
+  {
+    id: 'id-franchise-yu-gi-oh',
+    slug: 'franchise-yu-gi-oh',
+    name: 'Yu-Gi-Oh!',
+  },
 ];
 
 globalThis.fetch = async (input) => {

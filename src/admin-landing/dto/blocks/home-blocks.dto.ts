@@ -115,16 +115,12 @@ export class HeroBlockDto {
 
 /** `/img/<file>.(webp|png|jpg|avif)` or `/uploads/public/landing/<uuid>.<ext>` (shape only; existence on disk is Story 16.2). */
 export const HERO_SCENE_URL_PATTERN =
-  /^(\/img\/[A-Za-z0-9._-]+\.(webp|png|jpg|avif)|\/uploads\/public\/landing\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(webp|png|jpg))$/;
+  /^(\/img\/[A-Za-z0-9._-]+\.(webp|png|jpg|avif)|\/uploads\/public\/landing\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(webp|png|jpg|avif))$/;
 
 export class HeroSceneBlockDto {
   @ApiProperty({ maxLength: 300, example: '/img/pack.webp' })
   @IsString()
   @MaxLength(300)
-  @Matches(HERO_SCENE_URL_PATTERN, {
-    message:
-      'packImageUrl must be /img/<file>.(webp|png|jpg|avif) or /uploads/public/landing/<uuid>.<ext>',
-  })
   packImageUrl: string;
 
   @ApiProperty({ type: [String], minItems: 3, maxItems: 3 })
@@ -133,11 +129,6 @@ export class HeroSceneBlockDto {
   @ArrayMaxSize(3)
   @IsString({ each: true })
   @MaxLength(300, { each: true })
-  @Matches(HERO_SCENE_URL_PATTERN, {
-    each: true,
-    message:
-      'each cardImageUrls item must be /img/<file>.(webp|png|jpg|avif) or /uploads/public/landing/<uuid>.<ext>',
-  })
   cardImageUrls: string[];
 }
 

@@ -12,6 +12,9 @@ import {
   isLandingBlock,
   type LandingBlock,
 } from './landing-blocks.constants.js';
+import { LandingContentService } from './landing-content.service.js';
+import { LANDING_IMAGES_URL_PREFIX } from '../admin-catalog/product-image-upload-paths.constants.js';
+import { LandingImagesService } from './landing-images.service.js';
 import { validateLandingBlock } from './landing-blocks.validation.js';
 
 const BLOCK_SELECT = {
@@ -26,7 +29,11 @@ type BlockRow = Prisma.LandingConfigEntryGetPayload<{
   select: typeof BLOCK_SELECT;
 }>;
 
-type PublishableRow = { key: string; draftValue: Prisma.JsonValue };
+type PublishableRow = {
+  key: string;
+  draftValue: Prisma.JsonValue;
+  draftUpdatedAt: Date | null;
+};
 
 const HAS_DRAFT = { draftValue: { not: Prisma.DbNull } } as const;
 
@@ -41,7 +48,47 @@ const HAS_DRAFT = { draftValue: { not: Prisma.DbNull } } as const;
  */
 @Injectable()
 export class LandingBlocksService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly content: LandingContentService,
+    private readonly images: LandingImagesService,
+  ) {}
+
+  /**
+   * Story 16.2 (AD-61): effective value per block (draft if any, else the
+   * published one; blocks with neither are omitted) with `vitrina` expanded
+   * exactly like the public GET. `draftBlocks` lists blocks with a draft.
+   */
+  async getEffectiveDraft(): Promise<{
+    blocks: Record<string, Record<string, unknown>>;
+    draftBlocks: string[];
+  }> {
+    const rows = await this.prisma.landingConfigEntry.findMany({
+      where: {
+        section: LANDING_SECTION_HOME,
+        key: { in: [...LANDING_BLOCKS] },
+      },
+      select: BLOCK_SELECT,
+    });
+    const byKey = new Map(rows.map((r) => [r.key, r]));
+    const blocks: Record<string, Record<string, unknown>> = {};
+    const draftBlocks: string[] = [];
+    for (const block of LANDING_BLOCKS) {
+      const row = byKey.get(block);
+      if (!row) continue;
+      let value: Record<string, unknown> | null = null;
+      if (row.draftValue !== null) {
+        value = row.draftValue as Record<string, unknown>;
+        draftBlocks.push(block);
+      } else if (row.publishedAt !== null) {
+        value = row.value as Record<string, unknown>;
+      }
+      if (value === null) continue;
+      blocks[block] =
+        block === 'vitrina' ? await this.content.expandVitrina(value) : value;
+    }
+    return { blocks, draftBlocks };
+  }
 
   /** Always the 7 blocks, in canonical order, even if no row exists yet. */
   async listBlocks(): Promise<{ data: LandingBlockSummaryDto[] }> {
@@ -88,6 +135,15 @@ export class LandingBlocksService {
       await this.assertProductsExist(value.productIds as string[]);
     }
 
+    if (block === 'heroScene') {
+      const cards = value.cardImageUrls as string[];
+      for (const url of cards) {
+        if (url.startsWith(LANDING_IMAGES_URL_PREFIX)) {
+          await this.images.assertStoredCard(url);
+        }
+      }
+    }
+
     const now = new Date();
     const row = await this.prisma.landingConfigEntry.upsert({
       where: { section_key: { section: LANDING_SECTION_HOME, key: block } },
@@ -119,7 +175,7 @@ export class LandingBlocksService {
     const row = await this.prisma.$transaction(async (tx) => {
       const current = await tx.landingConfigEntry.findUnique({
         where: { section_key: { section: LANDING_SECTION_HOME, key: block } },
-        select: { key: true, draftValue: true },
+        select: { key: true, draftValue: true, draftUpdatedAt: true },
       });
       if (!current || current.draftValue === null) {
         throw new ApiException(
@@ -141,7 +197,7 @@ export class LandingBlocksService {
     const published = await this.prisma.$transaction(async (tx) => {
       const rows = await tx.landingConfigEntry.findMany({
         where: { section: LANDING_SECTION_HOME, ...HAS_DRAFT },
-        select: { key: true, draftValue: true },
+        select: { key: true, draftValue: true, draftUpdatedAt: true },
       });
       rows.sort(
         (a, b) =>
@@ -169,22 +225,36 @@ export class LandingBlocksService {
     });
   }
 
-  /** One row's promotion, shared by single and bulk publish (inside a tx). */
-  protected publishRow(
+  /**
+   * One row's promotion, shared by single and bulk publish (inside a tx).
+   * The draft is cleared ONLY if it is still the one that was read
+   * (`draftUpdatedAt` unchanged): a PUT that landed between the read and
+   * this write keeps its newer draft instead of being silently lost.
+   */
+  protected async publishRow(
     tx: Prisma.TransactionClient,
     row: PublishableRow,
     adminUserId: string,
   ): Promise<BlockRow> {
-    return tx.landingConfigEntry.update({
-      where: { section_key: { section: LANDING_SECTION_HOME, key: row.key } },
+    const where = { section: LANDING_SECTION_HOME, key: row.key };
+    await tx.landingConfigEntry.update({
+      where: { section_key: where },
       data: {
         value: row.draftValue as Prisma.InputJsonValue,
         publishedAt: new Date(),
         updatedById: adminUserId,
+      },
+    });
+    await tx.landingConfigEntry.updateMany({
+      where: { ...where, draftUpdatedAt: row.draftUpdatedAt },
+      data: {
         draftValue: Prisma.DbNull,
         draftUpdatedAt: null,
         draftUpdatedById: null,
       },
+    });
+    return tx.landingConfigEntry.findUniqueOrThrow({
+      where: { section_key: where },
       select: BLOCK_SELECT,
     });
   }

@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { LandingContentService } from './landing-content.service.js';
+import { CatalogService } from '../catalog/catalog.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
 const ADMIN_ID = 'dd848f24-aac0-4346-ae25-b672bb0d7e14';
@@ -32,6 +33,7 @@ describe('LandingContentService', () => {
       providers: [
         LandingContentService,
         { provide: PrismaService, useValue: prisma },
+        { provide: CatalogService, useValue: { findListItemsByIds: vi.fn() } },
       ],
     }).compile();
 

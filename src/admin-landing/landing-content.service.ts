@@ -2,6 +2,7 @@ import { HttpStatus, Injectable } from '@nestjs/common';
 import { isISO8601 } from 'class-validator';
 import { ApiException } from '../common/api-exception.js';
 import { Prisma } from '../generated/prisma/client.js';
+import { CatalogService } from '../catalog/catalog.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { LandingConfigEntryResponseDto } from './dto/landing-config-entry-response.dto.js';
 import { UpdateLandingBannerDto } from './dto/update-landing-banner.dto.js';
@@ -59,7 +60,10 @@ const ENTRY_SELECT = {
  */
 @Injectable()
 export class LandingContentService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly catalog: CatalogService,
+  ) {}
 
   async upsertText(
     key: string,
@@ -299,10 +303,14 @@ export class LandingContentService {
       Record<string, { valueType: string; value: unknown; updatedAt: Date }>
     > = {};
     for (const row of rows) {
+      const value =
+        row.section === LANDING_SECTION_HOME && row.key === 'vitrina'
+          ? await this.expandVitrina(row.value as Record<string, unknown>)
+          : row.value;
       grouped[row.section] ??= {};
       grouped[row.section][row.key] = {
         valueType: row.valueType,
-        value: row.value,
+        value,
         // A published block's freshness is its publication time, not the
         // last draft save (which also bumps the row's `updatedAt`).
         updatedAt:
@@ -312,6 +320,23 @@ export class LandingContentService {
       };
     }
     return grouped;
+  }
+
+  /**
+   * Story 16.2 (AD-63): adds `products` (the in-stock, active products of
+   * `productIds`, order kept; missing ones are skipped silently) to a
+   * vitrina value. Shared by the public GET and `GET draft`.
+   */
+  async expandVitrina(
+    value: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const ids = Array.isArray(value.productIds)
+      ? (value.productIds as unknown[]).filter(
+          (id): id is string => typeof id === 'string',
+        )
+      : [];
+    const items = await this.catalog.findListItemsByIds(ids);
+    return { ...value, products: items.filter((p) => p.inStock) };
   }
 }
 
