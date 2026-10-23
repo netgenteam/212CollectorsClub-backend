@@ -618,3 +618,43 @@ Pokemon Scarlet & Violet knowledge, NOT on real tcgapi data: the local DB had 0
 4. Adjust **only the tables** in `pack-tiers.ts` (`EXACT_TIERS`, `FALLBACK_RULES`,
    `REVERSE_PRINTING_PATTERN`, and the matching `~* 'reverse'` in
    `simulator-sets.service.ts`) and re-check `tierCoverage`.
+
+## 9. Home CMS and pack simulator (Epic 16, AD-60..AD-69)
+
+### 9.1 Environment variables (all optional, defaults shown; see `.env.example`)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LANDING_IMAGE_MAX_BYTES` | `2097152` (2 MB) | Max size of an image sent to `POST /admin/landing-content/images` (413 `LANDING_IMAGE_TOO_LARGE`). |
+| `SIMULATOR_RATE_LIMIT_PER_MIN` | `30` | Max `POST /simulator/packs` per client IP per minute (429 + `Retry-After`). |
+| `LANDING_REVALIDATE_SECONDS` | `60` | **Frontend** env: cache TTL of the public Home; it is the ceiling of freshness after a publish. |
+
+### 9.2 Deployment order and migration
+
+1. `pnpm install` (new dependency `image-size`).
+2. `pnpm prisma:deploy` applies `add_landing_draft` (draft/`publishedAt` columns on `Landing_Config_Entries`). It is additive; deploy the backend **before** the frontend so the new endpoints exist when the new admin/Home call them.
+3. Verify: `pnpm exec prisma migrate status` is up to date and `prisma migrate diff` shows no drift.
+
+### 9.3 Uploaded images: `uploads/public/landing/`
+
+Admin images are stored in `<uploads>/public/landing/<uuid>.<ext>` and served from `/uploads/public/landing/...`. This directory lives outside the git tree and **must be persistent and included in the backup** together with the rest of `uploads/` (a deploy must not wipe it). Losing it leaves the published Home with broken image URLs.
+
+### 9.4 Deployment requirement: `X-Forwarded-For` (rate limit by IP)
+
+The simulator limit is per client IP. `main.ts` sets `trust proxy 1`, so Express takes the **right-most** entry of `X-Forwarded-For`. This is only correct if:
+
+- **Only Nginx can reach the backend and the Next server** (both bound to 127.0.0.1 / blocked by the firewall; never expose 3000/3001).
+- Nginx sets the header with `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` on every `location` proxying to Next **and** to the backend (already so in `deploy/nginx/*.conf.template`; do not replace it with `$remote_addr` alone, nor pass a client-supplied value through).
+- The Next proxy route forwards the incoming `X-Forwarded-For` to the backend (it appends nothing). The backend then sees the entry Nginx added.
+
+Checklist: (1) `curl -s -H 'X-Forwarded-For: 1.2.3.4' https://<DOMAIN>/api/...` from outside must not let you choose your own throttle key (the right-most entry is the real address Nginx appended); (2) 31 requests/min to `POST /simulator/packs` from one address get a 429, a second address is unaffected; (3) the backend log/throttle never shows the Next server's IP for every client.
+
+### 9.5 After the first real ingestion
+
+Rarity mapping and the reverse printing label are assumptions until real data exists. Follow [Simulator: validating rarity mapping](#simulator-validating-rarity-mapping-story-163-assumption-f-unverified) (query `GET /admin/simulator/sets`, review `unmappedRarities` and `hasReversePrintings`, adjust `pack-tiers.ts`). `cardCount` in `/simulator/sets` and `/admin/simulator/sets` counts **unique cards** (`cardNumber ?? id`), so reverse printings are not counted twice.
+
+### 9.6 Contract summary for the frontend
+
+- Public: `GET /landing-content` returns `home.<block>` only when published (a draft is never exposed); `vitrina` comes with `products` already resolved (active and in stock only, same order as `productIds`). `GET /simulator/sets` -> `{data:[{setId,gameSlug,name,cardCount,imageUrl}]}` (cache 60 s). `POST /simulator/packs {setId}` -> 10 cards (`position`, `id`, `rarityTier`, `isReverse`, `imageUrl`, `marketPriceUsd`, optional `product`), totals, rare card last; 404 `SIMULATOR_SET_NOT_FOUND`, 422 `SIMULATOR_SET_INSUFFICIENT_CARDS`, 429 with `Retry-After`. The frontend proxy must forward `X-Forwarded-For`.
+- Admin (Bearer): `GET /admin/landing-content/blocks[/:block]`, `PUT /blocks/:block` (draft), `POST /blocks/:block/publish`, `DELETE /blocks/:block/draft`, `POST /publish`, `GET /draft` (effective view for the previewer), `POST /images?kind=generic|card` (single `file` field; errors `LANDING_IMAGE_REQUIRED`, `UNSUPPORTED_FILE_TYPE`, `LANDING_IMAGE_KIND_INVALID`, `LANDING_IMAGE_MULTIPART_INVALID`, `LANDING_IMAGE_TOO_LARGE` 413, `LANDING_IMAGE_DIMENSIONS`/`LANDING_IMAGE_BAD_RATIO` 422). `GET|PUT /admin/simulator/config` (400 `SIMULATOR_CONFIG_INVALID`, `SIMULATOR_ODDS_INVALID_SUM`), `GET /admin/simulator/sets`. `PUT /admin/landing-content/pack_simulator/config` is reserved (400 `LANDING_KEY_RESERVED`).
+- Concurrent edits of a draft: last write wins (R-d).

@@ -13,6 +13,7 @@ export interface SimulatorSetSummary {
   gameSlug: string;
   setId: string;
   setName: string;
+  /** Unique cards (cardNumber ?? id): reverse printings are not counted twice. */
   cardCount: number;
   enabled: boolean;
   tierCoverage: Partial<Record<PackTier, number>>;
@@ -67,7 +68,8 @@ export class SimulatorSetsService {
         select: { gameSlug: true, setId: true, setName: true },
       });
       if (cursors.length > 0) {
-        // One query: card count + image of the highest-priced card per set.
+        // One query: unique card count (same key as the draw: cardNumber ?? id,
+        // so reverse printings do not inflate it) + image of the top-priced card.
         const rows = await this.prisma.$queryRaw<
           {
             gameSlug: string;
@@ -79,7 +81,12 @@ export class SimulatorSetsService {
         >(Prisma.sql`
           SELECT DISTINCT ON ("gameSlug", "setId") "gameSlug", "setId",
                  "imageLarge", "imageSmall",
-                 (count(*) OVER (PARTITION BY "gameSlug", "setId"))::int AS n
+                 (SELECT count(DISTINCT COALESCE(m2."cardNumber", m2.id::text))
+                    FROM "Master_Cards" m2
+                   WHERE m2."externalProvider" = ${this.tcg.provider}
+                     AND m2.name !~* '^basic .* energy$'
+                     AND m2."gameSlug" = "Master_Cards"."gameSlug"
+                     AND m2."setId" = "Master_Cards"."setId")::int AS n
           FROM "Master_Cards"
           WHERE "externalProvider" = ${this.tcg.provider}
             AND name !~* '^basic .* energy$'
@@ -122,7 +129,8 @@ export class SimulatorSetsService {
     const provider = this.tcg.provider;
     const [rows, reverseRows, cfg] = await Promise.all([
       this.prisma.$queryRaw<RarityRow[]>(Prisma.sql`
-        SELECT "gameSlug", "setId", rarity, count(*)::int AS n
+        SELECT "gameSlug", "setId", rarity,
+               count(DISTINCT COALESCE("cardNumber", id::text))::int AS n
         FROM "Master_Cards"
         WHERE "externalProvider" = ${provider}
           AND name !~* '^basic .* energy$'

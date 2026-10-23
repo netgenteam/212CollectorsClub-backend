@@ -31,6 +31,10 @@ describe('TCG nightly sync (e2e, Story 15.7)', () => {
   let nightly: TcgNightlySyncService;
   let fake: FakeTcgApiClient;
   let categoryId: string;
+  // DONE cursors that do not belong to this suite (other suites, real data):
+  // the worker syncs every DONE set, so they are parked as PENDING while the
+  // test runs and restored afterwards.
+  let parkedCursorIds: string[] = [];
 
   const clean = async () => {
     await prisma.order.deleteMany({
@@ -99,6 +103,15 @@ describe('TCG nightly sync (e2e, Story 15.7)', () => {
     nightly = app.get(TcgNightlySyncService);
     categoryId = (await prisma.category.findFirstOrThrow()).id;
     await clean();
+    const foreign = await prisma.tcgIngestCursor.findMany({
+      where: { status: 'DONE', gameSlug: { not: GAME } },
+      select: { id: true },
+    });
+    parkedCursorIds = foreign.map((c) => c.id);
+    await prisma.tcgIngestCursor.updateMany({
+      where: { id: { in: parkedCursorIds } },
+      data: { status: 'PENDING' },
+    });
     await ingest.run({ games: [GAME] });
     fake.reset();
     await prisma.tcgSyncRun.deleteMany();
@@ -108,6 +121,10 @@ describe('TCG nightly sync (e2e, Story 15.7)', () => {
   afterEach(async () => {
     for (const k of ENVS) delete process.env[k];
     await clean();
+    await prisma.tcgIngestCursor.updateMany({
+      where: { id: { in: parkedCursorIds } },
+      data: { status: 'DONE' },
+    });
     await app.close();
   });
 

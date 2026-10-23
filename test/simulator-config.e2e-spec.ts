@@ -35,6 +35,9 @@ describe('Simulator config (e2e)', () => {
   let prisma: PrismaService;
   let token: string;
   let provider: string;
+  let originalConfig: Awaited<
+    ReturnType<PrismaService['landingConfigEntry']['findUnique']>
+  > = null;
   const auth = () => ({ Authorization: `Bearer ${token}` });
   const server = () => request(app.getHttpServer());
   const cleanConfig = () =>
@@ -102,6 +105,9 @@ describe('Simulator config (e2e)', () => {
       .expect(200);
     token = (login.body as { accessToken: string }).accessToken;
     await cleanData();
+    originalConfig = await prisma.landingConfigEntry.findUnique({
+      where: { section_key: { section: 'pack_simulator', key: 'config' } },
+    });
     await cleanConfig();
     await prisma.tcgIngestCursor.createMany({
       data: [
@@ -123,6 +129,9 @@ describe('Simulator config (e2e)', () => {
 
   afterAll(async () => {
     await cleanConfig();
+    if (originalConfig) {
+      await prisma.landingConfigEntry.create({ data: originalConfig });
+    }
     await cleanData();
     await app.close();
   });

@@ -1,5 +1,6 @@
 import {
   ArgumentsHost,
+  BadRequestException,
   Catch,
   Controller,
   ExceptionFilter,
@@ -44,6 +45,30 @@ export class LandingImageTooLargeFilter implements ExceptionFilter {
 }
 
 /**
+ * Multer rejections other than size (more than one file, unexpected field)
+ * reach Nest as a plain `BadRequestException`; give them an `errorCode`.
+ * `ApiException`s are not `BadRequestException`s, so they pass untouched.
+ */
+@Catch(BadRequestException)
+export class LandingImageMultipartFilter implements ExceptionFilter {
+  catch(exception: BadRequestException, host: ArgumentsHost): void {
+    const res = host.switchToHttp().getResponse<Response>();
+    const raw = exception.getResponse();
+    const message =
+      typeof raw === 'string'
+        ? raw
+        : ((raw as { message?: string | string[] }).message ??
+          exception.message);
+    res.status(HttpStatus.BAD_REQUEST).json({
+      statusCode: HttpStatus.BAD_REQUEST,
+      errorCode: 'LANDING_IMAGE_MULTIPART_INVALID',
+      message: Array.isArray(message) ? message.join('; ') : message,
+      details: { hint: 'Send exactly one file in the "file" field.' },
+    });
+  }
+}
+
+/**
  * Story 16.2 (FR-72; AD-64). Admin upload of landing images. The multer
  * size limit comes from `MulterModule.registerAsync` in the module
  * (`LANDING_IMAGE_MAX_BYTES`, memory storage, 1 file).
@@ -56,7 +81,7 @@ export class AdminLandingImagesController {
   constructor(private readonly images: LandingImagesService) {}
 
   @Post('images')
-  @UseFilters(LandingImageTooLargeFilter)
+  @UseFilters(LandingImageTooLargeFilter, LandingImageMultipartFilter)
   @UseInterceptors(FileInterceptor('file'))
   @ApiOperation({
     summary: 'Upload a landing image (jpg/png/webp/avif)',
@@ -76,7 +101,7 @@ export class AdminLandingImagesController {
   @ApiResponse({
     status: HttpStatus.BAD_REQUEST,
     description:
-      'errorCode LANDING_IMAGE_REQUIRED | UNSUPPORTED_FILE_TYPE | invalid kind.',
+      'errorCode LANDING_IMAGE_REQUIRED | UNSUPPORTED_FILE_TYPE | LANDING_IMAGE_KIND_INVALID | LANDING_IMAGE_MULTIPART_INVALID (more than one file / wrong field).',
   })
   @ApiResponse({
     status: HttpStatus.UNAUTHORIZED,

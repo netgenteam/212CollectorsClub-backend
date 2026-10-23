@@ -272,9 +272,12 @@ describe('Collectibles fields (e2e, Story 11.1)', () => {
     });
 
     it('PATCH rejects certNumber without gradingCompany with 400', async () => {
-      const seeded = await prisma.product.findFirstOrThrow();
+      // Own product (not "any product" of a shared DB): stored company null.
+      const created = await createRequest({}).expect(201);
+      const id = (created.body as AdminProduct).id;
+      createdIds.push(id);
       await request(app.getHttpServer())
-        .patch(`/api/v1/admin/products/${seeded.id}`)
+        .patch(`/api/v1/admin/products/${id}`)
         .set('Authorization', `Bearer ${accessToken}`)
         .send({ certNumber: 'ABC123' })
         .expect(400);

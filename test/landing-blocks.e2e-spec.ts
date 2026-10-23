@@ -50,6 +50,16 @@ describe('Landing blocks draft/publish (e2e)', () => {
   const auth = () => ({ Authorization: `Bearer ${token}` });
   const wipe = () =>
     prisma.landingConfigEntry.deleteMany({ where: { section: 'home' } });
+  // Snapshot of pre-existing real `home` rows (taken once, restored after
+  // every test so the admin's local content is never destroyed).
+  let homeSnapshot: Awaited<
+    ReturnType<PrismaService['landingConfigEntry']['findMany']>
+  > | null = null;
+  const restoreHome = async () => {
+    await wipe();
+    if (homeSnapshot?.length)
+      await prisma.landingConfigEntry.createMany({ data: homeSnapshot });
+  };
   const put = (block: string, body: unknown) =>
     request(app.getHttpServer())
       .put(`${BASE}/blocks/${block}`)
@@ -92,11 +102,14 @@ describe('Landing blocks draft/publish (e2e)', () => {
       .send({ usernameOrEmail: TEST_USERNAME, password: TEST_PASSWORD })
       .expect(200);
     token = (login.body as { accessToken: string }).accessToken;
+    homeSnapshot ??= await prisma.landingConfigEntry.findMany({
+      where: { section: 'home' },
+    });
     await wipe();
   });
 
   afterEach(async () => {
-    await wipe();
+    await restoreHome();
     await app.close();
   });
 

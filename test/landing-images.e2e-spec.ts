@@ -45,6 +45,16 @@ describe('Landing images, vitrina and draft view (e2e)', () => {
   const auth = () => ({ Authorization: `Bearer ${token}` });
   const wipe = () =>
     prisma.landingConfigEntry.deleteMany({ where: { section: 'home' } });
+  // Snapshot of pre-existing real `home` rows (taken once, restored after
+  // every test so the admin's local content is never destroyed).
+  let homeSnapshot: Awaited<
+    ReturnType<PrismaService['landingConfigEntry']['findMany']>
+  > | null = null;
+  const restoreHome = async () => {
+    await wipe();
+    if (homeSnapshot?.length)
+      await prisma.landingConfigEntry.createMany({ data: homeSnapshot });
+  };
   const upload = (
     buf: Buffer,
     kind?: string,
@@ -88,11 +98,14 @@ describe('Landing images, vitrina and draft view (e2e)', () => {
       .send({ usernameOrEmail: TEST_USERNAME, password: TEST_PASSWORD })
       .expect(200);
     token = (login.body as { accessToken: string }).accessToken;
+    homeSnapshot ??= await prisma.landingConfigEntry.findMany({
+      where: { section: 'home' },
+    });
     await wipe();
   });
 
   afterEach(async () => {
-    await wipe();
+    await restoreHome();
     for (const url of uploaded.splice(0)) {
       await rm(fileOf(url), { force: true });
     }
@@ -157,6 +170,18 @@ describe('Landing images, vitrina and draft view (e2e)', () => {
         .field('x', 'y')
         .expect(400);
       expect((res.body as ErrBody).errorCode).toBe('LANDING_IMAGE_REQUIRED');
+    });
+
+    it('400 LANDING_IMAGE_MULTIPART_INVALID with two files', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/images`)
+        .set(auth())
+        .attach('file', pngOf(300, 300), 'a.png')
+        .attach('file', pngOf(300, 300), 'b.png')
+        .expect(400);
+      expect((res.body as ErrBody).errorCode).toBe(
+        'LANDING_IMAGE_MULTIPART_INVALID',
+      );
     });
 
     it('413 LANDING_IMAGE_TOO_LARGE above the limit', async () => {
