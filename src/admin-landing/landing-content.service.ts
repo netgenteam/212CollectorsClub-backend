@@ -8,6 +8,7 @@ import { UpdateLandingBannerDto } from './dto/update-landing-banner.dto.js';
 import { UpdateLandingDrop212Dto } from './dto/update-landing-drop212.dto.js';
 import { UpdateLandingTextDto } from './dto/update-landing-text.dto.js';
 import { UpdatePackSimulatorDto } from './dto/update-landing-pack-simulator.dto.js';
+import { LANDING_SECTION_HOME } from './landing-blocks.constants.js';
 import {
   LANDING_DROP212_TARGET_DATE_KEY,
   LANDING_SECTION_BANNERS,
@@ -273,13 +274,22 @@ export class LandingContentService {
       Record<string, { valueType: string; value: unknown; updatedAt: Date }>
     >
   > {
+    // Story 16.1 (AD-61): `home` rows are exposed only once published
+    // (`publishedAt IS NOT NULL`) and `draftValue` is never selected.
     const rows = await this.prisma.landingConfigEntry.findMany({
+      where: {
+        OR: [
+          { section: { not: LANDING_SECTION_HOME } },
+          { publishedAt: { not: null } },
+        ],
+      },
       select: {
         section: true,
         key: true,
         valueType: true,
         value: true,
         updatedAt: true,
+        publishedAt: true,
       },
       orderBy: [{ section: 'asc' }, { key: 'asc' }],
     });
@@ -293,7 +303,12 @@ export class LandingContentService {
       grouped[row.section][row.key] = {
         valueType: row.valueType,
         value: row.value,
-        updatedAt: row.updatedAt,
+        // A published block's freshness is its publication time, not the
+        // last draft save (which also bumps the row's `updatedAt`).
+        updatedAt:
+          row.section === LANDING_SECTION_HOME && row.publishedAt
+            ? row.publishedAt
+            : row.updatedAt,
       };
     }
     return grouped;

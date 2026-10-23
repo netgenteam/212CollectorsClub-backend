@@ -29,7 +29,7 @@ export class LandingContentController {
   @ApiOperation({
     summary: 'Read all landing-page content, grouped by section',
     description:
-      "Returns every LandingConfigEntry grouped as { [section]: { [key]: { valueType, value, updatedAt } } }. No authentication required. Reflects the admin's latest edit immediately (no caching layer, AD-10). Returns {} (never an error) when nothing has been seeded/edited yet.",
+      "Returns every LandingConfigEntry grouped as { [section]: { [key]: { valueType, value, updatedAt } } }. No authentication required. Reflects the admin's latest edit immediately (no caching layer, AD-10). Returns {} (never an error) when nothing has been seeded/edited yet. Story 16.1: the typed Home blocks appear under `home` ONLY once published (never their drafts); the legacy sections texts/banners/drop212/pack_simulator are deprecated but still served under their own names.",
   })
   @ApiOkResponse({
     description: 'Landing content grouped by section.',

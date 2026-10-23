@@ -58,6 +58,7 @@ export class AdminLandingContentController {
   @Put('texts/:key')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
+    deprecated: true,
     summary: 'Edit one "texts" landing-content field',
     description:
       'Upserts LandingConfigEntry(section="texts", key). Restricted to the fixed key set in landing-content.constants.ts — a key outside that set is rejected with 400 LANDING_KEY_NOT_EDITABLE, and no row is ever created for it. Immediately visible via the public GET /api/v1/landing-content (AD-10, no cache).',
@@ -89,6 +90,7 @@ export class AdminLandingContentController {
   @Put('banners/:key')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
+    deprecated: true,
     summary: 'Edit one "banners" landing-content slot',
     description:
       'Upserts LandingConfigEntry(section="banners", key) with a { imageUrl, title, linkUrl } value. Restricted to the fixed key set (banner1/banner2/banner3) — a key outside that set is rejected with 400 LANDING_KEY_NOT_EDITABLE, and no row is ever created for it. Immediately visible via the public GET /api/v1/landing-content (AD-10, no cache).',
@@ -116,6 +118,7 @@ export class AdminLandingContentController {
   @Put('drop212/:key')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
+    deprecated: true,
     summary: 'Edit one "drop212" countdown field',
     description:
       'Upserts LandingConfigEntry(section="drop212", key). Restricted to the fixed key set in landing-content.constants.ts (targetDate, displayText) — a key outside that set is rejected with 400 LANDING_KEY_NOT_EDITABLE, and no row is ever created for it. "targetDate" is additionally validated as a real ISO-8601 date/time (400 LANDING_INVALID_ISO8601_DATE otherwise, e.g. "mañana" or a malformed/impossible calendar date) — section-specific validation beyond Story 10.1\'s generic mechanism. Immediately visible via the public GET /api/v1/landing-content (AD-10, no cache).',
@@ -146,6 +149,7 @@ export class AdminLandingContentController {
   @Put('pack_simulator/:key')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
+    deprecated: true,
     summary: 'Edit one "pack_simulator" configurable variable',
     description:
       'Upserts LandingConfigEntry(section="pack_simulator", key) with an arbitrary JSON value (flat or nested, e.g. a per-rarity odds table). Unlike "texts"/"banners"/"drop212", this section deliberately does NOT restrict :key to a fixed set — any syntactically valid key (1-100 chars, letters/digits/"_"/"-"/"." , starting with a letter or underscore) is accepted, since the real Pack-Opening Simulator schema is owned by the not-yet-built frontend (PRD OQ7, AD-9). The value is bounded only by a generic max nesting depth (6) and max serialized size (10 KB) — shape/abuse hygiene, never business validation: this endpoint never inspects odds/weights/probabilities (no sum-to-100% check or similar) — that is the frontend\'s responsibility. Immediately visible via the public GET /api/v1/landing-content (AD-10, no cache).',

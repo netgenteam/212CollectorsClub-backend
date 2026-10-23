@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { PassportModule } from '@nestjs/passport';
 import { AdminLandingContentController } from './admin-landing-content.controller.js';
+import { AdminLandingBlocksController } from './admin-landing-blocks.controller.js';
+import { LandingBlocksService } from './landing-blocks.service.js';
 import { LandingContentController } from './landing-content.controller.js';
 import { LandingContentService } from './landing-content.service.js';
 
@@ -35,7 +37,13 @@ import { LandingContentService } from './landing-content.service.js';
   // instead of a fixed one; see landing-content.constants.ts's doc comment
   // for why. This completes Epic 10: all three FR-29/30/31 stories share
   // one table and one controller/service pair.
-  controllers: [AdminLandingContentController, LandingContentController],
-  providers: [LandingContentService],
+  // Story 16.1: typed Home blocks with draft/publish (AD-60/61) as a
+  // further controller + service pair in this same module.
+  controllers: [
+    AdminLandingContentController,
+    AdminLandingBlocksController,
+    LandingContentController,
+  ],
+  providers: [LandingContentService, LandingBlocksService],
 })
 export class AdminLandingModule {}

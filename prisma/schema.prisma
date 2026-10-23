@@ -693,7 +693,10 @@ model AdminUser {
 
   /// Story 10.1: back-reference for `LandingConfigEntry.updatedById`, same
   /// nullable-FK pattern as `orderStatusHistoryRows` above.
-  landingConfigEntries LandingConfigEntry[]
+  landingConfigEntries LandingConfigEntry[] @relation("LandingUpdatedBy")
+
+  /// Story 16.1: back-reference for `LandingConfigEntry.draftUpdatedById`.
+  landingDraftEntries LandingConfigEntry[] @relation("LandingDraftUpdatedBy")
 
   /// Story 12.2: BetterAuth session/account rows (AD-26). The all-lowercase
   /// names are mandatory: the BetterAuth Prisma adapter joins through
@@ -893,7 +896,17 @@ model LandingConfigEntry {
   /// cascade away or block-delete a LandingConfigEntry's value — the
   /// content itself always outlives whichever admin last touched it.
   updatedById String?    @db.Uuid
-  updatedBy   AdminUser? @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+  updatedBy   AdminUser? @relation("LandingUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  /// Story 16.1 (AD-61): draft/publish cycle for the `section='home'` blocks.
+  /// `value` stays the PUBLISHED value (legacy code untouched); a block with a
+  /// draft but never published has `value='{}'` and `publishedAt NULL`.
+  /// Legacy rows keep all four columns NULL.
+  draftValue       Json?
+  draftUpdatedAt   DateTime?  @db.Timestamptz(3)
+  draftUpdatedById String?    @db.Uuid
+  draftUpdatedBy   AdminUser? @relation("LandingDraftUpdatedBy", fields: [draftUpdatedById], references: [id], onDelete: SetNull)
+  publishedAt      DateTime?  @db.Timestamptz(3)
 
   @@unique([section, key])
   @@map("Landing_Config_Entries")
