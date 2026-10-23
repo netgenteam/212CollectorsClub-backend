@@ -21,6 +21,12 @@ import {
   PRODUCT_IMAGES_DIR,
   UPLOADS_PUBLIC_ROOT,
 } from './../src/admin-catalog/product-image-upload-paths.constants.js';
+import {
+  snapshotSyncRuns,
+  restoreSyncRuns,
+  parkForeignDoneCursors,
+  type SyncRuns,
+} from './helpers/db-snapshot.js';
 
 const GAME = 'e2e158';
 const PREFIX = 'e2e158-';
@@ -58,6 +64,8 @@ describe('Epic 15 regression (e2e, Story 15.8)', () => {
   const authed = (m: 'get' | 'post' | 'patch', path: string) =>
     request(server())[m](path).set('Authorization', `Bearer ${token}`);
 
+  // Pre-existing real sync runs: snapshotted once, restored after cleaning.
+  let runsSnapshot: SyncRuns | null = null;
   const clean = async () => {
     await prisma.product.deleteMany({
       where: {
@@ -69,6 +77,7 @@ describe('Epic 15 regression (e2e, Story 15.8)', () => {
     });
     await prisma.masterCard.deleteMany({ where: { gameSlug: GAME } });
     await prisma.tcgIngestCursor.deleteMany({ where: { gameSlug: GAME } });
+    runsSnapshot ??= await snapshotSyncRuns(prisma);
     await prisma.tcgSyncRun.deleteMany();
   };
 
@@ -131,6 +140,7 @@ describe('Epic 15 regression (e2e, Story 15.8)', () => {
       );
     }
     await clean();
+    await restoreSyncRuns(prisma, runsSnapshot ?? []);
     for (const f of files) await unlink(f).catch(() => undefined);
     await prisma.adminUser.deleteMany({ where: { username: ADMIN_USER } });
     await app.close();
@@ -287,7 +297,13 @@ describe('Epic 15 regression (e2e, Story 15.8)', () => {
     // 7. Nightly sync updates only the linked autoSync product.
     fake.setPrice(CARD(1, 1), 77.77);
     fake.setPrice(CARD(2, 1), 55.55);
-    const res = await app.get(TcgNightlySyncService).runNightlySync();
+    const unpark = await parkForeignDoneCursors(prisma, GAME);
+    let res: Awaited<ReturnType<TcgNightlySyncService['runNightlySync']>>;
+    try {
+      res = await app.get(TcgNightlySyncService).runNightlySync();
+    } finally {
+      await unpark();
+    }
     expect(['SUCCEEDED', 'PARTIAL']).toContain(res.status);
     const price = async (id: string) =>
       Number(

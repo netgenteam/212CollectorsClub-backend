@@ -17,6 +17,8 @@ import { PackGeneratorService } from './../src/simulator/pack-generator.service.
 import { SimulatorPoolCache } from './../src/simulator/pool-cache.js';
 import { defaultPokemonTemplate } from './../src/simulator/simulator-defaults.js';
 
+import { snapshotLanding, restoreLanding } from './helpers/db-snapshot.js';
+
 type App = Parameters<typeof request>[0];
 const P = 'e2e164-';
 const BIG = `${P}big`;
@@ -57,7 +59,8 @@ describe('Simulator public sets and packs (e2e)', () => {
   let prisma: PrismaService;
   let provider: string;
   let token: string;
-  let originalConfig: { value: unknown; valueType: string } | null = null;
+  let originalConfig: Awaited<ReturnType<typeof snapshotLanding>> = [];
+  const CONFIG_ROW = { section: 'pack_simulator', key: 'config' };
   const auth = () => ({ Authorization: `Bearer ${token}` });
 
   const clean = async () => {
@@ -112,12 +115,7 @@ describe('Simulator public sets and packs (e2e)', () => {
     provider = app.get<TcgApiClient>(TCG_API_CLIENT).provider;
     await clean();
 
-    const existing = await prisma.landingConfigEntry.findUnique({
-      where: { section_key: { section: 'pack_simulator', key: 'config' } },
-    });
-    originalConfig = existing
-      ? { value: existing.value, valueType: existing.valueType }
-      : null;
+    originalConfig = await snapshotLanding(prisma, CONFIG_ROW);
 
     const hash = await argon2.hash(PASS, { type: argon2.argon2id });
     await prisma.adminUser.upsert({
@@ -208,18 +206,7 @@ describe('Simulator public sets and packs (e2e)', () => {
 
   afterAll(async () => {
     await clean();
-    if (originalConfig)
-      await prisma.landingConfigEntry.update({
-        where: { section_key: { section: 'pack_simulator', key: 'config' } },
-        data: {
-          value: originalConfig.value as object,
-          valueType: originalConfig.valueType,
-        },
-      });
-    else
-      await prisma.landingConfigEntry.deleteMany({
-        where: { section: 'pack_simulator', key: 'config' },
-      });
+    await restoreLanding(prisma, CONFIG_ROW, originalConfig);
     await prisma.adminUser.deleteMany({ where: { username: USER } });
     await app.close();
   });

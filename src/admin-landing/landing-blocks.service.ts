@@ -35,7 +35,13 @@ type PublishableRow = {
   draftUpdatedAt: Date | null;
 };
 
-const HAS_DRAFT = { draftValue: { not: Prisma.DbNull } } as const;
+/** A draft exists only if `draftValue` is neither SQL NULL nor JSON null. */
+const HAS_DRAFT: Prisma.LandingConfigEntryWhereInput = {
+  AND: [
+    { draftValue: { not: Prisma.DbNull } },
+    { draftValue: { not: Prisma.JsonNull } },
+  ],
+};
 
 /**
  * Story 16.1 (FR-71, FR-74; AD-60, AD-61). Draft/publish cycle over the

@@ -8,6 +8,12 @@ import { TCG_API_CLIENT } from './../src/tcg/tcg-api-client.interface.js';
 import { FakeTcgApiClient } from './../src/tcg/fake-tcg-api-client.js';
 import { TcgIngestService } from './../src/tcg/tcg-ingest.service.js';
 import { TcgNightlySyncService } from './../src/tcg/tcg-nightly-sync.service.js';
+import {
+  snapshotSyncRuns,
+  restoreSyncRuns,
+  parkForeignDoneCursors,
+  type SyncRuns,
+} from './helpers/db-snapshot.js';
 
 const GAME = 'e2e157';
 const PREFIX = 'e2e157-';
@@ -34,8 +40,10 @@ describe('TCG nightly sync (e2e, Story 15.7)', () => {
   // DONE cursors that do not belong to this suite (other suites, real data):
   // the worker syncs every DONE set, so they are parked as PENDING while the
   // test runs and restored afterwards.
-  let parkedCursorIds: string[] = [];
+  let unpark: (() => Promise<void>) | null = null;
 
+  // Pre-existing real sync runs: snapshotted once, restored after cleaning.
+  let runsSnapshot: SyncRuns | null = null;
   const clean = async () => {
     await prisma.order.deleteMany({
       where: { recipientName: 'E2E157 buyer' },
@@ -45,6 +53,7 @@ describe('TCG nightly sync (e2e, Story 15.7)', () => {
     });
     await prisma.masterCard.deleteMany({ where: { gameSlug: GAME } });
     await prisma.tcgIngestCursor.deleteMany({ where: { gameSlug: GAME } });
+    runsSnapshot ??= await snapshotSyncRuns(prisma);
     await prisma.tcgSyncRun.deleteMany();
   };
 
@@ -103,15 +112,7 @@ describe('TCG nightly sync (e2e, Story 15.7)', () => {
     nightly = app.get(TcgNightlySyncService);
     categoryId = (await prisma.category.findFirstOrThrow()).id;
     await clean();
-    const foreign = await prisma.tcgIngestCursor.findMany({
-      where: { status: 'DONE', gameSlug: { not: GAME } },
-      select: { id: true },
-    });
-    parkedCursorIds = foreign.map((c) => c.id);
-    await prisma.tcgIngestCursor.updateMany({
-      where: { id: { in: parkedCursorIds } },
-      data: { status: 'PENDING' },
-    });
+    unpark = await parkForeignDoneCursors(prisma, GAME);
     await ingest.run({ games: [GAME] });
     fake.reset();
     await prisma.tcgSyncRun.deleteMany();
@@ -121,10 +122,8 @@ describe('TCG nightly sync (e2e, Story 15.7)', () => {
   afterEach(async () => {
     for (const k of ENVS) delete process.env[k];
     await clean();
-    await prisma.tcgIngestCursor.updateMany({
-      where: { id: { in: parkedCursorIds } },
-      data: { status: 'DONE' },
-    });
+    await restoreSyncRuns(prisma, runsSnapshot ?? []);
+    await unpark?.();
     await app.close();
   });
 

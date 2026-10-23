@@ -15,6 +15,11 @@ import {
 import { FakeTcgApiClient } from './../src/tcg/fake-tcg-api-client.js';
 import { TcgIngestService } from './../src/tcg/tcg-ingest.service.js';
 import { TcgCliModule } from './../src/tcg/cli/tcg-cli.module.js';
+import {
+  snapshotSyncRuns,
+  restoreSyncRuns,
+  type SyncRuns,
+} from './helpers/db-snapshot.js';
 
 const GAME = 'e2e154';
 const SET = (n: number) => FakeTcgApiClient.setIdFor(GAME, n);
@@ -66,6 +71,8 @@ describe('TCG ingestion (e2e, Story 15.4)', () => {
   let fake: FakeTcgApiClient;
   let scripted: ScriptedClient;
 
+  // Pre-existing real sync runs: snapshotted once, restored after cleaning.
+  let runsSnapshot: SyncRuns | null = null;
   const clean = async () => {
     await prisma.masterCard.deleteMany({
       where: {
@@ -75,9 +82,17 @@ describe('TCG ingestion (e2e, Story 15.4)', () => {
         ],
       },
     });
+    // Only the cursors this suite creates: its own game and the FAKE client's
+    // `Fake pokemon Set N` ones (never real `pokemon` cursors).
     await prisma.tcgIngestCursor.deleteMany({
-      where: { gameSlug: { in: [GAME, 'pokemon'] } },
+      where: {
+        OR: [
+          { gameSlug: GAME },
+          { gameSlug: 'pokemon', setName: { startsWith: 'Fake pokemon' } },
+        ],
+      },
     });
+    runsSnapshot ??= await snapshotSyncRuns(prisma);
     await prisma.tcgSyncRun.deleteMany();
   };
 
@@ -97,6 +112,7 @@ describe('TCG ingestion (e2e, Story 15.4)', () => {
 
   afterEach(async () => {
     await clean();
+    await restoreSyncRuns(prisma, runsSnapshot ?? []);
     await app.close();
   });
 

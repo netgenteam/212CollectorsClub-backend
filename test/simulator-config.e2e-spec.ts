@@ -11,6 +11,8 @@ import { TCG_API_CLIENT } from './../src/tcg/tcg-api-client.interface.js';
 import type { TcgApiClient } from './../src/tcg/tcg-api-client.interface.js';
 import { defaultSimulatorConfig } from './../src/simulator/simulator-defaults.js';
 
+import { snapshotLanding, restoreLanding } from './helpers/db-snapshot.js';
+
 type App = Parameters<typeof request>[0];
 const USER = 'e2e-admin-story-16-3';
 const EMAIL = 'e2e-admin-story-16-3@212collectorsclub.test';
@@ -35,9 +37,8 @@ describe('Simulator config (e2e)', () => {
   let prisma: PrismaService;
   let token: string;
   let provider: string;
-  let originalConfig: Awaited<
-    ReturnType<PrismaService['landingConfigEntry']['findUnique']>
-  > = null;
+  let originalConfig: Awaited<ReturnType<typeof snapshotLanding>> = [];
+  const CONFIG_ROW = { section: 'pack_simulator', key: 'config' };
   const auth = () => ({ Authorization: `Bearer ${token}` });
   const server = () => request(app.getHttpServer());
   const cleanConfig = () =>
@@ -105,9 +106,7 @@ describe('Simulator config (e2e)', () => {
       .expect(200);
     token = (login.body as { accessToken: string }).accessToken;
     await cleanData();
-    originalConfig = await prisma.landingConfigEntry.findUnique({
-      where: { section_key: { section: 'pack_simulator', key: 'config' } },
-    });
+    originalConfig = await snapshotLanding(prisma, CONFIG_ROW);
     await cleanConfig();
     await prisma.tcgIngestCursor.createMany({
       data: [
@@ -128,10 +127,7 @@ describe('Simulator config (e2e)', () => {
   });
 
   afterAll(async () => {
-    await cleanConfig();
-    if (originalConfig) {
-      await prisma.landingConfigEntry.create({ data: originalConfig });
-    }
+    await restoreLanding(prisma, CONFIG_ROW, originalConfig);
     await cleanData();
     await app.close();
   });

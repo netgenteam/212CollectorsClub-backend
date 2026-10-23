@@ -14,6 +14,8 @@ import { LANDING_IMAGES_DIR } from './../src/admin-catalog/product-image-upload-
 import { pngOf, webpOf } from './fixtures/landing-images.js';
 import { validBlock } from './../src/admin-landing/landing-blocks.fixtures.js';
 
+import { snapshotLanding, restoreLanding } from './helpers/db-snapshot.js';
+
 type App = Parameters<typeof request>[0];
 
 const TEST_USERNAME = 'e2e-admin-story-16-2';
@@ -45,16 +47,11 @@ describe('Landing images, vitrina and draft view (e2e)', () => {
   const auth = () => ({ Authorization: `Bearer ${token}` });
   const wipe = () =>
     prisma.landingConfigEntry.deleteMany({ where: { section: 'home' } });
-  // Snapshot of pre-existing real `home` rows (taken once, restored after
-  // every test so the admin's local content is never destroyed).
-  let homeSnapshot: Awaited<
-    ReturnType<PrismaService['landingConfigEntry']['findMany']>
-  > | null = null;
-  const restoreHome = async () => {
-    await wipe();
-    if (homeSnapshot?.length)
-      await prisma.landingConfigEntry.createMany({ data: homeSnapshot });
-  };
+  // Faithful snapshot of pre-existing real `home` rows (taken once, restored
+  // after every test so the admin's local content is never destroyed).
+  let homeSnapshot: Awaited<ReturnType<typeof snapshotLanding>> | null = null;
+  const HOME = { section: 'home' };
+  const restoreHome = () => restoreLanding(prisma, HOME, homeSnapshot ?? []);
   const upload = (
     buf: Buffer,
     kind?: string,
@@ -98,9 +95,7 @@ describe('Landing images, vitrina and draft view (e2e)', () => {
       .send({ usernameOrEmail: TEST_USERNAME, password: TEST_PASSWORD })
       .expect(200);
     token = (login.body as { accessToken: string }).accessToken;
-    homeSnapshot ??= await prisma.landingConfigEntry.findMany({
-      where: { section: 'home' },
-    });
+    homeSnapshot ??= await snapshotLanding(prisma, HOME);
     await wipe();
   });
 

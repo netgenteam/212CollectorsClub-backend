@@ -17,6 +17,8 @@ import { SimulatorPoolCache } from './../src/simulator/pool-cache.js';
 import { defaultPokemonTemplate } from './../src/simulator/simulator-defaults.js';
 import { validBlock } from './../src/admin-landing/landing-blocks.fixtures.js';
 
+import { snapshotLanding, restoreLanding } from './helpers/db-snapshot.js';
+
 type App = Parameters<typeof request>[0];
 const P = 'e2e1611-';
 const SET = `${P}set`;
@@ -48,12 +50,10 @@ describe('Epic 16 regression (e2e)', () => {
   let customerCookie: string;
   let categoryId: string;
   let ownsCategory = false;
-  let homeSnapshot: Awaited<
-    ReturnType<PrismaService['landingConfigEntry']['findMany']>
-  > = [];
-  let configSnapshot: Awaited<
-    ReturnType<PrismaService['landingConfigEntry']['findUnique']>
-  > = null;
+  let homeSnapshot: Awaited<ReturnType<typeof snapshotLanding>> = [];
+  let configSnapshot: Awaited<ReturnType<typeof snapshotLanding>> = [];
+  const HOME = { section: 'home' };
+  const CONFIG = { section: 'pack_simulator', key: 'config' };
   const productIds: string[] = [];
 
   const auth = () => ({ Authorization: `Bearer ${token}` });
@@ -130,12 +130,8 @@ describe('Epic 16 regression (e2e)', () => {
     provider = app.get<TcgApiClient>(TCG_API_CLIENT).provider;
     await cleanFixtures();
 
-    homeSnapshot = await prisma.landingConfigEntry.findMany({
-      where: { section: 'home' },
-    });
-    configSnapshot = await prisma.landingConfigEntry.findUnique({
-      where: { section_key: { section: 'pack_simulator', key: 'config' } },
-    });
+    homeSnapshot = await snapshotLanding(prisma, HOME);
+    configSnapshot = await snapshotLanding(prisma, CONFIG);
     await wipeHome();
 
     const existingCat = await prisma.category.findFirst();
@@ -232,14 +228,8 @@ describe('Epic 16 regression (e2e)', () => {
     await cleanFixtures();
     if (ownsCategory)
       await prisma.category.deleteMany({ where: { slug: 'e2e-16-11a' } });
-    await wipeHome();
-    if (homeSnapshot.length)
-      await prisma.landingConfigEntry.createMany({ data: homeSnapshot });
-    await prisma.landingConfigEntry.deleteMany({
-      where: { section: 'pack_simulator', key: 'config' },
-    });
-    if (configSnapshot)
-      await prisma.landingConfigEntry.create({ data: configSnapshot });
+    await restoreLanding(prisma, HOME, homeSnapshot);
+    await restoreLanding(prisma, CONFIG, configSnapshot);
     await prisma.customer.deleteMany({ where: { email: CUSTOMER_EMAIL } });
     await prisma.adminUser.deleteMany({ where: { username: USER } });
     await app.close();

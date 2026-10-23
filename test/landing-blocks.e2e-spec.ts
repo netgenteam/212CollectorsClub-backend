@@ -7,10 +7,13 @@ import request from 'supertest';
 import * as argon2 from 'argon2';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
+import { Prisma } from './../src/generated/prisma/client.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { LandingBlocksService } from './../src/admin-landing/landing-blocks.service.js';
 import { LANDING_BLOCKS } from './../src/admin-landing/landing-blocks.constants.js';
 import { validBlock } from './../src/admin-landing/landing-blocks.fixtures.js';
+
+import { snapshotLanding, restoreLanding } from './helpers/db-snapshot.js';
 
 type App = Parameters<typeof request>[0];
 
@@ -50,16 +53,11 @@ describe('Landing blocks draft/publish (e2e)', () => {
   const auth = () => ({ Authorization: `Bearer ${token}` });
   const wipe = () =>
     prisma.landingConfigEntry.deleteMany({ where: { section: 'home' } });
-  // Snapshot of pre-existing real `home` rows (taken once, restored after
-  // every test so the admin's local content is never destroyed).
-  let homeSnapshot: Awaited<
-    ReturnType<PrismaService['landingConfigEntry']['findMany']>
-  > | null = null;
-  const restoreHome = async () => {
-    await wipe();
-    if (homeSnapshot?.length)
-      await prisma.landingConfigEntry.createMany({ data: homeSnapshot });
-  };
+  // Faithful snapshot of pre-existing real `home` rows (taken once, restored
+  // after every test so the admin's local content is never destroyed).
+  let homeSnapshot: Awaited<ReturnType<typeof snapshotLanding>> | null = null;
+  const HOME = { section: 'home' };
+  const restoreHome = () => restoreLanding(prisma, HOME, homeSnapshot ?? []);
   const put = (block: string, body: unknown) =>
     request(app.getHttpServer())
       .put(`${BASE}/blocks/${block}`)
@@ -102,15 +100,30 @@ describe('Landing blocks draft/publish (e2e)', () => {
       .send({ usernameOrEmail: TEST_USERNAME, password: TEST_PASSWORD })
       .expect(200);
     token = (login.body as { accessToken: string }).accessToken;
-    homeSnapshot ??= await prisma.landingConfigEntry.findMany({
-      where: { section: 'home' },
-    });
+    homeSnapshot ??= await snapshotLanding(prisma, HOME);
     await wipe();
   });
 
   afterEach(async () => {
     await restoreHome();
     await app.close();
+  });
+
+  it('a JSON-null draftValue is not a draft: publish-all keeps the published value', async () => {
+    await put('ticker', validBlock('ticker')).expect(200);
+    await request(app.getHttpServer())
+      .post(`${BASE}/blocks/ticker/publish`)
+      .set(auth())
+      .expect(200);
+    await prisma.landingConfigEntry.update({
+      where: { section_key: { section: 'home', key: 'ticker' } },
+      data: { draftValue: Prisma.JsonNull },
+    });
+    await request(app.getHttpServer())
+      .post(`${BASE}/publish`)
+      .set(auth())
+      .expect((r) => expect(r.status).toBeLessThan(500));
+    expect((await publicHome()).ticker?.value).toEqual(validBlock('ticker'));
   });
 
   it('401 without token, with a garbage token and on every route', async () => {

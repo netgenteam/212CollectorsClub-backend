@@ -58,6 +58,8 @@ describe('Admin remote ingest (e2e, Story 15.9)', () => {
     throw new Error('run did not finish');
   }
 
+  // Sync runs that existed before this suite: never touched or deleted.
+  let preexistingRunIds: string[] = [];
   const clean = async () => {
     await prisma.masterCard.deleteMany({ where: { gameSlug: GAME } });
     await prisma.tcgIngestCursor.deleteMany({ where: { gameSlug: GAME } });
@@ -93,19 +95,25 @@ describe('Admin remote ingest (e2e, Story 15.9)', () => {
       .expect(200);
     token = (login.body as { accessToken: string }).accessToken;
     await clean();
+    preexistingRunIds = (
+      await prisma.tcgSyncRun.findMany({ select: { id: true } })
+    ).map((r) => r.id);
   });
 
   afterEach(async () => {
     delete process.env[TCG_ALLOW_FAKE_REMOTE_INGEST];
     delete process.env[TCG_REMOTE_INGEST_MAX_CARDS];
     await prisma.tcgSyncRun.updateMany({
-      where: { status: 'RUNNING' },
+      where: { status: 'RUNNING', id: { notIn: preexistingRunIds } },
       data: { status: 'FAILED', finishedAt: new Date() },
     });
     await clean();
   });
 
   afterAll(async () => {
+    await prisma.tcgSyncRun.deleteMany({
+      where: { id: { notIn: preexistingRunIds } },
+    });
     await prisma.adminUser.deleteMany({ where: { username: ADMIN_USER } });
     await app.close();
   });
