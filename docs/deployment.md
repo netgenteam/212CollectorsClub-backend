@@ -658,3 +658,57 @@ Rarity mapping and the reverse printing label are assumptions until real data ex
 - Public: `GET /landing-content` returns `home.<block>` only when published (a draft is never exposed); `vitrina` comes with `products` already resolved (active and in stock only, same order as `productIds`). `GET /simulator/sets` -> `{data:[{setId,gameSlug,name,cardCount,imageUrl}]}` (cache 60 s). `POST /simulator/packs {setId}` -> 10 cards (`position`, `id`, `rarityTier`, `isReverse`, `imageUrl`, `marketPriceUsd`, optional `product`), totals, rare card last; 404 `SIMULATOR_SET_NOT_FOUND`, 422 `SIMULATOR_SET_INSUFFICIENT_CARDS`, 429 with `Retry-After`. The frontend proxy must forward `X-Forwarded-For`.
 - Admin (Bearer): `GET /admin/landing-content/blocks[/:block]`, `PUT /blocks/:block` (draft), `POST /blocks/:block/publish`, `DELETE /blocks/:block/draft`, `POST /publish`, `GET /draft` (effective view for the previewer), `POST /images?kind=generic|card` (single `file` field; errors `LANDING_IMAGE_REQUIRED`, `UNSUPPORTED_FILE_TYPE`, `LANDING_IMAGE_KIND_INVALID`, `LANDING_IMAGE_MULTIPART_INVALID`, `LANDING_IMAGE_TOO_LARGE` 413, `LANDING_IMAGE_DIMENSIONS`/`LANDING_IMAGE_BAD_RATIO` 422). `GET|PUT /admin/simulator/config` (400 `SIMULATOR_CONFIG_INVALID`, `SIMULATOR_ODDS_INVALID_SUM`), `GET /admin/simulator/sets`. `PUT /admin/landing-content/pack_simulator/config` is reserved (400 `LANDING_KEY_RESERVED`).
 - Concurrent edits of a draft: last write wins (R-d).
+
+## 10. Libreta de direcciones y envío nacional (Epic 17, AD-70..AD-77)
+
+### 10.1 Environment variable (optional; see `.env.example`)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CHECKOUT_REQUIRE_SHIPPING` | `false` (unset = disabled) | Only the exact string `true` enables it (`TRUE`, `1`, `yes`, ` true ` do **not**). It is read on every `POST /checkout` and not validated at startup (no config change needed); since it is a process env var, changing it in production still means restarting the service. When enabled, the legacy flat address (`addressLine1`/`city`/`state` without agency) is rejected with 400 `SHIPPING_REQUIRED`. When disabled, both the flat format and the new agency format are accepted. |
+
+Activation plan: (1) deploy the backend with the flag off; (2) deploy the new frontend (checkout sending `customerAddressId` or `shippingAgencyId` + `deliveryMode` + `recipientIdDoc` + `state` + `municipality`); (3) verify one real checkout in the new format; (4) set `CHECKOUT_REQUIRE_SHIPPING=true` in the backend env and restart. Do **not** enable it before step 2: the old frontend would receive 400 `SHIPPING_REQUIRED` on every purchase. Rollback of the flag: set it to `false` (or remove it) and restart.
+
+### 10.2 Deployment order and migrations
+
+1. `pnpm prisma:deploy` applies, in order:
+   - `20261026100000_add_customer_addresses_shipping`: creates enum `DeliveryMode` and tables `Shipping_Agencies`, `Shipping_Branches`, `Customer_Addresses`, `Order_Tracking_Events`; adds nullable columns to `Orders` (`recipientIdDoc`, `deliveryMode`, `shippingAgencyId`, `agencyBranchName`, `agencyBranchCode`, `municipality`, `parish`, `referencePoint`, `trackingNumber`); creates the hand-written partial unique index `Customer_Addresses_customerId_default_key` (`ON "Customer_Addresses"("customerId") WHERE "isDefault"`, one default address per customer); and **seeds the 4 agencies** (MRW, Zoom, Tealca, Domesa; Domesa with `allowsHomeDelivery=false`) with `ON CONFLICT ("code") DO NOTHING`. It is additive: no existing `Orders` row is rewritten.
+   - `20261026110000_shipping_agency_code_upper`: widens `Shipping_Agencies.code` to `VARCHAR(50)` and upper-cases existing codes (`mrw` -> `MRW`, etc.) only when the upper-case form is not already taken. Idempotent.
+2. Optional: `pnpm prisma:seed` also seeds the same 4 agencies (`createMany` with `skipDuplicates`, i.e. `ON CONFLICT DO NOTHING`), so it never overwrites an admin's edits to name, flags or `trackingUrlTemplate`. It is not required after `prisma:deploy`.
+3. Deploy the backend **before** the frontend so the new endpoints exist when the new checkout, address book and admin call them.
+4. Verify: `pnpm exec prisma migrate status` is up to date; `SELECT code, "isActive", "allowsHomeDelivery", "trackingUrlTemplate" FROM "Shipping_Agencies" ORDER BY "sortOrder"` returns `MRW, ZOOM, TEALCA, DOMESA`; `GET /api/v1/shipping/agencies` lists the 4 and never exposes `trackingUrlTemplate`.
+
+### 10.3 Loading `trackingUrlTemplate` per agency (manual, after deploy)
+
+The seeded agencies have `trackingUrlTemplate = NULL`; until the admin sets it, `trackingUrl` is `null` in every order view even when a `trackingNumber` exists. The template must be `https://` and contain exactly one `{trackingNumber}` placeholder (otherwise 400 `TRACKING_TEMPLATE_INVALID`); `null` clears it.
+
+```bash
+# <ID> from GET /api/v1/admin/shipping/agencies
+curl -X PATCH https://<DOMAIN>/api/v1/admin/shipping/agencies/<ID> \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" -H 'Content-Type: application/json' \
+  -d '{"trackingUrlTemplate":"https://<agency-tracking-page>?guia={trackingNumber}"}'
+```
+
+Use each agency's real public tracking URL (not verified by this repo). Agency `code` is upper-cased, unique and immutable after creation.
+
+### 10.4 Contract summary for the frontend
+
+- Public: `GET /shipping/agencies` -> `{data:[...]}` only active agencies ordered by `sortOrder`, without `trackingUrlTemplate`; `Cache-Control: public, max-age=60`.
+- Customer (cookie `cc_session`): `GET|POST /auth/addresses`, `PATCH|DELETE /auth/addresses/:id`, `PATCH /auth/addresses/:id/set-default`. Max 10 per customer; the first is default automatically; deleting the default promotes the most recent remaining one; another customer's id answers 404 `ADDRESS_NOT_FOUND` (never 403). `recipientIdDoc` is normalized (`v12345678` -> `V-12345678`).
+- Checkout: `POST /checkout` accepts the new format (`customerAddressId` for a logged-in customer, or `shippingAgencyId` + `deliveryMode` + `recipientIdDoc` + `state` + `municipality` ...) or, while the flag is off, the legacy flat format. The shipping data is snapshotted on the order (editing or deleting the saved address does not change it). `fulfillmentType: "pickup"` answers 400 `PICKUP_NOT_SUPPORTED`. Order views (`GET /orders/:orderId`, `GET /auth/orders[/:orderId]`, `GET /admin/orders/:orderId`) expose `fulfillment.{recipientIdDoc,deliveryMode,shippingAgency,trackingNumber,trackingUrl,...}`; historical `pickup` orders keep answering 200 with those fields `null`.
+- Admin (Bearer): `GET|POST /admin/shipping/agencies`, `PATCH|DELETE /admin/shipping/agencies/:id` (DELETE only if no address or order references it, else 409 `SHIPPING_AGENCY_IN_USE`; deactivate with PATCH instead), `PATCH /admin/orders/:orderId/tracking` (`{trackingNumber}`, `^[A-Za-z0-9._/-]{3,64}$`, `null` or `""` clears it; works in any order status; no status change and no email; each effective change records an `Order_Tracking_Events` audit row).
+- New `errorCode`s: `SHIPPING_REQUIRED`, `PICKUP_NOT_SUPPORTED`, `SHIPPING_INVALID` (400, `details.errors:[{field,code}]`, values never echoed), `ADDRESS_NOT_FOUND` (404), `ADDRESS_REQUIRES_ACCOUNT` (400, `customerAddressId` without session), `ADDRESS_LIMIT_REACHED` (422), `ADDRESS_DEFAULT_CONFLICT` (409, concurrent default race, retry), `SHIPPING_AGENCY_UNAVAILABLE` (422), `DELIVERY_MODE_NOT_ALLOWED` (422), `SHIPPING_AGENCY_NOT_FOUND` (404), `SHIPPING_AGENCY_CODE_TAKEN` (409), `SHIPPING_AGENCY_IN_USE` (409), `SHIPPING_AGENCY_EMPTY_UPDATE` (400), `AGENCY_WITHOUT_DELIVERY_MODE` (422), `TRACKING_TEMPLATE_INVALID` (400), `TRACKING_NUMBER_INVALID` (400).
+
+### 10.5 Rollback
+
+The new `Orders` columns are nullable and the new tables are independent, so the previous backend build keeps working against the migrated schema: roll back by redeploying the previous release (section 5) and leaving the migrations applied; the extra tables/columns can stay. Set `CHECKOUT_REQUIRE_SHIPPING=false` first if it was enabled. Dropping the objects is only needed for a full schema revert: `DROP TABLE "Order_Tracking_Events", "Customer_Addresses", "Shipping_Branches"`, remove the new `Orders` columns, `DROP TABLE "Shipping_Agencies"`, `DROP TYPE "DeliveryMode"`, and delete the two rows from `_prisma_migrations`; this loses saved addresses, snapshots and tracking numbers, so avoid it once real orders use the new fields.
+
+### 10.6 Manual verification on a database copy (before the first production migration)
+
+1. Restore a recent backup into a scratch database and point `DATABASE_URL` at it.
+2. Record `SELECT count(*), status FROM "Orders" GROUP BY status` and `SELECT count(*) FROM "Order_Lines"` (or the equivalent line table).
+3. `pnpm prisma:deploy`.
+4. Repeat the same queries: the counts must be identical; the new `Orders` columns are all `NULL` for existing rows, and `SELECT count(*) FROM "Shipping_Agencies"` returns 4.
+5. Start the backend against the copy and open one pre-existing order in `GET /admin/orders/:orderId`: it answers 200 with the new shipping fields `null`.
+
+The automated smoke of the whole epic is `test/epic-17-regression.e2e-spec.ts` (run with `pnpm test:e2e --no-file-parallelism`); it creates and removes its own data and restores the 4 seeded agencies.
