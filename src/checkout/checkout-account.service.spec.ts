@@ -7,9 +7,12 @@ import {
 
 const DTO = {
   paymentRail: CheckoutPaymentRail.PAGO_MOVIL,
-  fulfillmentType: CheckoutFulfillmentType.PICKUP,
+  fulfillmentType: CheckoutFulfillmentType.DELIVERY,
   recipientName: 'Maria Perez',
   recipientPhone: '0412-1234567',
+  addressLine1: 'Av. Francisco de Miranda',
+  city: 'Caracas',
+  state: 'Distrito Capital',
 };
 
 /** Story 12.6 (FR-45, AD-31): account checkout. */
@@ -56,6 +59,7 @@ describe('CheckoutService (account)', () => {
         $transaction: transaction,
         customer: { findUnique: customerFind },
       } as never,
+      {} as never,
       {} as never,
       {} as never,
     );

@@ -210,7 +210,10 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
       .set('Cookie', cartCookie)
       .send({
         paymentRail: 'stripe',
-        fulfillmentType: 'pickup',
+        fulfillmentType: 'delivery',
+        addressLine1: 'Av. Test 1',
+        city: 'Caracas',
+        state: 'Distrito Capital',
         recipientName: 'Order Lookup E2E Buyer',
         recipientPhone: '0412-9999999',
       })

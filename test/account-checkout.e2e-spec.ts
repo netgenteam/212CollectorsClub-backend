@@ -51,7 +51,10 @@ const PNG = Buffer.from('fake-png-bytes-for-story-12-6');
 
 const body = (over: Record<string, unknown> = {}) => ({
   paymentRail: 'pago_movil',
-  fulfillmentType: 'pickup',
+  fulfillmentType: 'delivery',
+  addressLine1: 'Av. Test 1',
+  city: 'Caracas',
+  state: 'Distrito Capital',
   recipientName: 'Maria Perez',
   recipientPhone: '0412-1234567',
   ...over,

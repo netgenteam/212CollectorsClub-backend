@@ -1,12 +1,14 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsEnum,
+  IsIn,
   IsNotEmpty,
   IsOptional,
   IsString,
   MaxLength,
   ValidateIf,
 } from 'class-validator';
+import { isNewShippingFormat } from '../checkout-shipping.js';
 
 /**
  * Legal `paymentRail` values: `pago_movil` (stock-hold then
@@ -34,6 +36,26 @@ export enum CheckoutFulfillmentType {
   DELIVERY = 'delivery',
   PICKUP = 'pickup',
 }
+
+/** Story 17.4 (AD-74): any new-format shipping field (or a saved address) present. */
+export function isNewFormat(o: CheckoutDto): boolean {
+  return isNewShippingFormat(o);
+}
+
+const isNotPickup = (o: CheckoutDto): boolean =>
+  o.fulfillmentType !== CheckoutFulfillmentType.PICKUP;
+
+/** Legacy flat address fields: only for delivery in the old flat format. */
+const requiresLegacyAddress = (o: CheckoutDto): boolean =>
+  isNotPickup(o) && !isNewFormat(o);
+
+/**
+ * Recipient name/phone are required in the flat format; with the new format
+ * they are validated by the shipping rules (400 SHIPPING_INVALID) or come
+ * from the saved address.
+ */
+const requiresFlatRecipient = (o: CheckoutDto): boolean =>
+  !o.customerAddressId && !isNewFormat(o);
 
 /**
  * Story 4.1 (FR-12, FR-13, AD-8): body of `POST /api/v1/checkout`.
@@ -71,30 +93,35 @@ export class CheckoutDto {
   @IsEnum(CheckoutPaymentRail)
   paymentRail: CheckoutPaymentRail;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     enum: CheckoutFulfillmentType,
-    example: CheckoutFulfillmentType.DELIVERY,
+    default: CheckoutFulfillmentType.DELIVERY,
     description:
-      'How the order reaches the buyer. "delivery" requires a full Venezuela address below; "pickup" requires none of it.',
+      'Defaults to "delivery". "pickup" is RETIRED (Story 17.4): it is still accepted by the validator but answers 400 PICKUP_NOT_SUPPORTED.',
   })
+  @IsOptional()
   @IsEnum(CheckoutFulfillmentType)
-  fulfillmentType: CheckoutFulfillmentType;
+  fulfillmentType?: CheckoutFulfillmentType;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     example: 'Maria Perez',
-    description: 'Full name of the person receiving the order.',
+    description:
+      'Full name of the person receiving the order. Ignored when customerAddressId is sent.',
     maxLength: 200,
   })
+  @ValidateIf(requiresFlatRecipient)
   @IsString()
   @IsNotEmpty()
   @MaxLength(200)
   recipientName: string;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     example: '+58 412-1234567',
-    description: 'Contact phone number for the recipient.',
+    description:
+      'Contact phone number for the recipient. Ignored when customerAddressId is sent.',
     maxLength: 30,
   })
+  @ValidateIf(requiresFlatRecipient)
   @IsString()
   @IsNotEmpty()
   @MaxLength(30)
@@ -106,9 +133,7 @@ export class CheckoutDto {
       'Required when fulfillmentType = delivery; not accepted/validated otherwise.',
     maxLength: 200,
   })
-  @ValidateIf(
-    (o: CheckoutDto) => o.fulfillmentType === CheckoutFulfillmentType.DELIVERY,
-  )
+  @ValidateIf(requiresLegacyAddress)
   @IsString()
   @IsNotEmpty()
   @MaxLength(200)
@@ -131,9 +156,7 @@ export class CheckoutDto {
       'Required when fulfillmentType = delivery; not accepted/validated otherwise.',
     maxLength: 100,
   })
-  @ValidateIf(
-    (o: CheckoutDto) => o.fulfillmentType === CheckoutFulfillmentType.DELIVERY,
-  )
+  @ValidateIf(requiresLegacyAddress)
   @IsString()
   @IsNotEmpty()
   @MaxLength(100)
@@ -145,11 +168,83 @@ export class CheckoutDto {
       'Venezuela state/estado. Required when fulfillmentType = delivery; not accepted/validated otherwise.',
     maxLength: 100,
   })
-  @ValidateIf(
-    (o: CheckoutDto) => o.fulfillmentType === CheckoutFulfillmentType.DELIVERY,
-  )
+  @ValidateIf(requiresLegacyAddress)
   @IsString()
   @IsNotEmpty()
   @MaxLength(100)
   state?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Saved address of the logged-in customer (Story 17.4). Prevails over every explicit shipping field. Requires a session.',
+    maxLength: 64,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  customerAddressId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Recipient national ID, e.g. V-12345678 (new shipping format).',
+    maxLength: 30,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  recipientIdDoc?: string;
+
+  @ApiPropertyOptional({
+    enum: ['agency_office', 'home_delivery'],
+    description: 'Delivery mode (new shipping format).',
+  })
+  @IsOptional()
+  @IsIn(['agency_office', 'home_delivery'])
+  deliveryMode?: 'agency_office' | 'home_delivery';
+
+  @ApiPropertyOptional({
+    description: 'Shipping agency id (new shipping format).',
+    maxLength: 64,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  shippingAgencyId?: string;
+
+  @ApiPropertyOptional({ description: 'Agency branch name.', maxLength: 150 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(150)
+  agencyBranchName?: string;
+
+  @ApiPropertyOptional({ description: 'Agency branch code.', maxLength: 50 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  agencyBranchCode?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Municipality; also stored as the order city (new shipping format).',
+    maxLength: 100,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  municipality?: string;
+
+  @ApiPropertyOptional({ description: 'Parish.', maxLength: 100 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  parish?: string;
+
+  @ApiPropertyOptional({
+    description: 'Delivery reference point.',
+    maxLength: 200,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  referencePoint?: string;
 }

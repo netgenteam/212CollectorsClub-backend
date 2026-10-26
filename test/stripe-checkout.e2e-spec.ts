@@ -34,7 +34,10 @@ interface StripeCheckoutBody {
 
 const body = (over: Record<string, unknown> = {}) => ({
   paymentRail: 'stripe',
-  fulfillmentType: 'pickup',
+  fulfillmentType: 'delivery',
+  addressLine1: 'Av. Test 1',
+  city: 'Caracas',
+  state: 'Distrito Capital',
   recipientName: 'Maria Perez',
   recipientPhone: '0412-1234567',
   ...over,
@@ -402,7 +405,10 @@ describe('Stripe checkout (e2e, Story 14.4)', () => {
   // ---------------------------------------------------------------- 14.5b
   const pmBody = {
     paymentRail: 'pago_movil',
-    fulfillmentType: 'pickup',
+    fulfillmentType: 'delivery',
+    addressLine1: 'Av. Test 1',
+    city: 'Caracas',
+    state: 'Distrito Capital',
     recipientName: 'Maria Perez',
     recipientPhone: '0412-1234567',
   };

@@ -25,17 +25,18 @@ import type {
   StripeClient,
 } from '../payments-stripe/stripe-client.interface.js';
 import { DEFAULT_FRONTEND_URL } from '../auth-core/customer-mail.js';
-import {
-  CheckoutDto,
-  CheckoutFulfillmentType,
-  CheckoutPaymentRail,
-} from './dto/checkout.dto.js';
+import { CheckoutDto, CheckoutPaymentRail } from './dto/checkout.dto.js';
 import {
   CheckoutOrderLineResponseDto,
   CheckoutResponseDto,
   PagoMovilInstructionsDto,
   StripeCheckoutSessionDto,
 } from './dto/checkout-response.dto.js';
+import { ShippingValidationService } from '../shipping/shipping-validation.service.js';
+import {
+  assertCheckoutShippingPreconditions,
+  resolveCheckoutShipping,
+} from './checkout-shipping.js';
 import { SINGLETON_FX_RATE_ID } from './fx-rate.constants.js';
 import { PAGO_MOVIL_PLACEHOLDER_ACCOUNT } from './pago-movil-instructions.constant.js';
 
@@ -159,6 +160,7 @@ export class CheckoutService {
     private readonly prisma: PrismaService,
     @Inject(STRIPE_CLIENT) private readonly stripeClient: StripeClient,
     private readonly config: ConfigService,
+    private readonly shipping: ShippingValidationService,
   ) {}
 
   /**
@@ -191,6 +193,9 @@ export class CheckoutService {
     dto: CheckoutDto,
     customer: Pick<AuthenticatedCustomer, 'id'> | null = null,
   ): Promise<CheckoutResponseDto> {
+    // Story 17.4 (AD-74): DB-free shipping gates, before touching cart/stock.
+    assertCheckoutShippingPreconditions(dto, customer !== null);
+
     // Story 12.6 (AD-31): with a session the cart is the ACCOUNT's cart
     // (the anonymous cookie is ignored); without one nothing changes.
     let accountEmail: string | undefined;
@@ -211,7 +216,6 @@ export class CheckoutService {
       throw this.emptyCartException();
     }
 
-    const isDelivery = dto.fulfillmentType === CheckoutFulfillmentType.DELIVERY;
     // Story 14.4 (AD-46): stripe has no VES snapshot and enters
     // payment_processing; pago_movil snapshots FX and enters
     // pending_verification.
@@ -219,6 +223,15 @@ export class CheckoutService {
 
     const result = await this.prisma.$transaction(
       async (tx): Promise<CheckoutTransactionResult> => {
+        // Story 17.4: shipping (and saved-address snapshot) resolved inside
+        // the checkout transaction.
+        const shippingData = await resolveCheckoutShipping(
+          tx,
+          this.shipping,
+          dto,
+          customer?.id ?? null,
+        );
+
         const cart = await tx.cart.findFirst({
           where: customer
             ? { customerId: customer.id }
@@ -328,19 +341,8 @@ export class CheckoutService {
           data: {
             status: initialStatus,
             paymentRail: isStripe ? PaymentRail.STRIPE : PaymentRail.PAGO_MOVIL,
-            fulfillmentType: isDelivery
-              ? FulfillmentType.DELIVERY
-              : FulfillmentType.PICKUP,
-            recipientName: dto.recipientName,
-            recipientPhone: dto.recipientPhone,
-            // AD-8: address fields only populated for delivery; country is
-            // hardcoded (never buyer input — see CheckoutDto's doc comment).
-            // Orthogonal to paymentRail — applies identically to both.
-            addressLine1: isDelivery ? (dto.addressLine1 ?? null) : null,
-            addressLine2: isDelivery ? (dto.addressLine2 ?? null) : null,
-            city: isDelivery ? (dto.city ?? null) : null,
-            state: isDelivery ? (dto.state ?? null) : null,
-            country: isDelivery ? 'Venezuela' : null,
+            fulfillmentType: FulfillmentType.DELIVERY,
+            ...shippingData,
             totalUsd,
             fxRateVesPerUsd: fxRate?.vesPerUsd ?? null,
             totalVes,

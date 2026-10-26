@@ -151,7 +151,10 @@ describe('Epic 14 regression (e2e, Story 14.7)', () => {
       .set('Cookie', cookie)
       .send({
         paymentRail: rail,
-        fulfillmentType: 'pickup',
+        fulfillmentType: 'delivery',
+        addressLine1: 'Av. Test 1',
+        city: 'Caracas',
+        state: 'Distrito Capital',
         recipientName: 'Maria Perez',
         recipientPhone: '0412-1234567',
       })

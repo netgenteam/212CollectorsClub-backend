@@ -55,10 +55,13 @@ function extractCartCookie(res: request.Response): string {
   return cartCookie;
 }
 
-function pagoMovilPickupBody(overrides: Record<string, unknown> = {}) {
+function pagoMovilBody(overrides: Record<string, unknown> = {}) {
   return {
     paymentRail: 'pago_movil',
-    fulfillmentType: 'pickup',
+    fulfillmentType: 'delivery',
+    addressLine1: 'Av. Test 1',
+    city: 'Caracas',
+    state: 'Distrito Capital',
     recipientName: 'Maria Perez',
     recipientPhone: '0412-1234567',
     ...overrides,
@@ -153,7 +156,7 @@ describe('AdminOrdersController — Story 9.2 payment decisions (e2e)', () => {
     const checkoutRes = await request(app.getHttpServer())
       .post('/api/v1/checkout')
       .set('Cookie', cartCookie)
-      .send(pagoMovilPickupBody())
+      .send(pagoMovilBody())
       .expect(201);
     const body = checkoutRes.body as CheckoutResponse;
     return { orderId: body.orderId, orderAccessToken: body.orderAccessToken };

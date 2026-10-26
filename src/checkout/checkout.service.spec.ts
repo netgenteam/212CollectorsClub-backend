@@ -10,6 +10,7 @@ import {
   CheckoutFulfillmentType,
   CheckoutPaymentRail,
 } from './dto/checkout.dto.js';
+import { ShippingValidationService } from '../shipping/shipping-validation.service.js';
 import { SINGLETON_FX_RATE_ID } from './fx-rate.constants.js';
 
 const CHARIZARD_ID = 'f65915f5-2931-4e50-af95-630b1fd7b950';
@@ -36,12 +37,16 @@ function buildCartItem(overrides: {
   };
 }
 
+/** Story 17.4: pickup is retired; the "simple" fixture is a flat delivery. */
 function buildPickupDto(overrides: Partial<CheckoutDto> = {}): CheckoutDto {
   return {
     paymentRail: CheckoutPaymentRail.PAGO_MOVIL,
-    fulfillmentType: CheckoutFulfillmentType.PICKUP,
+    fulfillmentType: CheckoutFulfillmentType.DELIVERY,
     recipientName: 'Maria Perez',
     recipientPhone: '0412-1234567',
+    addressLine1: 'Av. Francisco de Miranda',
+    city: 'Caracas',
+    state: 'Distrito Capital',
     ...overrides,
   };
 }
@@ -64,9 +69,12 @@ function buildStripePickupDto(
 ): CheckoutDto {
   return {
     paymentRail: CheckoutPaymentRail.STRIPE,
-    fulfillmentType: CheckoutFulfillmentType.PICKUP,
+    fulfillmentType: CheckoutFulfillmentType.DELIVERY,
     recipientName: 'Maria Perez',
     recipientPhone: '0412-1234567',
+    addressLine1: 'Av. Francisco de Miranda',
+    city: 'Caracas',
+    state: 'Distrito Capital',
     ...overrides,
   };
 }
@@ -114,6 +122,7 @@ describe('CheckoutService', () => {
         CheckoutService,
         { provide: PrismaService, useValue: prisma },
         { provide: STRIPE_CLIENT, useValue: stripeClient },
+        { provide: ShippingValidationService, useValue: {} },
         {
           provide: ConfigService,
           useValue: {
@@ -373,25 +382,18 @@ describe('CheckoutService', () => {
       );
     });
 
-    it('sets fulfillmentType=PICKUP and nulls every address field (including country) for a pickup checkout', async () => {
-      tx.cart.findFirst.mockResolvedValue({
-        id: 'cart-1',
-        items: [buildCartItem({})],
+    it('rejects fulfillmentType=pickup with 400 PICKUP_NOT_SUPPORTED before the transaction (no order, no hold)', async () => {
+      await expect(
+        service.checkout(
+          'cart-1',
+          buildPickupDto({ fulfillmentType: CheckoutFulfillmentType.PICKUP }),
+        ),
+      ).rejects.toMatchObject({
+        status: 400,
+        response: { errorCode: 'PICKUP_NOT_SUPPORTED' },
       });
-
-      await service.checkout('cart-1', buildPickupDto());
-
-      const orderCreateArg = tx.order.create.mock.calls[0][0] as {
-        data: Record<string, unknown>;
-      };
-      expect(orderCreateArg.data).toMatchObject({
-        fulfillmentType: 'PICKUP',
-        addressLine1: null,
-        addressLine2: null,
-        city: null,
-        state: null,
-        country: null,
-      });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(tx.order.create).not.toHaveBeenCalled();
     });
 
     it('sets fulfillmentType=DELIVERY, copies the address fields, and hardcodes country=Venezuela for a delivery checkout', async () => {

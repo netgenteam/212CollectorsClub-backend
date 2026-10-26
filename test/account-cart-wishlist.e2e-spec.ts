@@ -423,7 +423,10 @@ describe('Account cart and wishlist with login merge (e2e, Story 12.5)', () => {
         .set('Cookie', anon)
         .send({
           paymentRail: 'pago_movil',
-          fulfillmentType: 'pickup',
+          fulfillmentType: 'delivery',
+          addressLine1: 'Av. Test 1',
+          city: 'Caracas',
+          state: 'Distrito Capital',
           recipientName: 'Maria Perez',
           recipientPhone: '0412-1234567',
         })

@@ -103,7 +103,10 @@ describe('Stripe webhook (e2e, Story 14.5)', () => {
       .set('Cookie', cookie)
       .send({
         paymentRail: 'stripe',
-        fulfillmentType: 'pickup',
+        fulfillmentType: 'delivery',
+        addressLine1: 'Av. Test 1',
+        city: 'Caracas',
+        state: 'Distrito Capital',
         recipientName: 'Maria Perez',
         recipientPhone: '0412-1234567',
       })

@@ -64,10 +64,13 @@ function extractCartCookie(res: request.Response): string {
   return cartCookie;
 }
 
-function pickupBody(overrides: Record<string, unknown> = {}) {
+function flatBody(overrides: Record<string, unknown> = {}) {
   return {
     paymentRail: 'pago_movil',
-    fulfillmentType: 'pickup',
+    fulfillmentType: 'delivery',
+    addressLine1: 'Av. Test 1',
+    city: 'Caracas',
+    state: 'Distrito Capital',
     recipientName: 'Maria Perez',
     recipientPhone: '0412-1234567',
     ...overrides,
@@ -144,7 +147,7 @@ describe('CheckoutController (e2e)', () => {
 
   describe('rejections that never touch the cart/Order (DTO-level, NFR-3)', () => {
     it('400s when recipientName is missing', () => {
-      const body = pickupBody();
+      const body = flatBody();
       delete (body as Record<string, unknown>).recipientName;
       return request(app.getHttpServer())
         .post('/api/v1/checkout')
@@ -152,13 +155,26 @@ describe('CheckoutController (e2e)', () => {
         .expect(400);
     });
 
-    it('400s when fulfillmentType is missing entirely (no explicit pickup or delivery selection)', () => {
-      const body = pickupBody();
+    it('Story 17.4: fulfillmentType defaults to delivery, so omitting it still requires the address (400)', () => {
+      const body = flatBody();
       delete (body as Record<string, unknown>).fulfillmentType;
+      delete (body as Record<string, unknown>).addressLine1;
       return request(app.getHttpServer())
         .post('/api/v1/checkout')
         .send(body)
         .expect(400);
+    });
+
+    it('Story 17.4: fulfillmentType=pickup is retired -> 400 PICKUP_NOT_SUPPORTED (even with an empty cart)', () => {
+      return request(app.getHttpServer())
+        .post('/api/v1/checkout')
+        .send(flatBody({ fulfillmentType: 'pickup' }))
+        .expect(400)
+        .expect((res) => {
+          if ((res.body as ApiErrorBody).errorCode !== 'PICKUP_NOT_SUPPORTED') {
+            throw new Error(`Got: ${JSON.stringify(res.body)}`);
+          }
+        });
     });
 
     it('400s when fulfillmentType=delivery is missing its address fields', () => {
@@ -177,14 +193,14 @@ describe('CheckoutController (e2e)', () => {
     it('400s on an unrecognized paymentRail (pago_movil and stripe are the only legal values)', () => {
       return request(app.getHttpServer())
         .post('/api/v1/checkout')
-        .send(pickupBody({ paymentRail: 'bogus_rail' }))
+        .send(flatBody({ paymentRail: 'bogus_rail' }))
         .expect(400);
     });
 
     it('400s on the retired rail value (Story 14.6, AD-49)', () => {
       return request(app.getHttpServer())
         .post('/api/v1/checkout')
-        .send(pickupBody({ paymentRail: 'pay' + 'pal' }))
+        .send(flatBody({ paymentRail: 'pay' + 'pal' }))
         .expect(400);
     });
   });
@@ -193,7 +209,7 @@ describe('CheckoutController (e2e)', () => {
     it('rejects with 422 errorCode EMPTY_CART when there is no cart cookie at all', () => {
       return request(app.getHttpServer())
         .post('/api/v1/checkout')
-        .send(pickupBody())
+        .send(flatBody())
         .expect(422)
         .expect((res) => {
           const body = res.body as ApiErrorBody;
@@ -206,7 +222,7 @@ describe('CheckoutController (e2e)', () => {
     });
   });
 
-  it('successful PICKUP checkout: snapshots each line, sets totals/FX once, creates a guarded StockHold per line, writes the []->pending_verification history row, clears the cart, and returns a token whose hash (not the raw value) matches Order.accessTokenHash', async () => {
+  it('successful flat-format DELIVERY checkout: snapshots each line, sets totals/FX once, creates a guarded StockHold per line, writes the []->pending_verification history row, clears the cart, and returns a token whose hash (not the raw value) matches Order.accessTokenHash', async () => {
     const addFirst = await request(app.getHttpServer())
       .post('/api/v1/cart/items')
       .send({ productId: OP_ROMANCE_DAWN_ID, quantity: 2 })
@@ -229,7 +245,7 @@ describe('CheckoutController (e2e)', () => {
     const checkoutRes = await request(app.getHttpServer())
       .post('/api/v1/checkout')
       .set('Cookie', cartCookie)
-      .send(pickupBody())
+      .send(flatBody())
       .expect(201);
     const body = checkoutRes.body as CheckoutResponse;
 
@@ -281,16 +297,18 @@ describe('CheckoutController (e2e)', () => {
       if (order.paymentRail !== 'PAGO_MOVIL') {
         throw new Error(`Expected PAGO_MOVIL, got ${order.paymentRail}`);
       }
-      if (order.fulfillmentType !== 'PICKUP') {
-        throw new Error(`Expected PICKUP, got ${order.fulfillmentType}`);
+      if (order.fulfillmentType !== 'DELIVERY') {
+        throw new Error(`Expected DELIVERY, got ${order.fulfillmentType}`);
       }
       if (
-        order.addressLine1 !== null ||
-        order.city !== null ||
-        order.country !== null
+        order.addressLine1 !== 'Av. Test 1' ||
+        order.city !== 'Caracas' ||
+        order.country !== 'Venezuela' ||
+        order.shippingAgencyId !== null ||
+        order.municipality !== null
       ) {
         throw new Error(
-          `Expected all address fields null for pickup, got: ${JSON.stringify(order)}`,
+          `Expected legacy flat address and no Epic 17 fields, got: ${JSON.stringify(order)}`,
         );
       }
       const expectedHash = createHash('sha256')
@@ -461,7 +479,7 @@ describe('CheckoutController (e2e)', () => {
       await request(app.getHttpServer())
         .post('/api/v1/checkout')
         .set('Cookie', cartCookie)
-        .send(pickupBody())
+        .send(flatBody())
         .expect(409)
         .expect((res) => {
           const body = res.body as ApiErrorBody;
@@ -544,11 +562,11 @@ describe('CheckoutController (e2e)', () => {
       request(app.getHttpServer())
         .post('/api/v1/checkout')
         .set('Cookie', cookieA)
-        .send(pickupBody()),
+        .send(flatBody()),
       request(app.getHttpServer())
         .post('/api/v1/checkout')
         .set('Cookie', cookieB)
-        .send(pickupBody()),
+        .send(flatBody()),
     ]);
 
     const statuses = [resA.status, resB.status].sort((a, b) => a - b);
