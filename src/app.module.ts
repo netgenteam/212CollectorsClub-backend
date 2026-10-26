@@ -19,6 +19,7 @@ import { SimulatorModule } from './simulator/simulator.module.js';
 import { CustomerAuthModule } from './customer-auth/customer-auth.module.js';
 import { AdminCustomersModule } from './admin-customers/admin-customers.module.js';
 import { AdminTcgModule } from './admin-tcg/admin-tcg.module.js';
+import { CustomerAddressesModule } from './customer-addresses/customer-addresses.module.js';
 import { ShippingModule } from './shipping/shipping.module.js';
 import { WishlistModule } from './wishlist/wishlist.module.js';
 
@@ -69,6 +70,7 @@ import { WishlistModule } from './wishlist/wishlist.module.js';
     AdminTcgModule,
     // Story 17.1 (FR-82, AD-71): shipping agency catalog.
     ShippingModule,
+    CustomerAddressesModule,
   ],
   controllers: [AppController],
   providers: [AppService],
