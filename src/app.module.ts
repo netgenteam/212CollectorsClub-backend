@@ -19,6 +19,7 @@ import { SimulatorModule } from './simulator/simulator.module.js';
 import { CustomerAuthModule } from './customer-auth/customer-auth.module.js';
 import { AdminCustomersModule } from './admin-customers/admin-customers.module.js';
 import { AdminTcgModule } from './admin-tcg/admin-tcg.module.js';
+import { ShippingModule } from './shipping/shipping.module.js';
 import { WishlistModule } from './wishlist/wishlist.module.js';
 
 @Module({
@@ -66,6 +67,8 @@ import { WishlistModule } from './wishlist/wishlist.module.js';
     AdminCustomersModule,
     // Story 15.5 (FR-68, AD-56): admin master card search.
     AdminTcgModule,
+    // Story 17.1 (FR-82, AD-71): shipping agency catalog.
+    ShippingModule,
   ],
   controllers: [AppController],
   providers: [AppService],

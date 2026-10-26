@@ -536,6 +536,19 @@ model Order {
   /// value (see CheckoutDto's doc comment for the full reasoning).
   country         String?
 
+  /// Story 17.1 (AD-70): national-shipping snapshot. All nullable — historical
+  /// orders (incl. PICKUP) keep null; values are copied, no FK to the address.
+  recipientIdDoc   String?         @db.VarChar(12)
+  deliveryMode     DeliveryMode?
+  shippingAgencyId String?         @db.Uuid
+  shippingAgency   ShippingAgency? @relation(fields: [shippingAgencyId], references: [id], onDelete: SetNull)
+  agencyBranchName String?         @db.VarChar(150)
+  agencyBranchCode String?         @db.VarChar(50)
+  municipality     String?         @db.VarChar(100)
+  parish           String?         @db.VarChar(100)
+  referencePoint   String?         @db.VarChar(200)
+  trackingNumber   String?         @db.VarChar(64)
+
   totalUsd        Decimal  @db.Decimal(10, 2)
   /// Null for Stripe orders (AD-3) — only ever set, once, for Pago Móvil.
   fxRateVesPerUsd Decimal? @db.Decimal(18, 4)
@@ -574,9 +587,11 @@ model Order {
   /// "Does this Order have proof attached yet" (AC3) is simply "is this
   /// list non-empty" — see ProofOfPaymentService.
   proofOfPayments ProofOfPayment[]
+  trackingEvents  OrderTrackingEvent[]
 
   @@index([customerId, createdAt])
   @@index([stripePaymentIntentId])
+  @@index([shippingAgencyId])
   @@map("Orders")
 }
 
@@ -690,6 +705,7 @@ model AdminUser {
   /// traverses it; Story 9.x (admin order actions) is the first real
   /// writer of an `actorType = ADMIN` history row.
   orderStatusHistoryRows OrderStatusHistory[]
+  orderTrackingEvents    OrderTrackingEvent[]
 
   /// Story 10.1: back-reference for `LandingConfigEntry.updatedById`, same
   /// nullable-FK pattern as `orderStatusHistoryRows` above.
@@ -964,6 +980,7 @@ model Customer {
   carts            Cart[]
   wishlists        Wishlist[]
   orders           Order[]
+  addresses        CustomerAddress[]
 
   @@map("Customers")
 }
@@ -1048,4 +1065,100 @@ model StripeWebhookEvent {
   processedAt DateTime @default(now())
 
   @@map("Stripe_Webhook_Events")
+}
+
+// ---------------------------------------------------------------------------
+// Epic 17 (AD-70): address book and national shipping.
+// ---------------------------------------------------------------------------
+
+/// Wire values: agency_office | home_delivery.
+enum DeliveryMode {
+  AGENCY_OFFICE
+  HOME_DELIVERY
+}
+
+/// Story 17.1 (AD-70, FR-82): shipping agency catalog (MRW, Zoom, Tealca,
+/// Domesa), seeded inside the migration. `code` is lowercase.
+model ShippingAgency {
+  id                  String   @id @default(uuid()) @db.Uuid
+  name                String   @db.VarChar(80)
+  code                String   @unique @db.VarChar(30)
+  isActive            Boolean  @default(true)
+  allowsOfficePickup  Boolean  @default(true)
+  allowsHomeDelivery  Boolean  @default(true)
+  /// https:// template with exactly one `{trackingNumber}` marker; null = none.
+  trackingUrlTemplate String?
+  sortOrder           Int      @default(0)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  branches  ShippingBranch[]
+  addresses CustomerAddress[]
+  orders    Order[]
+
+  @@index([isActive, sortOrder])
+  @@map("Shipping_Agencies")
+}
+
+/// Story 17.1 (FR-83): modeled only; no seed and no endpoints yet.
+model ShippingBranch {
+  id           String         @id @default(uuid()) @db.Uuid
+  agencyId     String         @db.Uuid
+  agency       ShippingAgency @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  name         String         @db.VarChar(150)
+  code         String?        @db.VarChar(50)
+  state        String         @db.VarChar(100)
+  municipality String         @db.VarChar(100)
+  address      String?        @db.VarChar(200)
+  isActive     Boolean        @default(true)
+
+  @@index([agencyId])
+  @@map("Shipping_Branches")
+}
+
+/// Story 17.1 (AD-70, FR-84): customer address book (max 10 per customer).
+/// NOT MODELED BY PRISMA: partial unique index
+/// "Customer_Addresses_customerId_default_key" ON ("customerId") WHERE "isDefault"
+/// (hand-written at the end of migration 20261026100000; one default per customer).
+model CustomerAddress {
+  id               String         @id @default(uuid()) @db.Uuid
+  customerId       String         @db.Uuid
+  customer         Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  agencyId         String         @db.Uuid
+  agency           ShippingAgency @relation(fields: [agencyId], references: [id], onDelete: Restrict)
+  label            String?        @db.VarChar(50)
+  recipientName    String         @db.VarChar(200)
+  recipientPhone   String         @db.VarChar(20)
+  recipientIdDoc   String         @db.VarChar(12)
+  deliveryMode     DeliveryMode
+  agencyBranchName String?        @db.VarChar(150)
+  agencyBranchCode String?        @db.VarChar(50)
+  state            String         @db.VarChar(100)
+  municipality     String         @db.VarChar(100)
+  parish           String?        @db.VarChar(100)
+  addressLine1     String?        @db.VarChar(200)
+  addressLine2     String?        @db.VarChar(200)
+  referencePoint   String?        @db.VarChar(200)
+  isDefault        Boolean        @default(false)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([customerId, createdAt])
+  @@index([agencyId])
+  @@map("Customer_Addresses")
+}
+
+/// Story 17.1 (AD-70, AD-76): audit trail of tracking-number changes.
+model OrderTrackingEvent {
+  id            String     @id @default(uuid()) @db.Uuid
+  orderId       String     @db.Uuid
+  order         Order      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  adminUserId   String?    @db.Uuid
+  adminUser     AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: SetNull)
+  previousValue String?
+  newValue      String?
+  createdAt     DateTime   @default(now())
+
+  @@index([orderId, createdAt])
+  @@map("Order_Tracking_Events")
 }

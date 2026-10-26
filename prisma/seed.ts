@@ -605,6 +605,29 @@ async function seedAdminUser(): Promise<void> {
  * `PUT` endpoints, re-running this seed (e.g. on every fresh deploy) must
  * never silently revert that edit back to the placeholder.
  */
+/**
+ * Story 17.1 (AD-70, FR-82): national shipping agencies. Same rows as the
+ * migration; `skipDuplicates` = ON CONFLICT DO NOTHING, so an admin's edits
+ * (name, flags, trackingUrlTemplate) are never overwritten. Domesa: office only.
+ */
+async function seedShippingAgencies(): Promise<void> {
+  const result = await prisma.shippingAgency.createMany({
+    data: [
+      { name: 'MRW', code: 'mrw', sortOrder: 1 },
+      { name: 'Zoom', code: 'zoom', sortOrder: 2 },
+      { name: 'Tealca', code: 'tealca', sortOrder: 3 },
+      {
+        name: 'Domesa',
+        code: 'domesa',
+        allowsHomeDelivery: false,
+        sortOrder: 4,
+      },
+    ],
+    skipDuplicates: true,
+  });
+  console.log(`Shipping agencies seeded (new rows: ${result.count}).`);
+}
+
 async function seedLandingContent(): Promise<void> {
   console.log(
     'Seeding landing content placeholders (texts + banners + drop212 + pack_simulator)...',
@@ -892,6 +915,7 @@ async function main(): Promise<void> {
 
   await seedAdminUser();
   await seedLandingContent();
+  await seedShippingAgencies();
 }
 
 main()
