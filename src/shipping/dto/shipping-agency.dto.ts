@@ -20,7 +20,7 @@ export class ShippingAgencyPublicDto {
   @ApiProperty({ example: 'MRW' })
   name: string;
 
-  @ApiProperty({ example: 'mrw' })
+  @ApiProperty({ example: 'MRW' })
   code: string;
 
   @ApiProperty()

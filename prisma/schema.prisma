@@ -1078,11 +1078,11 @@ enum DeliveryMode {
 }
 
 /// Story 17.1 (AD-70, FR-82): shipping agency catalog (MRW, Zoom, Tealca,
-/// Domesa), seeded inside the migration. `code` is lowercase.
+/// Domesa), seeded inside the migration. `code` is UPPER-case.
 model ShippingAgency {
   id                  String   @id @default(uuid()) @db.Uuid
   name                String   @db.VarChar(80)
-  code                String   @unique @db.VarChar(30)
+  code                String   @unique @db.VarChar(50)
   isActive            Boolean  @default(true)
   allowsOfficePickup  Boolean  @default(true)
   allowsHomeDelivery  Boolean  @default(true)

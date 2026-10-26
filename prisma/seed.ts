@@ -613,12 +613,12 @@ async function seedAdminUser(): Promise<void> {
 async function seedShippingAgencies(): Promise<void> {
   const result = await prisma.shippingAgency.createMany({
     data: [
-      { name: 'MRW', code: 'mrw', sortOrder: 1 },
-      { name: 'Zoom', code: 'zoom', sortOrder: 2 },
-      { name: 'Tealca', code: 'tealca', sortOrder: 3 },
+      { name: 'MRW', code: 'MRW', sortOrder: 1 },
+      { name: 'Zoom', code: 'ZOOM', sortOrder: 2 },
+      { name: 'Tealca', code: 'TEALCA', sortOrder: 3 },
       {
         name: 'Domesa',
-        code: 'domesa',
+        code: 'DOMESA',
         allowsHomeDelivery: false,
         sortOrder: 4,
       },

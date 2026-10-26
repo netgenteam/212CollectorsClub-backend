@@ -4,7 +4,7 @@ import { ShippingAgenciesService } from './shipping-agencies.service.js';
 const base = {
   id: 'a',
   name: 'MRW',
-  code: 'mrw',
+  code: 'MRW',
   isActive: true,
   allowsOfficePickup: true,
   allowsHomeDelivery: true,

@@ -16,7 +16,7 @@ const TEST_EMAIL = 'e2e-admin-story-17-1@212collectorsclub.test';
 const TEST_PASSWORD = 'correct-horse-battery-staple-17-1';
 const PUBLIC = '/api/v1/shipping/agencies';
 const ADMIN = '/api/v1/admin/shipping/agencies';
-const SEEDED_CODES = ['mrw', 'zoom', 'tealca', 'domesa'];
+const SEEDED_CODES = ['MRW', 'ZOOM', 'TEALCA', 'DOMESA'];
 
 interface AgencyBody {
   id: string;
@@ -142,13 +142,13 @@ describe('Shipping agencies (e2e)', () => {
         'id',
         'name',
       ]);
-      const domesa = ours.find((r) => r.code === 'domesa')!;
+      const domesa = ours.find((r) => r.code === 'DOMESA')!;
       expect(domesa.allowsHomeDelivery).toBe(false);
       expect(domesa.allowsOfficePickup).toBe(true);
     });
 
     it('seeded agencies have no trackingUrlTemplate by default', async () => {
-      const domesa = await seeded('domesa');
+      const domesa = await seeded('DOMESA');
       expect(domesa.trackingUrlTemplate).toBeNull();
     });
   });
@@ -172,7 +172,7 @@ describe('Shipping agencies (e2e)', () => {
 
   describe('PATCH /admin/shipping/agencies/:id', () => {
     it('401 without token', async () => {
-      const mrw = await seeded('mrw');
+      const mrw = await seeded('MRW');
       await server()
         .patch(`${ADMIN}/${mrw.id}`)
         .send({ name: 'X' })
@@ -180,7 +180,7 @@ describe('Shipping agencies (e2e)', () => {
     });
 
     it('edits fields and sets/clears the tracking template', async () => {
-      const mrw = await seeded('mrw');
+      const mrw = await seeded('MRW');
       const tpl = 'https://tracking.test/t?n={trackingNumber}';
       const ok = await server()
         .patch(`${ADMIN}/${mrw.id}`)
@@ -201,7 +201,7 @@ describe('Shipping agencies (e2e)', () => {
     });
 
     it('deactivated agency disappears from the public list', async () => {
-      const zoom = await seeded('zoom');
+      const zoom = await seeded('ZOOM');
       await server()
         .patch(`${ADMIN}/${zoom.id}`)
         .set(auth())
@@ -231,7 +231,7 @@ describe('Shipping agencies (e2e)', () => {
       'https://tracking.test/no-marker',
       'https://tracking.test/{trackingNumber}/{trackingNumber}',
     ])('400 TRACKING_TEMPLATE_INVALID for %s', async (tpl) => {
-      const mrw = await seeded('mrw');
+      const mrw = await seeded('MRW');
       const res = await server()
         .patch(`${ADMIN}/${mrw.id}`)
         .set(auth())
@@ -243,7 +243,7 @@ describe('Shipping agencies (e2e)', () => {
     });
 
     it('400 for unknown fields (strictBody) and empty body', async () => {
-      const mrw = await seeded('mrw');
+      const mrw = await seeded('MRW');
       await server()
         .patch(`${ADMIN}/${mrw.id}`)
         .set(auth())
@@ -254,11 +254,11 @@ describe('Shipping agencies (e2e)', () => {
         .set(auth())
         .send({})
         .expect(400);
-      expect((await seeded('mrw')).code).toBe('mrw');
+      expect((await seeded('MRW')).code).toBe('MRW');
     });
 
     it('422 AGENCY_WITHOUT_DELIVERY_MODE when an active agency allows nothing', async () => {
-      const domesa = await seeded('domesa');
+      const domesa = await seeded('DOMESA');
       const res = await server()
         .patch(`${ADMIN}/${domesa.id}`)
         .set(auth())
@@ -267,7 +267,7 @@ describe('Shipping agencies (e2e)', () => {
       expect((res.body as { errorCode: string }).errorCode).toBe(
         'AGENCY_WITHOUT_DELIVERY_MODE',
       );
-      expect((await seeded('domesa')).allowsOfficePickup).toBe(true);
+      expect((await seeded('DOMESA')).allowsOfficePickup).toBe(true);
     });
   });
 
@@ -356,6 +356,52 @@ describe('Shipping agencies (e2e)', () => {
       expect((dup.body as { errorCode: string }).errorCode).toBe(
         'SHIPPING_AGENCY_CODE_TAKEN',
       );
+    });
+
+    it('seeded codes already match the normalized (upper-case) form', async () => {
+      const rows = await prisma.shippingAgency.findMany({
+        where: { code: { in: SEEDED_CODES } },
+      });
+      expect(rows).toHaveLength(4);
+      for (const r of rows) expect(r.code).toMatch(/^[A-Z0-9_-]{2,50}$/);
+      expect(
+        await prisma.shippingAgency.count({
+          where: { code: { in: ['mrw', 'zoom', 'tealca', 'domesa'] } },
+        }),
+      ).toBe(0);
+    });
+
+    it('409 for a seeded code in any case (POST code=mrw collides with MRW)', async () => {
+      for (const code of ['mrw', 'MRW', ' Mrw ']) {
+        const res = await server()
+          .post(ADMIN)
+          .set(auth())
+          .send({ name: 'x', code })
+          .expect(409);
+        expect((res.body as { errorCode: string }).errorCode).toBe(
+          'SHIPPING_AGENCY_CODE_TAKEN',
+        );
+      }
+    });
+
+    it('accepts a 50-char code (201) and rejects 51 (400)', async () => {
+      const code = `E${randomUUID().replace(/-/g, '').toUpperCase()}`.padEnd(
+        50,
+        'X',
+      );
+      expect(code).toHaveLength(50);
+      const ok = await server()
+        .post(ADMIN)
+        .set(auth())
+        .send({ name: 'Long', code })
+        .expect(201);
+      track((ok.body as AgencyBody).id);
+      expect((ok.body as AgencyBody).code).toBe(code);
+      await server()
+        .post(ADMIN)
+        .set(auth())
+        .send({ name: 'Long', code: `${code}X` })
+        .expect(400);
     });
 
     it('concurrent POSTs with the same code: exactly one 201, the rest 409, never 500', async () => {
@@ -486,7 +532,7 @@ describe('Shipping agencies (e2e)', () => {
         },
       });
       customerIds.push(customer.id);
-      const mrw = await seeded('mrw');
+      const mrw = await seeded('MRW');
       const addr = (isDefault: boolean) => ({
         customerId: customer.id,
         agencyId: mrw.id,
@@ -507,7 +553,7 @@ describe('Shipping agencies (e2e)', () => {
     });
 
     it('seed createMany(skipDuplicates) is idempotent and keeps admin edits', async () => {
-      const mrw = await seeded('mrw');
+      const mrw = await seeded('MRW');
       await prisma.shippingAgency.update({
         where: { id: mrw.id },
         data: { name: 'Edited by admin' },
@@ -531,7 +577,7 @@ describe('Shipping agencies (e2e)', () => {
           where: { code: { in: SEEDED_CODES } },
         }),
       ).toBe(before);
-      expect((await seeded('mrw')).name).toBe('Edited by admin');
+      expect((await seeded('MRW')).name).toBe('Edited by admin');
     });
   });
 });
