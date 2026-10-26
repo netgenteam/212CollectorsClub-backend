@@ -55,6 +55,61 @@ export class OrderFulfillmentDto {
     description: 'Null when fulfillment type is "pickup".',
   })
   country: string | null;
+
+  @ApiPropertyOptional({
+    example: 'V-12345678',
+    nullable: true,
+    description:
+      'Story 17.5: recipient national ID snapshot; null on legacy orders.',
+  })
+  recipientIdDoc: string | null;
+
+  @ApiPropertyOptional({
+    example: 'agency_office',
+    enum: ['agency_office', 'home_delivery'],
+    nullable: true,
+    description:
+      'Story 17.5: delivery mode (lowercase); null on legacy orders.',
+  })
+  deliveryMode: string | null;
+
+  @ApiPropertyOptional({ nullable: true, example: 'MRW Chacao' })
+  agencyBranchName: string | null;
+
+  @ApiPropertyOptional({ nullable: true, example: 'CHA-01' })
+  agencyBranchCode: string | null;
+
+  @ApiPropertyOptional({ nullable: true, example: 'Chacao' })
+  municipality: string | null;
+
+  @ApiPropertyOptional({ nullable: true, example: 'Chacao' })
+  parish: string | null;
+
+  @ApiPropertyOptional({ nullable: true, example: 'Frente a la plaza' })
+  referencePoint: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    type: 'object',
+    properties: {
+      name: { type: 'string', example: 'MRW' },
+      code: { type: 'string', example: 'MRW' },
+    },
+    description:
+      'Story 17.5: shipping agency (name/code only, never the tracking template); null when none.',
+  })
+  shippingAgency: { name: string; code: string } | null;
+
+  @ApiPropertyOptional({ nullable: true, example: 'MRW0012345' })
+  trackingNumber: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    example: 'https://agency.example/track?n=MRW0012345',
+    description:
+      'Agency template with {trackingNumber} URL-encoded; null if number, agency or template is missing.',
+  })
+  trackingUrl: string | null;
 }
 
 /** One snapshotted Order line — the exact same shape/values the Story 4.1

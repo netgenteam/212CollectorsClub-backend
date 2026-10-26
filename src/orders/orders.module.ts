@@ -12,6 +12,7 @@ import { AdminOrdersController } from './admin-orders.controller.js';
 import { AdminOrdersService } from './admin-orders.service.js';
 import { AdminOrderPaymentService } from './admin-order-payment.service.js';
 import { AdminOrderFulfillmentService } from './admin-order-fulfillment.service.js';
+import { AdminOrderTrackingService } from './admin-order-tracking.service.js';
 
 // PrismaService is provided by the global PrismaModule — no need to
 // re-import it here (same pattern CheckoutModule already uses).
@@ -71,6 +72,7 @@ import { AdminOrderFulfillmentService } from './admin-order-fulfillment.service.
     AdminOrdersService,
     AdminOrderPaymentService,
     AdminOrderFulfillmentService,
+    AdminOrderTrackingService,
   ],
   exports: [StockHoldExpiryCronService, PaymentProcessingTimeoutCronService],
 })

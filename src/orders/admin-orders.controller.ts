@@ -1,7 +1,9 @@
 import { createReadStream } from 'node:fs';
 import {
   Controller,
+  Body,
   Get,
+  Patch,
   HttpCode,
   HttpStatus,
   Param,
@@ -15,6 +17,7 @@ import {
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
+  ApiBody,
   ApiOperation,
   ApiParam,
   ApiResponse,
@@ -29,6 +32,12 @@ import { OrderLookupService } from './order-lookup.service.js';
 import { AdminOrderDetailResponseDto } from './dto/admin-order-detail-response.dto.js';
 import { AdminOrderPaymentService } from './admin-order-payment.service.js';
 import { AdminOrderFulfillmentService } from './admin-order-fulfillment.service.js';
+import { AdminOrderTrackingService } from './admin-order-tracking.service.js';
+import { strictBody } from '../customer-auth/strict-body.pipe.js';
+import {
+  AdminOrderTrackingResponseDto,
+  UpdateOrderTrackingDto,
+} from './dto/admin-order-tracking.dto.js';
 import { ListAdminOrdersQueryDto } from './dto/list-admin-orders-query.dto.js';
 import { PaginatedAdminOrdersResponseDto } from './dto/paginated-admin-orders-response.dto.js';
 import { AdminPaymentDecisionResponseDto } from './dto/admin-payment-decision-response.dto.js';
@@ -94,6 +103,7 @@ export class AdminOrdersController {
     private readonly adminOrderPaymentService: AdminOrderPaymentService,
     private readonly adminOrderFulfillmentService: AdminOrderFulfillmentService,
     private readonly orderLookup: OrderLookupService,
+    private readonly adminOrderTrackingService: AdminOrderTrackingService,
   ) {}
 
   @Get()
@@ -356,5 +366,40 @@ export class AdminOrdersController {
     @Req() request: RequestWithAdminUser,
   ): Promise<AdminFulfillmentDecisionResponseDto> {
     return this.adminOrderFulfillmentService.cancelOrder(orderId, request.user);
+  }
+
+  @Patch(':orderId/tracking')
+  @HttpCode(HttpStatus.OK)
+  @ApiParam({ name: 'orderId', format: 'uuid' })
+  @ApiBody({ type: UpdateOrderTrackingDto })
+  @ApiOperation({
+    summary: 'Set or clear the tracking number (admin)',
+    description:
+      'Story 17.5 (FR-89). Works in any order status; does not change the status nor send email. `trackingNumber` is trimmed and must match ^[A-Za-z0-9._/-]{3,64}$; null or "" clears it. Each effective change records an audit event (admin, previous and new value); repeating the same value is a no-op. `trackingUrl` comes from the agency template, null if number, agency or template is missing.',
+  })
+  @ApiResponse({ status: HttpStatus.OK, type: AdminOrderTrackingResponseDto })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'errorCode TRACKING_NUMBER_INVALID, or unknown body field.',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'errorCode ORDER_NOT_FOUND.',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'errorCode INVALID_ADMIN_TOKEN.',
+  })
+  setTracking(
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Body(strictBody(UpdateOrderTrackingDto))
+    dto: Readonly<UpdateOrderTrackingDto>,
+    @Req() request: RequestWithAdminUser,
+  ): Promise<AdminOrderTrackingResponseDto> {
+    return this.adminOrderTrackingService.setTracking(
+      orderId,
+      dto,
+      request.user,
+    );
   }
 }

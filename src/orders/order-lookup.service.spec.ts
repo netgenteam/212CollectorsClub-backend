@@ -28,6 +28,16 @@ function buildOrderWithLines(
     city: 'Caracas',
     state: 'Distrito Capital',
     country: 'Venezuela',
+    recipientIdDoc: null,
+    deliveryMode: null,
+    shippingAgencyId: null,
+    shippingAgency: null,
+    agencyBranchName: null,
+    agencyBranchCode: null,
+    municipality: null,
+    parish: null,
+    referencePoint: null,
+    trackingNumber: null,
     totalUsd: { toString: () => '179.98' } as never,
     fxRateVesPerUsd:
       overrides.fxRateVesPerUsd === undefined
@@ -74,7 +84,9 @@ describe('OrderLookupService', () => {
 
       expect(prisma.order.findUniqueOrThrow).toHaveBeenCalledWith({
         where: { id: 'order-1' },
-        include: { lines: { orderBy: { createdAt: 'asc' } } },
+        include: expect.objectContaining({
+          lines: { orderBy: { createdAt: 'asc' } },
+        }) as unknown,
       });
       expect(result).toEqual({
         orderId: 'order-1',
@@ -89,6 +101,16 @@ describe('OrderLookupService', () => {
           city: 'Caracas',
           state: 'Distrito Capital',
           country: 'Venezuela',
+          recipientIdDoc: null,
+          deliveryMode: null,
+          agencyBranchName: null,
+          agencyBranchCode: null,
+          municipality: null,
+          parish: null,
+          referencePoint: null,
+          shippingAgency: null,
+          trackingNumber: null,
+          trackingUrl: null,
         },
         totalUsd: 179.98,
         fxRateVesPerUsd: 40.5,
@@ -206,6 +228,9 @@ describe('OrderLookupService (customer orders)', () => {
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: 20,
         take: 20,
+        include: expect.objectContaining({
+          shippingAgency: expect.anything() as unknown,
+        }) as unknown,
       }),
     );
     expect(res.meta).toEqual({ page: 2, limit: 20, total: 45, totalPages: 3 });
@@ -249,5 +274,38 @@ describe('OrderLookupService (customer orders)', () => {
       },
     ]);
     expect(res.lines).toHaveLength(1);
+  });
+
+  it('Story 17.5: serializes shipping snapshot, builds trackingUrl and drops the template', async () => {
+    const findUniqueOrThrow = vi.fn().mockResolvedValue({
+      ...order,
+      recipientIdDoc: 'V-1',
+      deliveryMode: 'HOME_DELIVERY',
+      trackingNumber: 'A/1',
+      shippingAgency: {
+        name: 'MRW',
+        code: 'MRW',
+        trackingUrlTemplate: 'https://t.test/{trackingNumber}',
+      },
+    });
+    const service = new OrderLookupService({
+      order: { findUniqueOrThrow },
+    } as never);
+    const res = await service.getDetail('order-1');
+    expect(findUniqueOrThrow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        include: expect.objectContaining({
+          shippingAgency: expect.anything() as unknown,
+        }) as unknown,
+      }),
+    );
+    expect(res.fulfillment).toMatchObject({
+      recipientIdDoc: 'V-1',
+      deliveryMode: 'home_delivery',
+      shippingAgency: { name: 'MRW', code: 'MRW' },
+      trackingNumber: 'A/1',
+      trackingUrl: 'https://t.test/A%2F1',
+    });
+    expect(JSON.stringify(res)).not.toContain('trackingUrlTemplate');
   });
 });

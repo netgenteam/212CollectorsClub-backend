@@ -1,5 +1,6 @@
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
+import { buildTrackingUrl } from '../shipping/tracking-url.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type {
   Order,
@@ -14,6 +15,27 @@ import {
   OrderLookupLineDto,
   OrderStatusHistoryEntryDto,
 } from './dto/order-lookup-response.dto.js';
+
+/**
+ * Story 17.5 (AD-75): one JOIN brings the agency in for detail and list
+ * queries (no N+1). `trackingUrlTemplate` is read only to build `trackingUrl`
+ * and is dropped before serialization.
+ */
+const ORDER_INCLUDE = {
+  lines: { orderBy: { createdAt: 'asc' } },
+  shippingAgency: {
+    select: { name: true, code: true, trackingUrlTemplate: true },
+  },
+} as const;
+
+type OrderWithRelations = Order & {
+  lines: OrderLine[];
+  shippingAgency: {
+    name: string;
+    code: string;
+    trackingUrlTemplate: string | null;
+  } | null;
+};
 
 /**
  * Story 5.1 (FR-13 retrievability, FR-17; AD-17, AD-7). Pure read-side
@@ -49,7 +71,7 @@ export class OrderLookupService {
   async getDetail(orderId: string): Promise<OrderDetailResponseDto> {
     const order = await this.prisma.order.findUniqueOrThrow({
       where: { id: orderId },
-      include: { lines: { orderBy: { createdAt: 'asc' } } },
+      include: ORDER_INCLUDE,
     });
     return this.toDetailDto(order);
   }
@@ -85,7 +107,7 @@ export class OrderLookupService {
       this.prisma.order.count({ where }),
       this.prisma.order.findMany({
         where,
-        include: { lines: { orderBy: { createdAt: 'asc' } } },
+        include: ORDER_INCLUDE,
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * limit,
         take: limit,
@@ -113,7 +135,7 @@ export class OrderLookupService {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, customerId },
       include: {
-        lines: { orderBy: { createdAt: 'asc' } },
+        ...ORDER_INCLUDE,
         statusHistory: { orderBy: { createdAt: 'asc' } },
       },
     });
@@ -130,9 +152,7 @@ export class OrderLookupService {
     };
   }
 
-  private toDetailDto(
-    order: Order & { lines: OrderLine[] },
-  ): OrderDetailResponseDto {
+  private toDetailDto(order: OrderWithRelations): OrderDetailResponseDto {
     const fulfillment: OrderFulfillmentDto = {
       type: order.fulfillmentType.toLowerCase(),
       recipientName: order.recipientName,
@@ -142,6 +162,23 @@ export class OrderLookupService {
       city: order.city,
       state: order.state,
       country: order.country,
+      recipientIdDoc: order.recipientIdDoc,
+      deliveryMode: order.deliveryMode
+        ? order.deliveryMode.toLowerCase()
+        : null,
+      agencyBranchName: order.agencyBranchName,
+      agencyBranchCode: order.agencyBranchCode,
+      municipality: order.municipality,
+      parish: order.parish,
+      referencePoint: order.referencePoint,
+      shippingAgency: order.shippingAgency
+        ? { name: order.shippingAgency.name, code: order.shippingAgency.code }
+        : null,
+      trackingNumber: order.trackingNumber,
+      trackingUrl: buildTrackingUrl(
+        order.shippingAgency?.trackingUrlTemplate,
+        order.trackingNumber,
+      ),
     };
 
     const lines: OrderLookupLineDto[] = order.lines.map((line) => ({
