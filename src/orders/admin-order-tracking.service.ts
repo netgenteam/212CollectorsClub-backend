@@ -27,6 +27,9 @@ export class AdminOrderTrackingService {
     const next = this.normalize(dto.trackingNumber);
 
     return this.prisma.$transaction(async (tx) => {
+      // Serialize concurrent PATCHes on the same order so previousValue and
+      // the no-change check always see the latest committed value.
+      await tx.$queryRaw`SELECT id FROM "Orders" WHERE id = ${orderId}::uuid FOR UPDATE`;
       const order = await tx.order.findUnique({
         where: { id: orderId },
         select: {

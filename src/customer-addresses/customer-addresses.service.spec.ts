@@ -60,8 +60,11 @@ describe('CustomerAddressesService.create', () => {
     const { svc, create, tx } = build(0);
     await svc.create('c', dto);
     expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
-    const data = (create.mock.calls[0][0] as { data: Record<string, unknown> })
-      .data;
+    const data = (
+      (create.mock.calls[0] as unknown[])[0] as {
+        data: Record<string, unknown>;
+      }
+    ).data;
     expect(data).toMatchObject({
       isDefault: true,
       recipientIdDoc: 'V-12345678',
@@ -74,8 +77,11 @@ describe('CustomerAddressesService.create', () => {
     const { svc, create } = build(3);
     await svc.create('c', dto);
     expect(
-      (create.mock.calls[0][0] as { data: { isDefault: boolean } }).data
-        .isDefault,
+      (
+        (create.mock.calls[0] as unknown[])[0] as {
+          data: { isDefault: boolean };
+        }
+      ).data.isDefault,
     ).toBe(false);
   });
 
@@ -232,7 +238,9 @@ describe('CustomerAddressesService.update', () => {
     const { svc, ca } = buildWrite({});
     await svc.update('c', U1, { state: 'Zulia' });
     const data = (
-      ca.update.mock.calls[0][0] as { data: Record<string, unknown> }
+      (ca.update.mock.calls[0] as unknown[])[0] as {
+        data: Record<string, unknown>;
+      }
     ).data;
     expect(data).not.toHaveProperty('isDefault');
     expect(data).toMatchObject({

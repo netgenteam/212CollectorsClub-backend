@@ -349,5 +349,40 @@ describe('Order shipping exposure + tracking (e2e)', () => {
         (await prisma.order.findUniqueOrThrow({ where: { id } })).status,
       ).toBe('CANCELLED');
     });
+
+    it('concurrent PATCHes with distinct values keep a coherent event chain', async () => {
+      const { id } = await mkOrder(
+        shipped(agencyWithTpl, { trackingNumber: 'INIT-0' }),
+      );
+      const vals = Array.from({ length: 8 }, (_, i) => `CONC-${i}`);
+      const rs = await Promise.all(
+        vals.map((v) => patch(id, { trackingNumber: v })),
+      );
+      expect(rs.every((r) => r.status === 200)).toBe(true);
+      const ev = await prisma.orderTrackingEvent.findMany({
+        where: { orderId: id },
+        orderBy: { createdAt: 'asc' },
+      });
+      expect(ev).toHaveLength(8);
+      expect(ev[0].previousValue).toBe('INIT-0');
+      for (let i = 1; i < ev.length; i++) {
+        expect(ev[i].previousValue).toBe(ev[i - 1].newValue);
+      }
+      const o = await prisma.order.findUniqueOrThrow({ where: { id } });
+      expect(ev[ev.length - 1].newValue).toBe(o.trackingNumber);
+    });
+
+    it('concurrent PATCHes with the same value create exactly one event', async () => {
+      const { id } = await mkOrder(shipped(agencyWithTpl));
+      const rs = await Promise.all(
+        Array.from({ length: 6 }, () =>
+          patch(id, { trackingNumber: 'SAME-1' }),
+        ),
+      );
+      expect(rs.every((r) => r.status === 200)).toBe(true);
+      expect(
+        await prisma.orderTrackingEvent.count({ where: { orderId: id } }),
+      ).toBe(1);
+    });
   });
 });
