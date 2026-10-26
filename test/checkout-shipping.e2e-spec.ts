@@ -237,6 +237,14 @@ describe('Checkout shipping (e2e, Story 17.4)', { timeout: 30000 }, () => {
         .expect(201);
     });
 
+    it('pickup without recipientName/phone -> PICKUP_NOT_SUPPORTED, not a generic 400', async () => {
+      const res = await request(server())
+        .post('/api/v1/checkout')
+        .send({ paymentRail: 'pago_movil', fulfillmentType: 'pickup' })
+        .expect(400);
+      expect((res.body as Err).errorCode).toBe('PICKUP_NOT_SUPPORTED');
+    });
+
     it('is rejected even with the flag on and with new-format fields', async () => {
       process.env.CHECKOUT_REQUIRE_SHIPPING = 'true';
       const res = await request(server())
@@ -272,7 +280,7 @@ describe('Checkout shipping (e2e, Story 17.4)', { timeout: 30000 }, () => {
     );
 
     it('flat format -> 400 SHIPPING_REQUIRED when flag is exactly true (read per request)', async () => {
-      process.env.CHECKOUT_REQUIRE_SHIPPING = ' True ';
+      process.env.CHECKOUT_REQUIRE_SHIPPING = 'true';
       const res = await guestCheckout(flat()).then((r) => r);
       expect(res.status).toBe(400);
       expect((res.body as Err).errorCode).toBe('SHIPPING_REQUIRED');
@@ -280,6 +288,14 @@ describe('Checkout shipping (e2e, Story 17.4)', { timeout: 30000 }, () => {
       process.env.CHECKOUT_REQUIRE_SHIPPING = 'false';
       expect((await guestCheckout(flat())).status).toBe(201);
     });
+
+    it.each(['TRUE', 'True', ' true '])(
+      'flag value %j is NOT exactly true -> flat format still accepted',
+      async (v) => {
+        process.env.CHECKOUT_REQUIRE_SHIPPING = v;
+        expect((await guestCheckout(flat())).status).toBe(201);
+      },
+    );
 
     it('new format works with the flag on', async () => {
       process.env.CHECKOUT_REQUIRE_SHIPPING = 'true';

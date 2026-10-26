@@ -70,12 +70,9 @@ export function isNewShippingFormat(o: CheckoutShippingInput): boolean {
   return NEW_FORMAT_KEYS.some((k) => o[k] !== undefined && o[k] !== null);
 }
 
-/** Read on every call (never cached): any value other than `true` is false. */
+/** Read on every call (never cached): only the exact string `true` enables it. */
 export function isShippingRequired(): boolean {
-  return (
-    (process.env.CHECKOUT_REQUIRE_SHIPPING ?? '').trim().toLowerCase() ===
-    'true'
-  );
+  return process.env.CHECKOUT_REQUIRE_SHIPPING === 'true';
 }
 
 export function addressNotFoundException(): ApiException {

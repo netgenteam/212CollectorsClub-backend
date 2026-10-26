@@ -23,7 +23,9 @@ describe('checkout-shipping (Story 17.4)', () => {
       ['yes', false],
       ['', false],
       ['true', true],
-      [' TRUE ', true],
+      ['TRUE', false],
+      ['True', false],
+      [' true ', false],
     ])('%j -> %s', (v, expected) => {
       if (v === undefined) delete process.env.CHECKOUT_REQUIRE_SHIPPING;
       else process.env.CHECKOUT_REQUIRE_SHIPPING = v;

@@ -55,7 +55,7 @@ const requiresLegacyAddress = (o: CheckoutDto): boolean =>
  * from the saved address.
  */
 const requiresFlatRecipient = (o: CheckoutDto): boolean =>
-  !o.customerAddressId && !isNewFormat(o);
+  isNotPickup(o) && !o.customerAddressId && !isNewFormat(o);
 
 /**
  * Story 4.1 (FR-12, FR-13, AD-8): body of `POST /api/v1/checkout`.
