@@ -12,6 +12,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  ApiBody,
   ApiCookieAuth,
   ApiOperation,
   ApiResponse,
@@ -81,6 +82,7 @@ export class CustomerAddressesController {
     status: 409,
     description: 'errorCode ADDRESS_DEFAULT_CONFLICT.',
   })
+  @ApiBody({ type: CreateCustomerAddressDto })
   create(
     @Req() req: RequestWithCustomer,
     @Body(strictBody(CreateCustomerAddressDto))
@@ -115,6 +117,7 @@ export class CustomerAddressesController {
     status: 409,
     description: 'errorCode ADDRESS_DEFAULT_CONFLICT.',
   })
+  @ApiBody({ type: UpdateCustomerAddressDto })
   update(
     @Req() req: RequestWithCustomer,
     @Param('id') id: string,

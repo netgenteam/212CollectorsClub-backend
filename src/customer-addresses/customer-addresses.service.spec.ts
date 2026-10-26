@@ -196,6 +196,19 @@ describe('CustomerAddressesService.update', () => {
     expect(ca.update).not.toHaveBeenCalled();
   });
 
+  it('agencyId: null -> SHIPPING_INVALID {agencyId, REQUIRED}', async () => {
+    const { svc, ca } = buildWrite({});
+    await expect(
+      svc.update('c', U1, { agencyId: null as unknown as string }),
+    ).rejects.toMatchObject({
+      response: {
+        errorCode: 'SHIPPING_INVALID',
+        details: { errors: [{ field: 'agencyId', code: 'REQUIRED' }] },
+      },
+    });
+    expect(ca.update).not.toHaveBeenCalled();
+  });
+
   it('agency activity only required when agencyId is sent (A52)', async () => {
     const a = buildWrite({});
     await a.svc.update('c', U1, { state: 'Zulia' });

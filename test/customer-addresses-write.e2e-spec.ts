@@ -221,6 +221,11 @@ describe('Customer addresses update/default/delete (e2e, Story 17.3)', () => {
     await patch(s, a.id, { foo: 1 }).expect(400);
     await patch(s, a.id, {}).expect(400);
     await patch(s, a.id, { state: 5 }).expect(400);
+    const nul = await patch(s, a.id, { agencyId: null }).expect(400);
+    expect((nul.body as Err).errorCode).toBe('SHIPPING_INVALID');
+    expect((nul.body as Err).details?.errors).toEqual([
+      { field: 'agencyId', code: 'REQUIRED' },
+    ]);
     await patch(s, a.id, { agencyId: 'nope' }).expect(400);
     const bad = await patch(s, a.id, { recipientIdDoc: 'X-1' }).expect(400);
     expect((bad.body as Err).details?.errors).toEqual([

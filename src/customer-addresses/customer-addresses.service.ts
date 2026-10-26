@@ -210,12 +210,22 @@ export class CustomerAddressesService {
           ...patch,
         } as ShippingInput;
         const checked = validateShippingInput(merged);
-        if (checked.errors) {
+        // agencyId is not part of validateShippingInput; null means "clear",
+        // which a required field cannot do.
+        const nullAgency = (patch.agencyId as unknown) === null;
+        if (checked.errors || nullAgency) {
           throw new ApiException(
             HttpStatus.BAD_REQUEST,
             'SHIPPING_INVALID',
             'The shipping data is invalid.',
-            { errors: checked.errors },
+            {
+              errors: [
+                ...(nullAgency
+                  ? [{ field: 'agencyId', code: 'REQUIRED' as const }]
+                  : []),
+                ...(checked.errors ?? []),
+              ],
+            },
           );
         }
         const value = checked.value;

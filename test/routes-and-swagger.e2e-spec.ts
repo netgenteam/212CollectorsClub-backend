@@ -69,6 +69,12 @@ describe('Canonical routes & Swagger contract (e2e, Story 11.6)', () => {
     expect(s.AdminCategoryResponseDto).toBeDefined();
   });
 
+  it('exposes the address DTOs as request bodies (Story 17.3)', () => {
+    const s = doc.components.schemas;
+    expect(s.CreateCustomerAddressDto).toBeDefined();
+    expect(s.UpdateCustomerAddressDto).toBeDefined();
+  });
+
   it('exposes the Epic 11 enums as reusable component schemas', () => {
     const s = doc.components.schemas;
     expect(s.Franchise.enum).toEqual(
