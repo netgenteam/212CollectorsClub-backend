@@ -17,7 +17,11 @@ import type {
   UpdateFxSettingsDto,
   UpdateFxSettingsResponseDto,
 } from './dto/admin-fx.dto.js';
-import { FxRefreshService } from './fx-refresh.service.js';
+import type { FxProviderResult } from './fx-provider.js';
+import {
+  FxRefreshService,
+  buildRejectedReading,
+} from './fx-refresh.service.js';
 import { evaluateReading } from './fx-validation.js';
 import type { FxRejectReason } from './fx-validation.js';
 
@@ -67,9 +71,30 @@ export class AdminFxService {
       throw new BadRequestException('manualVesPerUsd must be greater than 0.');
     }
 
-    await this.prisma.$transaction(async (tx) => {
-      const rows = await tx.$queryRaw<{ source: FxRateSource }[]>`
-        SELECT "source" FROM "Fx_Rate_Settings"
+    // Source change to a live feed: obtain the NEW source's reading BEFORE
+    // committing anything (network outside any tx), so (source, rate) can be
+    // written together. QA 18.3 fix: never leave source=B with source A's rate.
+    let reading: FxProviderResult | undefined;
+    if (dto.source !== 'MANUAL') {
+      const pre = await this.prisma.fxRateSetting.findUnique({
+        where: { id: SINGLETON_FX_RATE_ID },
+        select: { source: true },
+      });
+      if (pre && pre.source !== dto.source) {
+        reading = await this.refresher.fetchReading(dto.source);
+      }
+    }
+
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      // Same lock as FxRefreshService (blocking here: the cron just waits us).
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('fx:refresh', 0))`;
+      const rows = await tx.$queryRaw<
+        {
+          source: FxRateSource;
+          maxVariationPct: Prisma.Decimal;
+        }[]
+      >`
+        SELECT "source", "maxVariationPct" FROM "Fx_Rate_Settings"
         WHERE "id" = ${SINGLETON_FX_RATE_ID} FOR UPDATE`;
       const current = rows[0];
       if (!current) this.unavailable();
@@ -83,12 +108,92 @@ export class AdminFxService {
       if (dto.maxVariationPct !== undefined) {
         data.maxVariationPct = new Prisma.Decimal(dto.maxVariationPct);
       }
+      let refresh = 'MANUAL';
+      let reason: string | null = null;
+      let snapshotRow: {
+        rate: Prisma.Decimal;
+        providerUpdatedAt: Date;
+        fetchedAt: Date;
+      } | null = null;
+
       if (dto.source === 'MANUAL') {
         data.vesPerUsd = new Prisma.Decimal(manual as number);
         data.rateFetchedAt = now;
         data.providerUpdatedAt = null;
+      } else if (changed) {
+        const last = await tx.fxRateSnapshot.findFirst({
+          where: { source: dto.source },
+          orderBy: [{ providerUpdatedAt: 'desc' }, { fetchedAt: 'desc' }],
+        });
+        const maxVar =
+          dto.maxVariationPct ?? current.maxVariationPct.toNumber();
+        let applied = false;
+        let lastError: string | null = null;
+        let rejected: Prisma.InputJsonObject | null = null;
+        if (reading?.ok) {
+          const verdict = evaluateReading({
+            reading: reading.reading,
+            current: last
+              ? {
+                  rate: last.rate.toNumber(),
+                  providerUpdatedAt: last.providerUpdatedAt,
+                }
+              : null,
+            maxVariationPct: maxVar,
+            now,
+          });
+          if (verdict.ok) {
+            const rate = new Prisma.Decimal(
+              reading.reading.rate,
+            ).toDecimalPlaces(4);
+            data.vesPerUsd = rate;
+            data.providerUpdatedAt = reading.reading.providerUpdatedAt;
+            data.rateFetchedAt = now;
+            snapshotRow = {
+              rate,
+              providerUpdatedAt: reading.reading.providerUpdatedAt,
+              fetchedAt: now,
+            };
+            applied = true;
+            refresh = 'UPDATED';
+          } else {
+            refresh = 'REJECTED';
+            reason = verdict.reason;
+            lastError = `Reading rejected: ${verdict.reason}`;
+            rejected = buildRejectedReading(
+              dto.source,
+              reading.reading,
+              verdict.reason,
+              now,
+            );
+          }
+        } else {
+          refresh = 'FAILED';
+          const err = reading?.ok === false ? reading.error : 'no reading';
+          reason = 'PROVIDER_ERROR';
+          lastError = err.slice(0, 500);
+        }
+        if (!applied) {
+          if (!last) {
+            // Nothing coherent to switch to: keep source AND rate untouched.
+            return {
+              sourceChanged: false,
+              refresh,
+              reason: reason ?? 'NO_RATE_AVAILABLE',
+              stale: true,
+            };
+          }
+          // Fall back to the new source's own last snapshot, with its real
+          // dates, so staleness is evaluated honestly (AD-80).
+          data.vesPerUsd = last.rate;
+          data.providerUpdatedAt = last.providerUpdatedAt;
+          data.rateFetchedAt = last.fetchedAt;
+          data.lastError = lastError;
+          data.lastErrorAt = now;
+          data.rejectedReading = rejected ?? Prisma.DbNull;
+        }
       }
-      if (changed || dto.source === 'MANUAL') {
+      if (dto.source === 'MANUAL' || (changed && !data.lastError)) {
         data.lastError = null;
         data.lastErrorAt = null;
         data.rejectedReading = Prisma.DbNull;
@@ -97,6 +202,12 @@ export class AdminFxService {
         where: { id: SINGLETON_FX_RATE_ID },
         data,
       });
+      if (snapshotRow) {
+        await tx.$executeRaw`
+          INSERT INTO "Fx_Rate_Snapshots" ("id", "source", "rate", "providerUpdatedAt", "fetchedAt")
+          VALUES (gen_random_uuid(), ${dto.source}::"FxRateSource", ${snapshotRow.rate}, ${snapshotRow.providerUpdatedAt}, ${snapshotRow.fetchedAt})
+          ON CONFLICT ("source", "providerUpdatedAt") DO NOTHING`;
+      }
       // clock_timestamp(): audits of serialized PUTs order by commit order
       // (now() would be the tx START time, which can interleave).
       await tx.$executeRaw`
@@ -106,20 +217,33 @@ export class AdminFxService {
           ${current.source}::"FxRateSource", ${dto.source}::"FxRateSource",
           ${dto.source === 'MANUAL' ? new Prisma.Decimal(manual as number) : null},
           'SETTINGS_UPDATED'::"FxSettingAction", clock_timestamp())`;
+      return {
+        sourceChanged: changed || undefined,
+        refresh,
+        reason,
+        stale: !['UPDATED', 'MANUAL'].includes(refresh),
+        // Same live source: no pair risk; refresh after the commit as before.
+        needsRefresh: dto.source !== 'MANUAL' && !changed,
+      };
     });
 
-    // Outside the transaction (network): a failure keeps the previous rate.
-    let refresh = 'MANUAL';
-    if (dto.source !== 'MANUAL') {
+    let { refresh, stale } = outcome;
+    if (outcome.needsRefresh) {
       try {
         refresh = (await this.refresher.refresh(dto.source)).status;
       } catch {
         refresh = 'FAILED';
       }
+      stale = !['UPDATED', 'NOOP', 'MANUAL'].includes(refresh);
     }
-    const stale = !['UPDATED', 'NOOP', 'MANUAL'].includes(refresh);
     const s = await this.loadSetting();
-    return { ...this.toSettings(s), stale, refresh };
+    return {
+      ...this.toSettings(s),
+      stale,
+      refresh,
+      sourceChanged: outcome.sourceChanged ?? s.source === dto.source,
+      reason: outcome.reason ?? null,
+    };
   }
 
   async getStatus(): Promise<FxStatusResponseDto> {

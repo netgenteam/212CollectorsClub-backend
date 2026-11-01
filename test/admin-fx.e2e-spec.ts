@@ -12,6 +12,7 @@ import {
   FakeFxProvider,
   FAKE_FX_FIXTURES,
 } from './../src/fx/fake-fx.provider.js';
+import { FxRefreshService } from './../src/fx/fx-refresh.service.js';
 import { snapshotFx, restoreFx, type FxState } from './helpers/db-snapshot.js';
 
 type App = Parameters<typeof request>[0];
@@ -242,18 +243,119 @@ describe('Admin FX API (e2e, Story 18.2)', () => {
       expect(await prisma.fxSettingAudit.count()).toBe(1);
     });
 
-    it('failed immediate refresh => 200 stale:true and the previous rate is kept (AC3)', async () => {
+    it('provider down + new source without snapshots => source and rate unchanged, 200 stale:true sourceChanged:false (QA 18.3)', async () => {
       await put({ source: 'BCV_EUR' }).expect(200);
-      const before = (await setting()).vesPerUsd.toFixed(4);
+      const before = await setting();
+      const audits = await prisma.fxSettingAudit.count();
+      fake.fail('boom');
+      const res = await put({ source: 'PARALELO_USD' }).expect(200);
+      expect(res.body).toMatchObject({
+        source: 'BCV_EUR',
+        stale: true,
+        refresh: 'FAILED',
+        sourceChanged: false,
+        reason: 'PROVIDER_ERROR',
+        vesPerUsd: before.vesPerUsd.toFixed(4),
+      });
+      const after = await setting();
+      expect(after.source).toBe('BCV_EUR');
+      expect(after.rateFetchedAt?.getTime()).toBe(
+        before.rateFetchedAt?.getTime(),
+      );
+      expect(await prisma.fxSettingAudit.count()).toBe(audits);
+    });
+
+    it('provider down + new source WITH a snapshot => switches to that snapshot (own rate and real dates), stale:true, lastError on the new source (QA 18.3)', async () => {
+      const at = new Date('2026-10-01T12:00:00.000Z');
+      const fetchedAt = new Date(Date.now() - 2 * 3600 * 1000);
+      await prisma.fxRateSnapshot.create({
+        data: {
+          source: 'PARALELO_USD',
+          rate: '777.0000',
+          providerUpdatedAt: at,
+          fetchedAt,
+        },
+      });
       fake.fail('boom');
       const res = await put({ source: 'PARALELO_USD' }).expect(200);
       expect(res.body).toMatchObject({
         source: 'PARALELO_USD',
+        vesPerUsd: '777.0000',
         stale: true,
         refresh: 'FAILED',
-        vesPerUsd: before,
+        sourceChanged: true,
+        reason: 'PROVIDER_ERROR',
       });
-      expect((await setting()).lastError).toContain('boom');
+      const row = await setting();
+      expect(row.providerUpdatedAt?.getTime()).toBe(at.getTime());
+      expect(row.rateFetchedAt?.getTime()).toBe(fetchedAt.getTime());
+      expect(row.lastError).toContain('boom');
+    });
+
+    it('rejected reading of the new source => falls back to its snapshot; rejectedReading belongs to the NEW source (QA 18.3)', async () => {
+      await prisma.fxRateSnapshot.create({
+        data: {
+          source: 'PARALELO_USD',
+          rate: '950.1000',
+          providerUpdatedAt: new Date('2026-10-30T12:00:00.000Z'),
+        },
+      });
+      fake.succeedFor(
+        'PARALELO_USD',
+        950.1,
+        new Date('2026-10-01T12:00:00.000Z'),
+      );
+      const res = await put({ source: 'PARALELO_USD' }).expect(200);
+      expect(res.body).toMatchObject({
+        source: 'PARALELO_USD',
+        vesPerUsd: '950.1000',
+        stale: true,
+        refresh: 'REJECTED',
+        reason: 'DATE_REGRESSION',
+      });
+      const row = await setting();
+      expect(row.rejectedReading).toMatchObject({
+        source: 'PARALELO_USD',
+        reason: 'DATE_REGRESSION',
+      });
+    });
+
+    it('source change with a valid reading writes source+rate+snapshot+audit together (QA 18.3)', async () => {
+      const res = await put({ source: 'PARALELO_USD' }).expect(200);
+      expect(res.body).toMatchObject({
+        source: 'PARALELO_USD',
+        vesPerUsd: '950.1000',
+        stale: false,
+        refresh: 'UPDATED',
+        sourceChanged: true,
+        reason: null,
+      });
+      expect(await snaps('PARALELO_USD')).toBe(1);
+    });
+
+    it('a refresh whose fetch straddles a source change is discarded (SKIPPED), never leaves a mixed pair (QA 18.3)', async () => {
+      const refresher = app.get(FxRefreshService);
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const orig = fake.fetchRate.bind(fake);
+      fake.fetchRate = async (src) => {
+        await gate;
+        return orig(src);
+      };
+      try {
+        const pending = refresher.refresh(); // active = BCV_USD, blocked in fetch
+        await new Promise((r) => setTimeout(r, 50));
+        fake.fetchRate = orig;
+        await put({ source: 'PARALELO_USD' }).expect(200);
+        release();
+        expect((await pending).status).toBe('SKIPPED');
+      } finally {
+        fake.fetchRate = orig;
+        release();
+      }
+      const row = await setting();
+      expect(row.source).toBe('PARALELO_USD');
+      expect(row.vesPerUsd.toFixed(4)).toBe('950.1000');
     });
 
     it('5 simultaneous PUTs => 5 coherent audit rows, chained, no 5xx (AC3)', async () => {

@@ -11,6 +11,10 @@ import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { Prisma } from './../src/generated/prisma/client.js';
+import {
+  FakeFxProvider,
+  FAKE_FX_FIXTURES,
+} from './../src/fx/fake-fx.provider.js';
 import { snapshotFx, restoreFx, type FxState } from './helpers/db-snapshot.js';
 
 const TAG = randomUUID().slice(0, 8);
@@ -361,6 +365,146 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
       expect(row.fxRateSource).not.toBeNull();
       expect(row.fxRateVesPerUsd!.gt(0)).toBe(true);
     }
+  });
+
+  // ---- QA 18.3 fix: source and rate change atomically (AD-79) -------------
+  const validPairs = () =>
+    new Set(
+      (['BCV_USD', 'BCV_EUR', 'PARALELO_USD'] as const).map(
+        (s) => `${s}:${FAKE_FX_FIXTURES[s].toFixed(4)}`,
+      ),
+    );
+  const putSettings = (b: object) =>
+    request(server())
+      .put('/api/v1/admin/fx/settings')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send(b);
+  const orderPair = async (r: request.Response) => {
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: (r.body as CheckoutBody).orderId },
+    });
+    return `${row.fxRateSource}:${row.fxRateVesPerUsd?.toFixed(4)}`;
+  };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('AC7 (real): staggered checkouts during PUT source changes (several rounds) always store a real (source, rate) pair', async () => {
+    const fake = app.get(FakeFxProvider).reset();
+    const valid = validPairs();
+    await setRow('BCV_USD', '889.2600');
+    const order = ['PARALELO_USD', 'BCV_EUR', 'BCV_USD', 'PARALELO_USD'];
+    const seen = new Set<string>();
+    for (let round = 0; round < 3; round++) {
+      const cookies: string[] = [];
+      for (let i = 0; i < 20; i++) cookies.push(await cart());
+      const checkouts: Array<Promise<request.Response>> = [];
+      const puts = (async () => {
+        for (const source of order) {
+          const r = await putSettings({ source });
+          expect(r.status).toBe(200);
+          await sleep(3);
+        }
+      })();
+      for (const c of cookies) {
+        checkouts.push(
+          Promise.resolve(
+            request(server())
+              .post('/api/v1/checkout')
+              .set('Cookie', c)
+              .send(body('pago_movil')),
+          ),
+        );
+        await sleep(2);
+      }
+      await puts;
+      for (const r of await Promise.all(checkouts)) {
+        expect(r.status).toBe(201);
+        const key = await orderPair(r);
+        seen.add(key);
+        expect(valid.has(key), key).toBe(true);
+      }
+    }
+    expect(seen.size).toBeGreaterThanOrEqual(2);
+    expect(fake.calls.length).toBeGreaterThan(0);
+  });
+
+  it('refresh of the new source FAILS: no order and no /fx/current exposes a mixed pair (with and without a snapshot)', async () => {
+    const fake = app.get(FakeFxProvider).reset();
+    const valid = validPairs();
+    await prisma.fxRateSnapshot.deleteMany();
+    await setRow('BCV_USD', '889.2600');
+    fake.fail('provider down');
+    // No snapshot of PARALELO_USD: nothing changes.
+    const noSnap = await putSettings({ source: 'PARALELO_USD' }).expect(200);
+    expect(noSnap.body).toMatchObject({
+      source: 'BCV_USD',
+      stale: true,
+      sourceChanged: false,
+    });
+    expect(((await current().expect(200)).body as CurrentBody).source).toBe(
+      'BCV_USD',
+    );
+    // With a snapshot of PARALELO_USD: switches to ITS rate.
+    await prisma.fxRateSnapshot.create({
+      data: {
+        source: 'PARALELO_USD',
+        rate: FAKE_FX_FIXTURES.PARALELO_USD.toFixed(4),
+        providerUpdatedAt: new Date(),
+        fetchedAt: new Date(),
+      },
+    });
+    const cookies = await Promise.all(Array.from({ length: 10 }, () => cart()));
+    const checkouts: Array<Promise<request.Response>> = [];
+    const put = putSettings({ source: 'PARALELO_USD' });
+    for (const c of cookies) {
+      checkouts.push(
+        Promise.resolve(
+          request(server())
+            .post('/api/v1/checkout')
+            .set('Cookie', c)
+            .send(body('pago_movil')),
+        ),
+      );
+      await sleep(2);
+    }
+    expect((await put).status).toBe(200);
+    for (const r of await Promise.all(checkouts)) {
+      expect(r.status).toBe(201);
+      expect(valid.has(await orderPair(r))).toBe(true);
+    }
+    const cur = (await current().expect(200)).body as CurrentBody;
+    expect(valid.has(`${cur.source}:${cur.vesPerUsd}`)).toBe(true);
+    const after = await checkout('pago_movil');
+    expect(valid.has(await orderPair(after))).toBe(true);
+  });
+
+  it('refresh of the new source is REJECTED (DATE_REGRESSION): pair stays coherent in orders and /fx/current', async () => {
+    const fake = app.get(FakeFxProvider).reset();
+    const valid = validPairs();
+    await prisma.fxRateSnapshot.deleteMany();
+    await setRow('BCV_USD', '889.2600');
+    // Future-dated snapshot => the fixture reading (2026-11-01) regresses.
+    await prisma.fxRateSnapshot.create({
+      data: {
+        source: 'PARALELO_USD',
+        rate: FAKE_FX_FIXTURES.PARALELO_USD.toFixed(4),
+        providerUpdatedAt: new Date(Date.now() + 2 * 3600 * 1000),
+      },
+    });
+    const res = await putSettings({ source: 'PARALELO_USD' }).expect(200);
+    expect(res.body).toMatchObject({
+      refresh: 'REJECTED',
+      reason: 'DATE_REGRESSION',
+      source: 'PARALELO_USD',
+      vesPerUsd: FAKE_FX_FIXTURES.PARALELO_USD.toFixed(4),
+    });
+    const cur = (await current().expect(200)).body as CurrentBody;
+    expect(`${cur.source}:${cur.vesPerUsd}`).toBe(
+      `PARALELO_USD:${FAKE_FX_FIXTURES.PARALELO_USD.toFixed(4)}`,
+    );
+    const r = await checkout('pago_movil');
+    expect(r.status).toBe(201);
+    expect(valid.has(await orderPair(r))).toBe(true);
+    expect(fake.calls).toContain('PARALELO_USD');
   });
 
   it('Swagger documents GET /fx/current and 503 FX_RATE_UNAVAILABLE on checkout', async () => {

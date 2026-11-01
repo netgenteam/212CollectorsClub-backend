@@ -36,6 +36,25 @@ interface LockedSetting {
   providerUpdatedAt: Date | null;
 }
 
+/** `rejectedReading` payload, always tagged with the source it belongs to. */
+export function buildRejectedReading(
+  source: FxRateSource,
+  reading: { rate: number; providerUpdatedAt: Date },
+  reason: FxRejectReason,
+  now: Date,
+): Prisma.InputJsonObject {
+  return {
+    source,
+    rate: Number.isFinite(reading.rate) ? reading.rate : null,
+    rawRate: String(reading.rate),
+    providerUpdatedAt: Number.isNaN(reading.providerUpdatedAt.getTime())
+      ? null
+      : reading.providerUpdatedAt.toISOString(),
+    reason,
+    at: now.toISOString(),
+  };
+}
+
 /**
  * Story 18.1 (AD-79): fetch -> validate -> persist the VES rate.
  *
@@ -117,6 +136,23 @@ export class FxRefreshService implements OnApplicationBootstrap {
   }
 
   /**
+   * Network fetch (never throws). Callers must NOT hold a DB transaction.
+   * Shared with the admin PUT so a source change validates the NEW source's
+   * reading before anything is committed (Story 18.3 QA fix).
+   */
+  async fetchReading(source: FxRateSource): Promise<FxProviderResult> {
+    if (source === 'MANUAL') return { ok: false, error: 'MANUAL has no feed' };
+    try {
+      return await this.provider.fetchRate(source);
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
    * Refreshes the ACTIVE source (a given `source` that is not the active one
    * is skipped). `MANUAL` never touches the network.
    */
@@ -132,15 +168,7 @@ export class FxRefreshService implements OnApplicationBootstrap {
 
     // Network OUTSIDE the transaction. The provider never throws, but guard
     // anyway so a bug there cannot escape.
-    let result: FxProviderResult;
-    try {
-      result = await this.provider.fetchRate(active);
-    } catch (err) {
-      result = {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
-    }
+    const result = await this.fetchReading(active);
 
     const now = new Date();
     return this.prisma.$transaction(async (tx) => {
@@ -199,18 +227,12 @@ export class FxRefreshService implements OnApplicationBootstrap {
           data: {
             lastError: `Reading rejected: ${verdict.reason}`,
             lastErrorAt: now,
-            rejectedReading: {
-              source: active,
-              rate: Number.isFinite(reading.rate) ? reading.rate : null,
-              rawRate: String(reading.rate),
-              providerUpdatedAt: Number.isNaN(
-                reading.providerUpdatedAt.getTime(),
-              )
-                ? null
-                : reading.providerUpdatedAt.toISOString(),
-              reason: verdict.reason,
-              at: now.toISOString(),
-            },
+            rejectedReading: buildRejectedReading(
+              active,
+              reading,
+              verdict.reason,
+              now,
+            ),
           },
         });
         return {

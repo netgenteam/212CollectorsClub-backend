@@ -64,6 +64,19 @@ export class UpdateFxSettingsResponseDto extends FxSettingsResponseDto {
       'Outcome of the immediate refresh: UPDATED | NOOP | MANUAL | REJECTED | FAILED | IN_PROGRESS | SKIPPED.',
   })
   refresh: string;
+  @ApiProperty({
+    description:
+      'false only when a switch to a live source could not be applied (provider down/rejected AND no snapshot of that source): nothing was written and the previous source and rate are kept.',
+  })
+  sourceChanged: boolean;
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    example: 'PROVIDER_ERROR',
+    description:
+      'Why the new source got no fresh reading: PROVIDER_ERROR, a rejection reason (VARIATION_EXCEEDED, DATE_REGRESSION, ...) or NO_RATE_AVAILABLE. null on success. When a snapshot of the new source exists the switch is applied with that snapshot rate/dates (stale:true).',
+  })
+  reason: string | null;
 }
 
 export class FxSourceLiveDto {
