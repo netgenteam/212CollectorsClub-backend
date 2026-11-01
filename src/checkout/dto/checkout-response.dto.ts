@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { FxRateSource } from '../../generated/prisma/enums.js';
 
 export class CheckoutOrderLineResponseDto {
   @ApiProperty({ format: 'uuid' })
@@ -102,6 +103,15 @@ export class CheckoutResponseDto {
       'VES per 1 USD, snapshotted once from the admin-maintained rate at checkout time (AD-3/AD-4) — never recomputed later. Null for a stripe checkout.',
   })
   fxRateVesPerUsd: number | null;
+
+  @ApiPropertyOptional({
+    enum: FxRateSource,
+    enumName: 'FxRateSource',
+    nullable: true,
+    description:
+      'Story 18.3: source of fxRateVesPerUsd (BCV_USD | BCV_EUR | PARALELO_USD | MANUAL). Null for stripe and for historical Orders.',
+  })
+  fxRateSource: FxRateSource | null;
 
   @ApiPropertyOptional({
     example: 7289.19,

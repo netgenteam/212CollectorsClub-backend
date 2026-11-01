@@ -69,6 +69,11 @@ export class CheckoutController {
     description:
       'paymentRail=stripe only — errorCode STRIPE_SESSION_CREATION_FAILED: the Order was created but Stripe failed to create the Checkout Session; the Order is guardedly moved to payment_failed and its stock holds are released. Retry the checkout.',
   })
+  @ApiResponse({
+    status: HttpStatus.SERVICE_UNAVAILABLE,
+    description:
+      'paymentRail=pago_movil only — errorCode FX_RATE_UNAVAILABLE (Story 18.3): the VES rate row is missing, <= 0, or older than maxAgeHours x 3 (non-MANUAL). No Order is created; Stripe is unaffected.',
+  })
   async checkout(
     @Body() dto: CheckoutDto,
     @OptionalCustomer() customer: AuthenticatedCustomer | null,

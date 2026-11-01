@@ -1,3 +1,4 @@
+import { FxRateService } from '../fx/fx-rate.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { CheckoutService } from './checkout.service.js';
 import {
@@ -49,6 +50,11 @@ describe('CheckoutService (account)', () => {
       ],
     });
     tx.fxRateSetting.findUnique.mockResolvedValue({
+      source: 'BCV_USD',
+      maxAgeHours: 48,
+      updatedAt: new Date(),
+      rateFetchedAt: new Date(),
+      providerUpdatedAt: null,
       vesPerUsd: new Prisma.Decimal('200'),
     });
     tx.order.create.mockResolvedValue({ id: 'o1', paymentRail: 'PAGO_MOVIL' });
@@ -62,6 +68,7 @@ describe('CheckoutService (account)', () => {
       {} as never,
       {} as never,
       {} as never,
+      new FxRateService(null as never),
     );
   });
 

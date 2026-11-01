@@ -442,6 +442,7 @@ describe('Admin FX API (e2e, Story 18.2)', () => {
         adminUserId: adminId,
         fromSource: 'BCV_USD',
         toSource: 'BCV_USD',
+        action: 'REJECTED_READING_ACCEPTED',
       });
     });
 
@@ -572,7 +573,7 @@ describe('Admin FX API (e2e, Story 18.2)', () => {
         .set(auth())
         .expect(200);
       const b1 = p1.body as {
-        data: { toSource: string; admin: object }[];
+        data: { toSource: string; action: string; admin: object }[];
         meta: { total: number; totalPages: number; hasNextPage: boolean };
       };
       expect(b1.data.map((d) => d.toSource)).toEqual([
@@ -580,6 +581,8 @@ describe('Admin FX API (e2e, Story 18.2)', () => {
         'PARALELO_USD',
       ]);
       expect(b1.data[0].admin).toEqual({ id: adminId, email: EMAIL });
+      // Story 18.3: PUTs are SETTINGS_UPDATED; accept-rejected is its own action.
+      expect(b1.data.every((d) => d.action === 'SETTINGS_UPDATED')).toBe(true);
       expect(b1.meta).toMatchObject({
         total: 3,
         totalPages: 2,

@@ -101,11 +101,11 @@ export class AdminFxService {
       // (now() would be the tx START time, which can interleave).
       await tx.$executeRaw`
         INSERT INTO "Fx_Setting_Audits"
-          ("id", "adminUserId", "fromSource", "toSource", "manualRate", "createdAt")
+          ("id", "adminUserId", "fromSource", "toSource", "manualRate", "action", "createdAt")
         VALUES (gen_random_uuid(), ${adminUserId}::uuid,
           ${current.source}::"FxRateSource", ${dto.source}::"FxRateSource",
           ${dto.source === 'MANUAL' ? new Prisma.Decimal(manual as number) : null},
-          clock_timestamp())`;
+          'SETTINGS_UPDATED'::"FxSettingAction", clock_timestamp())`;
     });
 
     // Outside the transaction (network): a failure keeps the previous rate.
@@ -215,9 +215,10 @@ export class AdminFxService {
         ON CONFLICT ("source", "providerUpdatedAt") DO UPDATE SET "rate" = EXCLUDED."rate"`;
       await tx.$executeRaw`
         INSERT INTO "Fx_Setting_Audits"
-          ("id", "adminUserId", "fromSource", "toSource", "manualRate", "createdAt")
+          ("id", "adminUserId", "fromSource", "toSource", "manualRate", "action", "createdAt")
         VALUES (gen_random_uuid(), ${adminUserId}::uuid,
-          ${row.source}::"FxRateSource", ${row.source}::"FxRateSource", NULL, clock_timestamp())`;
+          ${row.source}::"FxRateSource", ${row.source}::"FxRateSource", NULL,
+          'REJECTED_READING_ACCEPTED'::"FxSettingAction", clock_timestamp())`;
     });
     return this.getStatus();
   }
@@ -258,6 +259,7 @@ export class AdminFxService {
         fromSource: r.fromSource,
         toSource: r.toSource,
         manualRate: r.manualRate?.toFixed(4) ?? null,
+        action: r.action,
         createdAt: r.createdAt.toISOString(),
       })),
       meta: buildPageMeta(q.page, q.limit, total),

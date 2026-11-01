@@ -482,6 +482,12 @@ enum FxRateSource {
   MANUAL
 }
 
+/// Story 18.3 (AD-79): what an audit row records.
+enum FxSettingAction {
+  SETTINGS_UPDATED
+  REJECTED_READING_ACCEPTED
+}
+
 /// Story 18.1 (AD-78): history of VALID provider readings (rejected ones live
 /// in `FxRateSetting.rejectedReading`). Deduped by INSERT ... ON CONFLICT DO
 /// NOTHING on (source, providerUpdatedAt); purged after 400 days.
@@ -500,13 +506,15 @@ model FxRateSnapshot {
 /// Story 18.1 (AD-78): audit of source changes (written by 18.2 in the same
 /// transaction as the admin PUT).
 model FxSettingAudit {
-  id          String       @id @default(uuid()) @db.Uuid
-  adminUserId String?      @db.Uuid
-  adminUser   AdminUser?   @relation(fields: [adminUserId], references: [id], onDelete: SetNull)
+  id          String          @id @default(uuid()) @db.Uuid
+  adminUserId String?         @db.Uuid
+  adminUser   AdminUser?      @relation(fields: [adminUserId], references: [id], onDelete: SetNull)
   fromSource  FxRateSource
   toSource    FxRateSource
-  manualRate  Decimal?     @db.Decimal(18, 4)
-  createdAt   DateTime     @default(now()) @db.Timestamptz
+  manualRate  Decimal?        @db.Decimal(18, 4)
+  /// Story 18.3: PUT settings vs. accept-rejected (backfilled SETTINGS_UPDATED).
+  action      FxSettingAction @default(SETTINGS_UPDATED)
+  createdAt   DateTime        @default(now()) @db.Timestamptz
 
   @@index([createdAt])
   @@map("Fx_Setting_Audits")
@@ -601,12 +609,12 @@ model Order {
   referencePoint   String?         @db.VarChar(200)
   trackingNumber   String?         @db.VarChar(64)
 
-  totalUsd        Decimal  @db.Decimal(10, 2)
+  totalUsd        Decimal       @db.Decimal(10, 2)
   /// Null for Stripe orders (AD-3) — only ever set, once, for Pago Móvil.
-  fxRateVesPerUsd Decimal? @db.Decimal(18, 4)
+  fxRateVesPerUsd Decimal?      @db.Decimal(18, 4)
   /// Story 18.1 (AD-78): source of the snapshotted rate; NULL on historical orders.
   fxRateSource    FxRateSource?
-  totalVes        Decimal? @db.Decimal(14, 2)
+  totalVes        Decimal?      @db.Decimal(14, 2)
 
   /// AD-17: SHA-256 hash of the one-time orderAccessToken. The raw token
   /// is returned to the buyer exactly once, in the checkout response, and

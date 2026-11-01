@@ -197,6 +197,7 @@ export class OrderLookupService {
       totalUsd: Number(order.totalUsd),
       fxRateVesPerUsd:
         order.fxRateVesPerUsd !== null ? Number(order.fxRateVesPerUsd) : null,
+      fxRateSource: order.fxRateSource,
       totalVes: order.totalVes !== null ? Number(order.totalVes) : null,
       lines,
       createdAt: order.createdAt.toISOString(),

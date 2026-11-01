@@ -9,5 +9,7 @@ export default defineConfig({
     include: ['**/*.e2e-spec.ts'],
     // Shared dev Postgres: specs mutate stock/orders, so files run serially (AD-48).
     fileParallelism: false,
+    // Story 18.3: keep the real (possibly weeks-old) FX row usable by checkout.
+    globalSetup: ['./test/helpers/global-fx-fresh.ts'],
   },
 });

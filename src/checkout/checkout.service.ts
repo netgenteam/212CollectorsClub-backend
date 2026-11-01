@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { hashOrderAccessToken } from '../common/order-access-token.js';
 import { Prisma } from '../generated/prisma/client.js';
+import type { FxRateSource } from '../generated/prisma/client.js';
 import {
   FulfillmentType,
   OrderActorType,
@@ -37,7 +38,7 @@ import {
   assertCheckoutShippingPreconditions,
   resolveCheckoutShipping,
 } from './checkout-shipping.js';
-import { SINGLETON_FX_RATE_ID } from './fx-rate.constants.js';
+import { FxRateService } from '../fx/fx-rate.service.js';
 import { PAGO_MOVIL_PLACEHOLDER_ACCOUNT } from './pago-movil-instructions.constant.js';
 
 /** Story 4.1 (AD-6): 24h soft-reservation window for a Pago Móvil StockHold. */
@@ -145,6 +146,8 @@ interface CheckoutTransactionResult {
   lines: Prisma.OrderLineCreateManyOrderInput[];
   /** Story 4.3 (AD-3): null for a stripe checkout. */
   fxRateVesPerUsd: Prisma.Decimal | null;
+  /** Story 18.3: source of the snapshotted rate; null for stripe. */
+  fxRateSource: FxRateSource | null;
   /** Story 4.3 (AD-3): null for a stripe checkout. */
   totalVes: Prisma.Decimal | null;
   rawToken: string;
@@ -161,6 +164,7 @@ export class CheckoutService {
     @Inject(STRIPE_CLIENT) private readonly stripeClient: StripeClient,
     private readonly config: ConfigService,
     private readonly shipping: ShippingValidationService,
+    private readonly fxRates: FxRateService,
   ) {}
 
   /**
@@ -309,20 +313,15 @@ export class CheckoutService {
 
         // --- AD-3: a stripe Order never snapshots an FX rate or a VES
         // total — only pago_movil does. `fxRate`/`totalVes` stay null.
-        let fxRate: { vesPerUsd: Prisma.Decimal } | null = null;
+        let fxRate: {
+          vesPerUsd: Prisma.Decimal;
+          source: FxRateSource;
+        } | null = null;
         let totalVes: Prisma.Decimal | null = null;
         if (!isStripe) {
-          fxRate = await tx.fxRateSetting.findUnique({
-            where: { id: SINGLETON_FX_RATE_ID },
-          });
-          if (!fxRate) {
-            // Ops/seed error, not a buyer-facing 4xx: the seed is expected
-            // to always have written this row (see fx-rate.constants.ts's
-            // doc comment for the known gap this covers).
-            throw new Error(
-              `FxRateSetting row "${SINGLETON_FX_RATE_ID}" is missing — the store has no configured VES/USD rate. Run the seed.`,
-            );
-          }
+          // Story 18.3 (AD-80): one SELECT in this tx => coherent
+          // (rate, source); 503 FX_RATE_UNAVAILABLE; never any network.
+          fxRate = await this.fxRates.getForCheckout(tx);
           totalVes = totalUsd.times(fxRate.vesPerUsd).toDecimalPlaces(2);
         }
 
@@ -345,6 +344,7 @@ export class CheckoutService {
             ...shippingData,
             totalUsd,
             fxRateVesPerUsd: fxRate?.vesPerUsd ?? null,
+            fxRateSource: fxRate?.source ?? null,
             totalVes,
             accessTokenHash: tokenHash,
             customerId: customer?.id ?? null,
@@ -444,6 +444,7 @@ export class CheckoutService {
           totalUsd,
           lines: lineCreates,
           fxRateVesPerUsd: fxRate?.vesPerUsd ?? null,
+          fxRateSource: fxRate?.source ?? null,
           totalVes,
           rawToken,
           customerEmail: accountEmail,
@@ -572,6 +573,7 @@ export class CheckoutService {
       totalUsd: Number(result.totalUsd),
       fxRateVesPerUsd:
         result.fxRateVesPerUsd !== null ? Number(result.fxRateVesPerUsd) : null,
+      fxRateSource: result.fxRateSource,
       totalVes: result.totalVes !== null ? Number(result.totalVes) : null,
       lines: lineDtos,
       paymentInstructions,

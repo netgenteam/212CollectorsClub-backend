@@ -10,6 +10,7 @@ import {
   CheckoutFulfillmentType,
   CheckoutPaymentRail,
 } from './dto/checkout.dto.js';
+import { FxRateService } from '../fx/fx-rate.service.js';
 import { ShippingValidationService } from '../shipping/shipping-validation.service.js';
 import { SINGLETON_FX_RATE_ID } from './fx-rate.constants.js';
 
@@ -123,6 +124,7 @@ describe('CheckoutService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: STRIPE_CLIENT, useValue: stripeClient },
         { provide: ShippingValidationService, useValue: {} },
+        { provide: FxRateService, useValue: new FxRateService(null as never) },
         {
           provide: ConfigService,
           useValue: {
@@ -138,6 +140,11 @@ describe('CheckoutService', () => {
     // test relies on; individual tests override what they need.
     tx.fxRateSetting.findUnique.mockResolvedValue({
       id: SINGLETON_FX_RATE_ID,
+      source: 'BCV_USD',
+      maxAgeHours: 48,
+      updatedAt: new Date(),
+      rateFetchedAt: new Date(),
+      providerUpdatedAt: null,
       vesPerUsd: new Prisma.Decimal('200.0000'),
     });
     tx.order.create.mockResolvedValue({

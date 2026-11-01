@@ -1,7 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsEnum, IsInt, IsNumber, IsOptional, Max, Min } from 'class-validator';
-import { FxRateSource } from '../../generated/prisma/enums.js';
+import { FxRateSource, FxSettingAction } from '../../generated/prisma/enums.js';
 
 export const FX_HISTORY_DEFAULT_LIMIT = 50;
 export const FX_HISTORY_MAX_LIMIT = 200;
@@ -205,6 +205,13 @@ export class FxAuditItemDto {
   toSource: FxRateSource;
   @ApiProperty({ type: String, nullable: true, example: '912.5000' })
   manualRate: string | null;
+  @ApiProperty({
+    enum: FxSettingAction,
+    enumName: 'FxSettingAction',
+    description:
+      'SETTINGS_UPDATED (PUT settings) | REJECTED_READING_ACCEPTED (accept-rejected).',
+  })
+  action: FxSettingAction;
   @ApiProperty({ format: 'date-time' })
   createdAt: string;
 }
