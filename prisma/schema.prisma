@@ -183,6 +183,9 @@ model Product {
   /// `heldQty`. Read-only back-reference — StockHoldService (Story 5.2)
   /// queries StockHold directly by `expiresAt`, never through this list.
   stockHolds       StockHold[]
+  /// Story 18.6 (AD-81): aggregated per-day interest signals and ranking rows.
+  dailyStats       ProductDailyStat[]
+  scores           ProductScore[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -654,6 +657,7 @@ model Order {
   @@index([customerId, createdAt])
   @@index([stripePaymentIntentId])
   @@index([shippingAgencyId])
+  @@index([status, createdAt])
   @@map("Orders")
 }
 
@@ -680,6 +684,7 @@ model OrderLine {
 
   createdAt DateTime @default(now())
 
+  @@index([productId, createdAt])
   @@map("Order_Lines")
 }
 
@@ -769,6 +774,8 @@ model AdminUser {
   orderStatusHistoryRows OrderStatusHistory[]
   orderTrackingEvents    OrderTrackingEvent[]
   fxSettingAudits        FxSettingAudit[]
+  vitrinaSettings        VitrinaAlgorithmSetting[]
+  vitrinaAudits          VitrinaAlgorithmAudit[]
 
   /// Story 10.1: back-reference for `LandingConfigEntry.updatedById`, same
   /// nullable-FK pattern as `orderStatusHistoryRows` above.
@@ -1018,6 +1025,7 @@ model WishlistItem {
   createdAt DateTime @default(now())
 
   @@unique([wishlistId, productId])
+  @@index([productId, createdAt])
   @@map("Wishlist_Items")
 }
 
@@ -1224,4 +1232,96 @@ model OrderTrackingEvent {
 
   @@index([orderId, createdAt])
   @@map("Order_Tracking_Events")
+}
+
+// ---------------------------------------------------------------------------
+// Story 18.6 (AD-81, AD-83): Vitrina scoring schema.
+// ---------------------------------------------------------------------------
+
+/// FR-97 / NFR-18.4: per-product, per-day aggregate of interest signals.
+/// Deliberately has NO ip / cookie / user column.
+model ProductDailyStat {
+  productId String   @db.Uuid
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  day       DateTime @db.Date
+  views     Int      @default(0)
+  cartAdds  Int      @default(0)
+
+  @@id([productId, day])
+  @@index([day])
+  @@map("Product_Daily_Stats")
+}
+
+/// AD-81: singleton (`id = 'default'`, seeded by the migration) with the
+/// weights and constants of the ranking. A DB CHECK enforces that the five
+/// weights sum to 100.
+model VitrinaAlgorithmSetting {
+  id                 String     @id @db.VarChar(32)
+  wSales             Int        @default(40)
+  wRevenue           Int        @default(15)
+  wVelocity          Int        @default(15)
+  wInterest          Int        @default(20)
+  wNovelty           Int        @default(10)
+  halfLifeDays       Int        @default(14)
+  windowDays         Int        @default(90)
+  noveltyDays        Int        @default(21)
+  maxPerFranchise    Int        @default(4)
+  mmrLambda          Decimal    @default(0.35) @db.Decimal(3, 2)
+  priorM             Decimal    @default(3) @db.Decimal(5, 2)
+  scarcityThreshold  Int        @default(3)
+  minSalesForRanking Int        @default(5)
+  viewDayCap         Int        @default(30)
+  /// Last successful run; readers only follow this pointer (atomic swap).
+  currentRunId       String?    @db.Uuid
+  updatedAt          DateTime   @updatedAt @db.Timestamptz
+  updatedById        String?    @db.Uuid
+  updatedBy          AdminUser? @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@map("Vitrina_Algorithm_Settings")
+}
+
+model VitrinaAlgorithmAudit {
+  id          String     @id @default(uuid()) @db.Uuid
+  adminUserId String?    @db.Uuid
+  adminUser   AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: SetNull)
+  before      Json
+  after       Json
+  createdAt   DateTime   @default(now()) @db.Timestamptz
+
+  @@index([createdAt])
+  @@map("Vitrina_Algorithm_Audits")
+}
+
+enum VitrinaRunMode {
+  RANKED
+  FALLBACK
+}
+
+model ProductScoreRun {
+  id         String         @id @default(uuid()) @db.Uuid
+  computedAt DateTime       @default(now()) @db.Timestamptz
+  mode       VitrinaRunMode
+  /// Copy of the parameters used.
+  config     Json
+  salesCount Int
+  durationMs Int
+  scores     ProductScore[]
+
+  @@map("Product_Score_Runs")
+}
+
+model ProductScore {
+  runId      String          @db.Uuid
+  run        ProductScoreRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  productId  String          @db.Uuid
+  product    Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  /// Position after MMR.
+  rank       Int
+  score      Decimal         @db.Decimal(7, 4)
+  components Json
+  reason     String?
+
+  @@id([runId, productId])
+  @@index([runId, rank])
+  @@map("Product_Scores")
 }
