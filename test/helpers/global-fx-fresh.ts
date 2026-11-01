@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { dbIdentity } from './db-identity.js';
 
 /** Survives an aborted run: the original value is restored on the next one. */
 const MARKER = resolve(
@@ -38,8 +39,16 @@ export default async function setup(): Promise<() => Promise<void>> {
     try {
       const m = JSON.parse(readFileSync(MARKER, 'utf8')) as {
         original: string | null;
+        db?: string;
       };
-      await restore(m.original);
+      // Only restore into the very database the marker was taken from.
+      const probe = new pg.Client({
+        connectionString: process.env.DATABASE_URL,
+      });
+      await probe.connect();
+      const id = await dbIdentity(probe);
+      await probe.end();
+      if (m.db === id) await restore(m.original);
     } finally {
       unlinkSync(MARKER);
     }
@@ -50,12 +59,16 @@ export default async function setup(): Promise<() => Promise<void>> {
     `SELECT "rateFetchedAt" FROM "Fx_Rate_Settings" WHERE "id" = 'default'`,
   );
   const had = before.rows.length === 1;
+  const id = await dbIdentity(client);
   const original = had ? before.rows[0].rateFetchedAt : null;
   if (had) {
     mkdirSync(dirname(MARKER), { recursive: true });
     writeFileSync(
       MARKER,
-      JSON.stringify({ original: original ? original.toISOString() : null }),
+      JSON.stringify({
+        original: original ? original.toISOString() : null,
+        db: id,
+      }),
     );
     await client.query(
       `UPDATE "Fx_Rate_Settings" SET "rateFetchedAt" = now() WHERE "id" = 'default'`,
