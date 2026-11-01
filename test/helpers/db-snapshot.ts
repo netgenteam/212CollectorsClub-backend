@@ -170,3 +170,23 @@ export async function restoreFx(
       "rejectedReading" = ${rejected}::jsonb
     WHERE "id" = ${r.id}`;
 }
+
+export type DailyStatRows = Prisma.ProductDailyStatGetPayload<object>[];
+
+/** Story 18.7: faithful snapshot/restore of the whole `Product_Daily_Stats` table. */
+export const snapshotDailyStats = (
+  prisma: PrismaService,
+): Promise<DailyStatRows> => prisma.productDailyStat.findMany();
+
+export async function restoreDailyStats(
+  prisma: PrismaService,
+  rows: DailyStatRows,
+): Promise<void> {
+  await prisma.productDailyStat.deleteMany();
+  if (rows.length) {
+    await prisma.productDailyStat.createMany({
+      data: rows,
+      skipDuplicates: true,
+    });
+  }
+}

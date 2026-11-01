@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { CartController } from './cart.controller.js';
 import { CartCookieService } from './cart-cookie.service.js';
 import { CartService } from './cart.service.js';
+import { VitrinaModule } from '../vitrina/vitrina.module.js';
 
 // PrismaService is provided by the global PrismaModule (see
 // src/prisma/prisma.module.ts) — no need to re-import it here.
@@ -11,6 +12,7 @@ import { CartService } from './cart.service.js';
 // copy — CheckoutController reads the cartId cookie the same way
 // CartController does, and clears it after a successful checkout.
 @Module({
+  imports: [VitrinaModule],
   controllers: [CartController],
   providers: [CartService, CartCookieService],
   exports: [CartCookieService, CartService],

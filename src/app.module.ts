@@ -22,6 +22,7 @@ import { AdminCustomersModule } from './admin-customers/admin-customers.module.j
 import { AdminTcgModule } from './admin-tcg/admin-tcg.module.js';
 import { CustomerAddressesModule } from './customer-addresses/customer-addresses.module.js';
 import { ShippingModule } from './shipping/shipping.module.js';
+import { VitrinaModule } from './vitrina/vitrina.module.js';
 import { WishlistModule } from './wishlist/wishlist.module.js';
 
 @Module({
@@ -74,6 +75,8 @@ import { WishlistModule } from './wishlist/wishlist.module.js';
     CustomerAddressesModule,
     // Story 18.1 (AD-79): FX rate provider, validation and refresh cron.
     FxModule,
+    // Story 18.7 (AD-82): view/cart-add interest signals.
+    VitrinaModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
+import { ProductSignalsService } from '../vitrina/product-signals.service.js';
 import { CartService } from './cart.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { ApiException } from '../common/api-exception.js';
@@ -60,7 +61,14 @@ describe('CartService', () => {
     };
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [CartService, { provide: PrismaService, useValue: prisma }],
+      providers: [
+        CartService,
+        { provide: PrismaService, useValue: prisma },
+        {
+          provide: ProductSignalsService,
+          useValue: { recordCartAdd: vi.fn() },
+        },
+      ],
     }).compile();
 
     service = module.get<CartService>(CartService);

@@ -9,6 +9,7 @@ import {
   CartItemResponseDto,
   CartResponseDto,
 } from './dto/cart-response.dto.js';
+import { ProductSignalsService } from '../vitrina/product-signals.service.js';
 import { CART_COOKIE_TTL_MS } from './cart-cookie.service.js';
 
 const EMPTY_CART: CartResponseDto = { items: [], total: 0 };
@@ -19,7 +20,10 @@ export interface AddCartItemResult {
 
 @Injectable()
 export class CartService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly signals: ProductSignalsService,
+  ) {}
 
   /**
    * Story 3.1 (FR-8, AD-5). `existingCartId` is whatever CartController
@@ -140,6 +144,9 @@ export class CartService {
         });
       }
 
+      // Story 18.7 (AD-82): last step of the tx, so a stock failure above
+      // (which throws) rolls back without counting.
+      await this.signals.recordCartAdd(tx, dto.productId);
       return { cartId: cart.id };
     });
   }
@@ -490,6 +497,7 @@ export class CartService {
         );
       }
 
+      await this.signals.recordCartAdd(tx, dto.productId);
       return { cartId };
     });
   }
