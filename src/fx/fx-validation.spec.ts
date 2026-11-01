@@ -55,4 +55,46 @@ describe('evaluateReading (Story 18.1)', () => {
   it('accepts anything valid when there is nothing to compare with', () => {
     expect(ev(5000, t(-1), null)).toEqual({ ok: true });
   });
+
+  it('accepts EXACTLY +/-15 % with exact decimal arithmetic (QA 18.1 #1)', () => {
+    const c = { rate: 20.2, providerUpdatedAt: t(-60) };
+    expect(ev(23.23, t(-10), c)).toEqual({ ok: true });
+    expect(ev(17.17, t(-10), c)).toEqual({ ok: true });
+    expect(ev(23.2301, t(-10), c)).toEqual({
+      ok: false,
+      reason: 'VARIATION_EXCEEDED',
+    });
+    // Sweep: every cur with a +/-15 % exact result must be accepted.
+    for (let cents = 1001; cents < 5000; cents += 37) {
+      const cur0 = cents / 100;
+      const upper = Number((cur0 * 1.15).toFixed(4));
+      const exact = Math.round(cur0 * 115) / 100;
+      if (Math.abs(upper - exact) > 1e-9) continue;
+      expect(
+        ev(exact, t(-10), { rate: cur0, providerUpdatedAt: t(-60) }),
+      ).toEqual({ ok: true });
+    }
+  });
+  it('rejects readings outside Decimal(18,4) as OUT_OF_RANGE (QA 18.1 #2)', () => {
+    expect(ev(1e20, t(-10), null)).toEqual({
+      ok: false,
+      reason: 'OUT_OF_RANGE',
+    });
+    expect(ev(1e14, t(-10), null)).toEqual({
+      ok: false,
+      reason: 'OUT_OF_RANGE',
+    });
+    expect(ev(99999999999999.9, t(-10), null)).toEqual({ ok: true });
+    expect(ev(0.00001, t(-10), null)).toEqual({
+      ok: false,
+      reason: 'NOT_POSITIVE',
+    });
+  });
+  it('rejects the same date with a different rate as DATE_NOT_NEWER (QA 18.1 #3)', () => {
+    expect(ev(101, cur.providerUpdatedAt)).toEqual({
+      ok: false,
+      reason: 'DATE_NOT_NEWER',
+    });
+    expect(ev(100.00004, cur.providerUpdatedAt)).toEqual({ ok: true });
+  });
 });

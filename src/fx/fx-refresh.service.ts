@@ -200,6 +200,7 @@ export class FxRefreshService implements OnApplicationBootstrap {
             lastError: `Reading rejected: ${verdict.reason}`,
             lastErrorAt: now,
             rejectedReading: {
+              source: active,
               rate: Number.isFinite(reading.rate) ? reading.rate : null,
               rawRate: String(reading.rate),
               providerUpdatedAt: Number.isNaN(
