@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { FxModule } from './fx/fx.module.js';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AuthCoreModule } from './auth-core/auth-core.module.js';
@@ -71,6 +72,8 @@ import { WishlistModule } from './wishlist/wishlist.module.js';
     // Story 17.1 (FR-82, AD-71): shipping agency catalog.
     ShippingModule,
     CustomerAddressesModule,
+    // Story 18.1 (AD-79): FX rate provider, validation and refresh cron.
+    FxModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -784,6 +784,8 @@ async function main(): Promise<void> {
     create: {
       id: SINGLETON_FX_RATE_ID,
       vesPerUsd: FX_RATE_VES_PER_USD_SEED_VALUE,
+      // Story 18.1: not "stale" right after seeding (source defaults to BCV_USD).
+      rateFetchedAt: new Date(),
     },
     // Never overwritten on re-seed once it exists — an already-seeded
     // environment may have had this rate legitimately edited directly in

@@ -120,3 +120,53 @@ export async function stashCursors(
     if (rows.length) await prisma.tcgIngestCursor.createMany({ data: rows });
   };
 }
+
+export type FxState = {
+  setting: Prisma.FxRateSettingGetPayload<object> | null;
+  snapshots: Prisma.FxRateSnapshotGetPayload<object>[];
+};
+
+/** Story 18.1: snapshot of the real FX rate row and its snapshot history. */
+export async function snapshotFx(prisma: PrismaService): Promise<FxState> {
+  return {
+    setting: await prisma.fxRateSetting.findUnique({
+      where: { id: 'default' },
+    }),
+    snapshots: await prisma.fxRateSnapshot.findMany(),
+  };
+}
+
+/**
+ * Restores the FX row byte for byte (raw UPDATE so `@updatedAt` is not bumped)
+ * and re-creates the snapshots verbatim.
+ */
+export async function restoreFx(
+  prisma: PrismaService,
+  s: FxState,
+): Promise<void> {
+  await prisma.fxRateSnapshot.deleteMany();
+  if (s.snapshots.length) {
+    await prisma.fxRateSnapshot.createMany({ data: s.snapshots });
+  }
+  const r = s.setting;
+  if (!r) {
+    await prisma.fxRateSetting.deleteMany({ where: { id: 'default' } });
+    return;
+  }
+  const rejected =
+    r.rejectedReading === null ? null : JSON.stringify(r.rejectedReading);
+  await prisma.$executeRaw`
+    UPDATE "Fx_Rate_Settings" SET
+      "vesPerUsd" = ${r.vesPerUsd},
+      "updatedAt" = ${r.updatedAt},
+      "source" = ${r.source}::"FxRateSource",
+      "manualVesPerUsd" = ${r.manualVesPerUsd},
+      "maxAgeHours" = ${r.maxAgeHours},
+      "maxVariationPct" = ${r.maxVariationPct},
+      "rateFetchedAt" = ${r.rateFetchedAt},
+      "providerUpdatedAt" = ${r.providerUpdatedAt},
+      "lastError" = ${r.lastError},
+      "lastErrorAt" = ${r.lastErrorAt},
+      "rejectedReading" = ${rejected}::jsonb
+    WHERE "id" = ${r.id}`;
+}
