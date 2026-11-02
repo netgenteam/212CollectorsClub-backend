@@ -325,6 +325,18 @@ class HeadingIds {
   }
 }
 
+/** Keeps the first `MAX_REPORTED_ISSUES`; `omitted` appears only when some were dropped. */
+function capIssues(issues: LegalMarkdownIssue[]): {
+  issues: LegalMarkdownIssue[];
+  omitted?: number;
+} {
+  if (issues.length <= MAX_REPORTED_ISSUES) return { issues };
+  return {
+    issues: issues.slice(0, MAX_REPORTED_ISSUES),
+    omitted: issues.length - MAX_REPORTED_ISSUES,
+  };
+}
+
 const PARSE_FAILED: LegalMarkdownIssue = {
   line: 1,
   reason:
@@ -341,7 +353,30 @@ export const LEGAL_MARKDOWN_OPTIONS = 'LEGAL_MARKDOWN_OPTIONS';
 export type LegalMarkdownOptions = Partial<MarkdownPoolOptions> & {
   /** Entries of the toc cache (content-addressed). */
   tocCacheSize?: number;
+  /** How long a failed (timeout/crash) toc analysis is remembered. */
+  negativeTtlMs?: number;
+  /** Clock (ms). Only tests override it. */
+  now?: () => number;
 };
+
+/**
+ * A failed toc analysis (TIMEOUT/FAILED) is remembered for this long, then
+ * retried. One minute: a pathological body saved by hand costs at most one
+ * `timeoutMs` (3 s) worker per minute per distinct body instead of 3 s on every
+ * public GET, while a transient failure (a loaded host, a worker crash, a
+ * too-short timeout that was later raised) heals itself within a minute
+ * instead of leaving a valid document without index until restart (FR-103).
+ */
+export const NEGATIVE_TOC_TTL_MS = 60_000;
+
+/**
+ * Most issues returned in a 400. 19 900 `www.a.com ` autolinks in 200 KB used
+ * to answer 3.8 MB; the editor shows lines, and 50 is more than anyone fixes
+ * in one pass. `details.omitted` says how many were left out.
+ */
+export const MAX_REPORTED_ISSUES = 50;
+
+type TocEntryCache = { toc: LegalTocEntry[]; expiresAt?: number };
 
 type Analysis = { issues: LegalMarkdownIssue[]; toc: LegalTocEntry[] };
 
@@ -364,23 +399,32 @@ type Analysis = { issues: LegalMarkdownIssue[]; toc: LegalTocEntry[] };
  * a cache hit on its first read. A miss (process restart, content inserted
  * without validation) is parsed in the pool, concurrent misses of the same
  * body share ONE job. If the body cannot be analyzed in time, the toc
- * degrades to `[]` (the body is still served); that outcome is cached too
- * (deterministic by content), a transient `BUSY` is not.
+ * degrades to `[]` (the body is still served). That outcome is NOT a property
+ * of the content (it depends on load, timeout, crashes), so a TIMEOUT/FAILED is
+ * remembered as a NEGATIVE entry with a short TTL (`NEGATIVE_TOC_TTL_MS`) in
+ * the same LRU: inside the TTL no worker is launched, after it the analysis is
+ * retried and a success replaces it permanently. Only the precheck verdict
+ * (pure function of the text) is cached permanently as `[]`; `BUSY`/`CLOSED`
+ * are never cached. Positive results stay until evicted by the LRU.
  */
 @Injectable()
 export class LegalMarkdownService implements OnModuleDestroy {
   private readonly pool: MarkdownWorkerPool;
-  private readonly tocCache = new Map<string, LegalTocEntry[]>();
+  private readonly tocCache = new Map<string, TocEntryCache>();
   private readonly inflight = new Map<string, Promise<LegalTocEntry[]>>();
   private readonly tocCacheSize: number;
+  private readonly negativeTtlMs: number;
+  private readonly now: () => number;
 
   constructor(
     @Optional()
     @Inject(LEGAL_MARKDOWN_OPTIONS)
     opts?: LegalMarkdownOptions,
   ) {
-    const { tocCacheSize, ...poolOpts } = opts ?? {};
+    const { tocCacheSize, negativeTtlMs, now, ...poolOpts } = opts ?? {};
     this.tocCacheSize = tocCacheSize ?? 256;
+    this.negativeTtlMs = negativeTtlMs ?? NEGATIVE_TOC_TTL_MS;
+    this.now = now ?? Date.now;
     this.pool = new MarkdownWorkerPool({
       ...DEFAULT_POOL_OPTIONS,
       ...poolOpts,
@@ -456,7 +500,7 @@ export class LegalMarkdownService implements OnModuleDestroy {
   async findIssues(md: string): Promise<LegalMarkdownIssue[]> {
     try {
       const r = await this.analyze(md);
-      return 'pre' in r ? [r.pre] : r.result.issues;
+      return capIssues('pre' in r ? [r.pre] : r.result.issues).issues;
     } catch (e) {
       if (e instanceof PoolFailure && e.kind === 'BUSY') throw this.busy();
       return [
@@ -475,9 +519,12 @@ export class LegalMarkdownService implements OnModuleDestroy {
     );
   }
 
-  private remember(key: string, toc: LegalTocEntry[]): void {
+  private remember(key: string, toc: LegalTocEntry[], ttlMs?: number): void {
     this.tocCache.delete(key);
-    this.tocCache.set(key, toc);
+    this.tocCache.set(key, {
+      toc,
+      ...(ttlMs !== undefined ? { expiresAt: this.now() + ttlMs } : {}),
+    });
     if (this.tocCache.size > this.tocCacheSize) {
       const oldest = this.tocCache.keys().next().value;
       if (oldest !== undefined) this.tocCache.delete(oldest);
@@ -492,8 +539,12 @@ export class LegalMarkdownService implements OnModuleDestroy {
     const key = createHash('sha256').update(md).digest('base64');
     const hit = this.tocCache.get(key);
     if (hit) {
-      this.remember(key, hit); // LRU touch
-      return hit;
+      if (hit.expiresAt === undefined || hit.expiresAt > this.now()) {
+        this.tocCache.delete(key); // LRU touch (keeps the original expiry)
+        this.tocCache.set(key, hit);
+        return hit.toc;
+      }
+      this.tocCache.delete(key); // negative entry expired: retry below
     }
     const running = this.inflight.get(key);
     if (running) return running;
@@ -504,13 +555,14 @@ export class LegalMarkdownService implements OnModuleDestroy {
         this.remember(key, toc);
         return toc;
       } catch (e) {
-        // BUSY/CLOSED are transient: do not remember them.
+        // BUSY/CLOSED are transient: do not remember them. TIMEOUT/FAILED
+        // only for a short while (see NEGATIVE_TOC_TTL_MS).
         if (
           e instanceof PoolFailure &&
           e.kind !== 'BUSY' &&
           e.kind !== 'CLOSED'
         ) {
-          this.remember(key, []);
+          this.remember(key, [], this.negativeTtlMs);
         }
         return [];
       } finally {
@@ -561,7 +613,7 @@ export class LegalMarkdownService implements OnModuleDestroy {
         tooComplex
           ? 'The Markdown is too large or too complex.'
           : 'The Markdown contains forbidden constructs.',
-        { issues },
+        capIssues(issues),
       );
     }
     this.remember(createHash('sha256').update(md).digest('base64'), toc);

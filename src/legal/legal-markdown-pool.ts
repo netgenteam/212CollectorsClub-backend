@@ -36,6 +36,11 @@ export interface MarkdownPoolOptions {
   resourceLimits: ResourceLimits;
   /** Worker script. Only tests override it (crash / out-of-memory simulations). */
   workerUrl: URL;
+  /** Worker factory. Only tests override it (count live threads, make it throw). */
+  createWorker?: (o: {
+    workerUrl: URL;
+    resourceLimits: ResourceLimits;
+  }) => Worker;
 }
 
 export const DEFAULT_POOL_OPTIONS: MarkdownPoolOptions = {
@@ -63,9 +68,12 @@ interface Slot {
   job?: Job;
   timer?: NodeJS.Timeout;
   dead: boolean;
+  /** Set once the slot is being terminated; resolves when the thread is gone. */
+  gone?: Promise<void>;
 }
 
 export interface MarkdownPoolStats {
+  /** Threads that exist, INCLUDING those still being terminated. */
   alive: number;
   busy: number;
   queued: number;
@@ -76,11 +84,17 @@ export interface MarkdownPoolStats {
 /**
  * Bounded pool of long-lived `worker_thread`s for Markdown analysis.
  *
- * - At most `maxWorkers` threads exist; at most `maxQueue` jobs wait; anything
- *   more is rejected immediately (`BUSY`), so a burst of POSTs cannot create
- *   unbounded threads or memory.
+ * - INVARIANT: `slots` holds every thread that may still be running, and a
+ *   slot only leaves it when `terminate()` has RESOLVED. A worker being
+ *   terminated therefore keeps counting against `maxWorkers`, whatever order
+ *   timeouts, errors, `exit` events and new requests arrive in. The only place
+ *   that creates a worker is `pump()`, and it only does so when
+ *   `slots.size < maxWorkers`.
+ * - At most `maxQueue` jobs wait; anything more is rejected immediately
+ *   (`BUSY`), so a burst of POSTs cannot create unbounded threads or memory.
  * - Every job has a hard deadline: on expiry the thread is `terminate()`d (the
- *   only way to stop a synchronous parser) and a fresh one is created lazily.
+ *   only way to stop a synchronous parser) and a fresh one is created lazily
+ *   by `pump()` once the old one is really gone.
  * - A crash, a thrown error or an out-of-memory (`resourceLimits`) kills only
  *   that worker: the job fails with `FAILED`, the process keeps running.
  * - `close()` terminates every thread and fails queued jobs; no thread is left.
@@ -110,15 +124,16 @@ export class MarkdownWorkerPool {
     if (this.closed) return Promise.reject(new PoolFailure('CLOSED'));
     return new Promise<MarkdownFact[]>((resolve, reject) => {
       const job: Job = { md, resolve, reject };
-      const idle = this.idleSlot();
-      if (idle) return this.dispatch(idle, job);
-      if (this.slots.size < this.opts.maxWorkers) {
-        return this.dispatch(this.spawn(), job);
-      }
-      if (this.queue.length >= this.opts.maxQueue) {
-        return reject(new PoolFailure('BUSY', 'queue is full'));
-      }
       this.queue.push(job);
+      this.pump();
+      // Still waiting beyond the allowed queue: nobody can take it soon.
+      if (this.queue.length > this.opts.maxQueue) {
+        const at = this.queue.lastIndexOf(job);
+        if (at >= 0) {
+          this.queue.splice(at, 1);
+          reject(new PoolFailure('BUSY', 'queue is full'));
+        }
+      }
     });
   }
 
@@ -131,16 +146,55 @@ export class MarkdownWorkerPool {
     await Promise.all([...this.slots].map((s) => this.kill(s, 'CLOSED')));
   }
 
+  /**
+   * THE scheduler: gives queued jobs to idle workers and, only while
+   * `slots.size < maxWorkers` (dying workers included), creates new ones.
+   * Called whenever something may have freed capacity. Never throws.
+   */
+  private pump(): void {
+    while (!this.closed && this.queue.length > 0) {
+      const idle = this.idleSlot();
+      if (idle) {
+        this.dispatch(idle, this.queue.shift()!);
+        continue;
+      }
+      if (this.slots.size >= this.opts.maxWorkers) return;
+      const job = this.queue.shift()!;
+      let slot: Slot;
+      try {
+        slot = this.spawn();
+      } catch (e) {
+        // Cannot create a thread: fail only this job, keep draining.
+        job.reject(
+          new PoolFailure(
+            'FAILED',
+            e instanceof Error ? e.message : 'cannot spawn worker',
+          ),
+        );
+        continue;
+      }
+      this.dispatch(slot, job);
+    }
+  }
+
   private idleSlot(): Slot | undefined {
     for (const s of this.slots) if (!s.job && !s.dead) return s;
     return undefined;
   }
 
+  /** Only called from `pump()`, which checked the capacity. May throw. */
   private spawn(): Slot {
-    const worker = new Worker(this.opts.workerUrl, {
+    const create =
+      this.opts.createWorker ??
+      ((o) =>
+        new Worker(o.workerUrl, {
+          resourceLimits: o.resourceLimits,
+          // Never inherit debugger/loader flags from the parent (`--inspect-brk`...).
+          execArgv: [],
+        }));
+    const worker = create({
+      workerUrl: this.opts.workerUrl,
       resourceLimits: this.opts.resourceLimits,
-      // Never inherit debugger/loader flags from the parent (`--inspect-brk`...).
-      execArgv: [],
     });
     // An idle worker must not keep the process alive.
     worker.unref();
@@ -155,7 +209,7 @@ export class MarkdownWorkerPool {
         this.finish(slot);
         if (msg.ok && Array.isArray(msg.facts)) job.resolve(msg.facts);
         else job.reject(new PoolFailure('FAILED', msg.error ?? 'worker error'));
-        this.next(slot);
+        this.pump();
       },
     );
     worker.on('error', (e: Error) => {
@@ -186,31 +240,31 @@ export class MarkdownWorkerPool {
     slot.job = undefined;
   }
 
-  /** Slot became free: hand it the next queued job, if any. */
-  private next(slot: Slot): void {
-    if (slot.dead || this.closed) return;
-    const job = this.queue.shift();
-    if (job) this.dispatch(slot, job);
-  }
-
-  /** Removes and terminates a worker; fails its running job; refills from the queue. */
-  private async kill(
+  /**
+   * Fails the slot's running job and terminates its worker. The slot stays in
+   * `slots` (counting against the cap) until the thread is really gone; only
+   * then is the queue pumped. Idempotent: later calls get the same promise.
+   */
+  private kill(
     slot: Slot,
     kind: PoolFailureKind,
     detail?: string,
   ): Promise<void> {
-    if (slot.dead) return;
+    if (slot.gone) return slot.gone;
     slot.dead = true;
-    this.slots.delete(slot);
     const job = slot.job;
     this.finish(slot);
     job?.reject(new PoolFailure(kind, detail));
     this.terminated++;
-    await slot.worker.terminate().catch(() => undefined);
-    // A queued job must not starve because its worker died.
-    if (!this.closed) {
-      const waiting = this.queue.shift();
-      if (waiting) this.dispatch(this.spawn(), waiting);
-    }
+    slot.gone = (async () => {
+      try {
+        await slot.worker.terminate();
+      } catch {
+        // already gone
+      }
+      this.slots.delete(slot);
+      this.pump(); // a queued job must not starve because its worker died
+    })();
+    return slot.gone;
   }
 }

@@ -2,7 +2,7 @@
 import { parentPort } from 'node:worker_threads';
 
 parentPort.on('message', ({ id, md }) => {
-  if (md === 'hang') for (;;); // synchronous infinite loop
+  if (md === 'hang' || md.startsWith('hang\n')) for (;;); // synchronous infinite loop
   if (md === 'throw') throw new Error('boom');
   if (md === 'exit') process.exit(3); // in a worker: ends only that thread
   if (md === 'oom') {
