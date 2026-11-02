@@ -13,6 +13,7 @@ import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { VitrinaScoringService } from './../src/vitrina/vitrina-scoring.service.js';
+import { VitrinaDataLoader } from './../src/vitrina/vitrina-data.loader.js';
 import { VitrinaCronService } from './../src/vitrina/vitrina-cron.service.js';
 import {
   restoreDailyStats,
@@ -565,6 +566,85 @@ describe('Vitrina scoring service + admin (e2e, Story 18.8)', () => {
         maxPerFranchise: 3,
       });
       await resetAlgo();
+    });
+
+    it('GET /algorithm/audit: paginated, newest first, admin {id,email}, 400 out of range', async () => {
+      const total = await prisma.vitrinaAlgorithmAudit.count();
+      await putAlgo({ ...DEFAULTS, wSales: 31, wRevenue: 24 }).expect(200);
+      await putAlgo({ ...DEFAULTS, wSales: 32, wRevenue: 23 }).expect(200);
+      const get = (qs: string) => server().get(`${BASE}/algorithm/audit${qs}`);
+      await get('').expect(401);
+      const res = await get('?page=1&limit=2').set(auth()).expect(200);
+      const body = res.body as {
+        data: {
+          id: string;
+          createdAt: string;
+          admin: { id: string; email: string } | null;
+          before: Record<string, unknown>;
+          after: Record<string, unknown>;
+        }[];
+        meta: {
+          page: number;
+          limit: number;
+          total: number;
+          totalPages: number;
+        };
+      };
+      expect(body.meta).toMatchObject({
+        page: 1,
+        limit: 2,
+        total: total + 2,
+        totalPages: Math.ceil((total + 2) / 2),
+      });
+      expect(body.data).toHaveLength(2);
+      expect(body.data[0].admin).toEqual({ id: adminId, email: EMAIL });
+      expect(body.data[0].after).toMatchObject({ wSales: 32, wRevenue: 23 });
+      expect(body.data[0].before).toMatchObject({ wSales: 31 });
+      expect(body.data[1].after).toMatchObject({ wSales: 31 });
+      expect(body.data[0].createdAt >= body.data[1].createdAt).toBe(true);
+      await get('?limit=101').set(auth()).expect(400);
+      await get('?limit=0').set(auth()).expect(400);
+      await get('?page=0').set(auth()).expect(400);
+      await get('?page=abc').set(auth()).expect(400);
+      await resetAlgo();
+    });
+
+    it('GET /algorithm does not block while the settings row is locked', async () => {
+      const holder = new pg.Client({
+        connectionString: process.env.DATABASE_URL,
+      });
+      await holder.connect();
+      try {
+        await holder.query('BEGIN');
+        await holder.query(
+          `SELECT 1 FROM "Vitrina_Algorithm_Settings" WHERE id='default' FOR UPDATE`,
+        );
+        const t0 = Date.now();
+        await server().get(`${BASE}/algorithm`).set(auth()).expect(200);
+        expect(Date.now() - t0).toBeLessThan(2_000);
+      } finally {
+        await holder.query('ROLLBACK');
+        await holder.end();
+      }
+    });
+
+    it('loader: daily sales `at` is the quantity-weighted mean time of the day', async () => {
+      await mkProduct('W', { createdAt: daysAgo(100) });
+      const day = new Date(
+        daysAgo(20).toISOString().slice(0, 10) + 'T00:00:00.000Z',
+      );
+      const at = (h: number) => new Date(day.getTime() + h * 3_600_000);
+      await mkOrder('PAID', [{ productId: id.W, qty: 1, at: at(0) }]);
+      await mkOrder('PAID', [{ productId: id.W, qty: 3, at: at(8) }]);
+      const loader = app.get(VitrinaDataLoader);
+      const data = await prisma.$transaction((tx) =>
+        loader.load(tx, 90, new Date()),
+      );
+      const sales = data.events.sales.filter((e) => e.productId === id.W);
+      expect(sales).toHaveLength(1);
+      expect(sales[0].qty).toBe(4);
+      // (0*1 + 8*3) / 4 = 6h (MAX would have said 8h).
+      expect(sales[0].at.getTime()).toBe(at(6).getTime());
     });
 
     it('PUT with recompute:true recomputes after saving', async () => {

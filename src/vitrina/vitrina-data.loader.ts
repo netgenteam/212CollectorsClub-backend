@@ -82,7 +82,13 @@ export class VitrinaDataLoader {
         SELECT ol."productId",
                SUM(ol."quantity")::int AS "qty",
                SUM(ol."lineTotalUsd")::float8 AS "total",
-               to_char(MAX(ol."createdAt"), ${ISO_TS}) AS "at"
+               to_char(
+                 (ol."createdAt"::date)::timestamp + CASE
+                   WHEN SUM(ol."quantity") > 0 THEN
+                     SUM(EXTRACT(EPOCH FROM (ol."createdAt" - (ol."createdAt"::date)::timestamp)) * ol."quantity")
+                       / SUM(ol."quantity") * interval '1 second'
+                   ELSE interval '0 second' END,
+                 ${ISO_TS}) AS "at"
         FROM "Order_Lines" ol
         JOIN "Orders" o ON o."id" = ol."orderId"
         WHERE o."status" IN ('PAID'::"OrderStatus", 'FULFILLED'::"OrderStatus")

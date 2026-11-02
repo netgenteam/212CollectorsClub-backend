@@ -26,7 +26,11 @@ import { AdminVitrinaService, toRunSummary } from './admin-vitrina.service.js';
 import {
   UpdateVitrinaAlgorithmDto,
   UpdateVitrinaAlgorithmResponseDto,
+  VITRINA_AUDIT_DEFAULT_LIMIT,
+  VITRINA_AUDIT_MAX_LIMIT,
   VitrinaAlgorithmResponseDto,
+  VitrinaAuditQueryDto,
+  VitrinaAuditResponseDto,
   VitrinaPreviewQueryDto,
   VitrinaPreviewResponseDto,
   VitrinaRunSummaryDto,
@@ -80,6 +84,26 @@ export class AdminVitrinaController {
     @Req() req: RequestWithAdminUser,
   ): Promise<UpdateVitrinaAlgorithmResponseDto> {
     return this.admin.updateAlgorithm(dto, req.user.id);
+  }
+
+  @Get('algorithm/audit')
+  @ApiOperation({
+    summary: 'Algorithm change audit, newest first (before/after + admin)',
+  })
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    description: `1..${VITRINA_AUDIT_MAX_LIMIT}, default ${VITRINA_AUDIT_DEFAULT_LIMIT}`,
+  })
+  @ApiResponse({ status: HttpStatus.OK, type: VitrinaAuditResponseDto })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'invalid page / limit',
+  })
+  @ApiResponse(UNAUTH)
+  audit(@Query() q: VitrinaAuditQueryDto): Promise<VitrinaAuditResponseDto> {
+    return this.admin.audit(q);
   }
 
   @Post('recompute')

@@ -31,6 +31,7 @@ export interface SettingRow {
  */
 export async function lockSetting(
   tx: Prisma.TransactionClient,
+  forUpdate = true,
 ): Promise<SettingRow> {
   await tx.$executeRaw`
     INSERT INTO "Vitrina_Algorithm_Settings" ("id", "updatedAt")
@@ -42,7 +43,8 @@ export async function lockSetting(
            "mmrLambda", "priorM", "scarcityThreshold", "minSalesForRanking",
            "viewDayCap", "currentRunId", "updatedAt", "updatedById"
     FROM "Vitrina_Algorithm_Settings"
-    WHERE "id" = ${VITRINA_SETTING_ID} FOR UPDATE`;
+    WHERE "id" = ${VITRINA_SETTING_ID}
+    ${forUpdate ? Prisma.sql`FOR UPDATE` : Prisma.empty}`;
   return rows[0];
 }
 

@@ -1,11 +1,14 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client.js';
 import { ApiException } from '../common/api-exception.js';
+import { buildPageMeta } from '../common/pagination.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type {
   UpdateVitrinaAlgorithmDto,
   UpdateVitrinaAlgorithmResponseDto,
   VitrinaAlgorithmResponseDto,
+  VitrinaAuditQueryDto,
+  VitrinaAuditResponseDto,
   VitrinaPreviewQueryDto,
   VitrinaPreviewResponseDto,
   VitrinaRecomputeStatusDto,
@@ -48,8 +51,8 @@ export class AdminVitrinaService {
   ) {}
 
   async getAlgorithm(): Promise<VitrinaAlgorithmResponseDto> {
-    // Plain tx so the self-healing insert + read stay consistent; no long lock.
-    const row = await this.prisma.$transaction((tx) => lockSetting(tx));
+    // Lock-free read (no FOR UPDATE): never waits behind a long recompute/PUT.
+    const row = await this.prisma.$transaction((tx) => lockSetting(tx, false));
     return this.toResponse(row);
   }
 
@@ -138,8 +141,32 @@ export class AdminVitrinaService {
         recompute = { status: 'FAILED', run: null };
       }
     }
-    const row = await this.prisma.$transaction((tx) => lockSetting(tx));
+    const row = await this.prisma.$transaction((tx) => lockSetting(tx, false));
     return { ...(await this.toResponse(row)), recompute };
+  }
+
+  async audit(q: VitrinaAuditQueryDto): Promise<VitrinaAuditResponseDto> {
+    const [total, rows] = await Promise.all([
+      this.prisma.vitrinaAlgorithmAudit.count(),
+      this.prisma.vitrinaAlgorithmAudit.findMany({
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip: (q.page - 1) * q.limit,
+        take: q.limit,
+        include: { adminUser: { select: { id: true, email: true } } },
+      }),
+    ]);
+    return {
+      data: rows.map((r) => ({
+        id: r.id,
+        createdAt: r.createdAt.toISOString(),
+        admin: r.adminUser
+          ? { id: r.adminUser.id, email: r.adminUser.email }
+          : null,
+        before: r.before as Record<string, unknown>,
+        after: r.after as Record<string, unknown>,
+      })),
+      meta: buildPageMeta(q.page, q.limit, total),
+    };
   }
 
   async preview(q: VitrinaPreviewQueryDto): Promise<VitrinaPreviewResponseDto> {

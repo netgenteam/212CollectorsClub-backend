@@ -226,3 +226,63 @@ export class VitrinaPreviewResponseDto {
   @ApiProperty({ type: [VitrinaPreviewItemDto] })
   items: VitrinaPreviewItemDto[];
 }
+
+export const VITRINA_AUDIT_DEFAULT_LIMIT = 20;
+export const VITRINA_AUDIT_MAX_LIMIT = 100;
+
+export class VitrinaAuditQueryDto {
+  @ApiPropertyOptional({ minimum: 1, default: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page: number = 1;
+
+  @ApiPropertyOptional({
+    minimum: 1,
+    maximum: VITRINA_AUDIT_MAX_LIMIT,
+    default: VITRINA_AUDIT_DEFAULT_LIMIT,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(VITRINA_AUDIT_MAX_LIMIT)
+  limit: number = VITRINA_AUDIT_DEFAULT_LIMIT;
+}
+
+export class VitrinaAuditAdminDto {
+  @ApiProperty({ format: 'uuid' })
+  id: string;
+  @ApiProperty()
+  email: string;
+}
+
+export class VitrinaAuditItemDto {
+  @ApiProperty({ format: 'uuid' })
+  id: string;
+  @ApiProperty({ format: 'date-time' })
+  createdAt: string;
+  @ApiProperty({ type: VitrinaAuditAdminDto, nullable: true })
+  admin: VitrinaAuditAdminDto | null;
+  @ApiProperty({ type: 'object', additionalProperties: true })
+  before: Record<string, unknown>;
+  @ApiProperty({ type: 'object', additionalProperties: true })
+  after: Record<string, unknown>;
+}
+
+export class VitrinaAuditMetaDto {
+  @ApiProperty() page: number;
+  @ApiProperty() limit: number;
+  @ApiProperty() total: number;
+  @ApiProperty() totalPages: number;
+  @ApiProperty() hasNextPage: boolean;
+  @ApiProperty() hasPreviousPage: boolean;
+}
+
+export class VitrinaAuditResponseDto {
+  @ApiProperty({ type: [VitrinaAuditItemDto] })
+  data: VitrinaAuditItemDto[];
+  @ApiProperty({ type: VitrinaAuditMetaDto })
+  meta: VitrinaAuditMetaDto;
+}

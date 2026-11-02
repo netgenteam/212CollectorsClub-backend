@@ -106,7 +106,7 @@ maybe('Vitrina recompute performance (e2e, Story 18.8)', () => {
             o AS (SELECT id, row_number() OVER (ORDER BY id) rn FROM "Orders" WHERE id = ANY($1::uuid[]))
        INSERT INTO "Order_Lines" ("id","orderId","productId","productName","unitPriceUsd","quantity","lineTotalUsd","createdAt")
        SELECT gen_random_uuid(), o.id, p.id, 'x', 5, 1 + g % 3, 5 * (1 + g % 3),
-              now() - (random() * 80 || ' days')::interval
+              now() - (random() * 80 * 86400)::int * interval '1 second'
        FROM generate_series(1, ${LINES}) g
        JOIN p ON p.rn = 1 + (g * 7) % ${PRODUCTS}
        JOIN o ON o.rn = 1 + g % 50`,
