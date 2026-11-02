@@ -140,7 +140,7 @@ export class LegalDocumentsService {
       slug: doc.slug,
       title: doc.title,
       status: cur ? 'PUBLISHED' : 'IN_PREPARATION',
-      ...(cur ? { version: this.toBody(cur) } : {}),
+      ...(cur ? { version: await this.toBody(cur) } : {}),
       ...(next
         ? {
             upcoming: {
@@ -203,18 +203,19 @@ export class LegalDocumentsService {
       slug: doc.slug,
       title: doc.title,
       version: {
-        ...this.toBody(row),
+        ...(await this.toBody(row)),
         isCurrent: row.isCurrent,
         supersededAt: row.supersededAt?.toISOString() ?? null,
       },
     };
   }
 
-  private toBody(r: VersionRow): LegalVersionBodyDto {
+  /** The toc comes from the worker-backed, content-addressed cache (never parsed here). */
+  private async toBody(r: VersionRow): Promise<LegalVersionBodyDto> {
     return {
       versionNumber: r.versionNumber,
       bodyMd: r.bodyMd,
-      toc: this.markdown.buildToc(r.bodyMd),
+      toc: await this.markdown.buildToc(r.bodyMd),
       changeSummary: r.changeSummary,
       isSubstantial: r.isSubstantial,
       effectiveFrom: r.effectiveFrom.toISOString(),

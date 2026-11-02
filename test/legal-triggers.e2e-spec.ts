@@ -396,6 +396,177 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
     expect(left[0]).toEqual({ d: 0, v: 0, a: 0 });
   });
 
+  describe('D4: INSERT of a version is enforced by the database (versionNumber = max+1, publishedAt = DB clock)', () => {
+    const ins = (
+      client: {
+        $executeRawUnsafe: (q: string, ...p: unknown[]) => Promise<number>;
+      },
+      docId: string,
+      n: number,
+      publishedAt = 'now()',
+    ) =>
+      client.$executeRawUnsafe(
+        `INSERT INTO "Legal_Document_Versions"
+           ("id","documentId","versionNumber","bodyMd","changeSummary","isSubstantial","effectiveFrom","publishedAt")
+         VALUES (gen_random_uuid(), $1::uuid, $2, 'cuerpo', 'resumen', false, now(), ${publishedAt})`,
+        docId,
+        n,
+      );
+
+    it('sandbox: gaps, repeats, zero and a wrong first number are rejected; the legitimate sequence works', async () => {
+      const doc = await createSandboxDocument(sql, `${TAG}-ins`);
+      const rejects = async (n: number) => {
+        let code = '';
+        await ins(prisma, doc.id, n).catch((e: unknown) => {
+          code = sqlstate(e);
+        });
+        return code;
+      };
+      expect(await rejects(5)).toBe('23000'); // first must be 1
+      expect(await rejects(0)).toBe('23000');
+      await ins(prisma, doc.id, 1);
+      expect(await rejects(1)).toBe('23000'); // repeat
+      expect(await rejects(3)).toBe('23000'); // gap
+      await ins(prisma, doc.id, 2);
+      const rows = await sql(
+        `SELECT "versionNumber" FROM "Legal_Document_Versions" WHERE "documentId" = $1::uuid ORDER BY 1`,
+        [doc.id],
+      );
+      expect(rows.map((r) => r.versionNumber)).toEqual([1, 2]);
+      await purgeSandbox(sql, TAG);
+    });
+
+    it('a client-supplied old publishedAt is overwritten with the DB clock', async () => {
+      const doc = await createSandboxDocument(sql, `${TAG}-clk`);
+      await ins(prisma, doc.id, 1, `'2001-01-01T00:00:00Z'::timestamptz`);
+      await ins(prisma, doc.id, 2, `now() - interval '400 days'`);
+      const r = await sql(
+        `SELECT "versionNumber", extract(epoch FROM (clock_timestamp() - "publishedAt")) AS age
+         FROM "Legal_Document_Versions" WHERE "documentId" = $1::uuid ORDER BY 1`,
+        [doc.id],
+      );
+      for (const row of r) {
+        expect(Number(row.age)).toBeGreaterThanOrEqual(0);
+        expect(Number(row.age)).toBeLessThan(10);
+      }
+      await purgeSandbox(sql, TAG);
+    });
+
+    it('REAL document: forging version 7 or back-dating publishedAt cannot persist (rolled-back transaction)', async () => {
+      const out: Record<string, string> = {};
+      let storedAge = -1;
+      await prisma
+        .$transaction(
+          async (tx) => {
+            const real = (
+              await tx.$queryRawUnsafe<{ id: string }[]>(
+                `SELECT "id" FROM "Legal_Documents" WHERE "slug" = 'terminos' AND NOT "isSandbox"`,
+              )
+            )[0].id;
+            const attempt = async (
+              name: string,
+              fn: () => Promise<unknown>,
+            ) => {
+              await tx.$executeRawUnsafe('SAVEPOINT a');
+              try {
+                await fn();
+                out[name] = 'SUCCEEDED';
+              } catch (e) {
+                out[name] = sqlstate(e);
+              }
+              await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT a');
+            };
+            await attempt('forged v7', () => ins(tx, real, 7));
+            await attempt('forged v2 as first', () => ins(tx, real, 2));
+            await attempt('forged v0', () => ins(tx, real, 0));
+            await attempt('forged v7 with old publishedAt', () =>
+              ins(tx, real, 7, `'2001-01-01T00:00:00Z'::timestamptz`),
+            );
+            // Legitimate v1 with a back-dated publishedAt: accepted, but corrected.
+            await ins(tx, real, 1, `'2001-01-01T00:00:00Z'::timestamptz`);
+            storedAge = Number(
+              (
+                await tx.$queryRawUnsafe<{ age: string }[]>(
+                  `SELECT extract(epoch FROM (clock_timestamp() - "publishedAt")) AS age
+                   FROM "Legal_Document_Versions" WHERE "documentId" = $1::uuid`,
+                  real,
+                )
+              )[0].age,
+            );
+            await attempt('repeat v1', () => ins(tx, real, 1));
+            await attempt('gap v3', () => ins(tx, real, 3));
+            throw ROLLBACK;
+          },
+          { timeout: 30_000 },
+        )
+        .catch((e: unknown) => {
+          if (e !== ROLLBACK) throw e;
+        });
+      for (const [name, code] of Object.entries(out)) {
+        expect([name, code]).toEqual([name, '23000']);
+      }
+      expect(Object.keys(out)).toHaveLength(6);
+      expect(storedAge).toBeGreaterThanOrEqual(0);
+      expect(storedAge).toBeLessThan(10);
+      expect(await realLegalFingerprint(sql)).toBe(fingerprint);
+    });
+
+    it('races: 8 concurrent publishers computing max+1 with retry get 1..8 exactly once; 8 blind inserts of the same number: exactly one wins', async () => {
+      const doc = await createSandboxDocument(sql, `${TAG}-race`);
+      const publish = async () => {
+        for (let attempt = 0; attempt < 30; attempt++) {
+          try {
+            return await prisma.$transaction(async (tx) => {
+              const [{ n }] = await tx.$queryRawUnsafe<{ n: number }[]>(
+                `SELECT COALESCE(max("versionNumber"),0)+1 AS n FROM "Legal_Document_Versions" WHERE "documentId" = $1::uuid`,
+                doc.id,
+              );
+              await ins(tx, doc.id, n);
+              return n;
+            });
+          } catch (e) {
+            if (sqlstate(e) !== '23000' && sqlstate(e) !== 'P2010') throw e;
+          }
+        }
+        throw new Error('no publish succeeded');
+      };
+      const got = await Promise.all(Array.from({ length: 8 }, publish));
+      expect([...got].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      const rows = await sql(
+        `SELECT "versionNumber" FROM "Legal_Document_Versions" WHERE "documentId" = $1::uuid ORDER BY 1`,
+        [doc.id],
+      );
+      expect(rows.map((r) => r.versionNumber)).toEqual([
+        1, 2, 3, 4, 5, 6, 7, 8,
+      ]);
+      // Blind: everybody tries number 9.
+      const blind = await Promise.allSettled(
+        Array.from({ length: 8 }, () => ins(prisma, doc.id, 9)),
+      );
+      expect(blind.filter((b) => b.status === 'fulfilled')).toHaveLength(1);
+      expect(blind.filter((b) => b.status === 'rejected')).toHaveLength(7);
+      const max = await sql(
+        `SELECT count(*)::int AS c, max("versionNumber") AS m FROM "Legal_Document_Versions" WHERE "documentId" = $1::uuid`,
+        [doc.id],
+      );
+      expect(max[0]).toEqual({ c: 9, m: 9 });
+      await purgeSandbox(sql, TAG);
+    }, 60_000);
+
+    it('the older immutability triggers still hold after the new one (UPDATE/DELETE of an inserted version)', async () => {
+      const doc = await createSandboxDocument(sql, `${TAG}-old`);
+      await ins(prisma, doc.id, 1);
+      // identity freeze (previous migration) still works on sandbox rows
+      await expect(
+        prisma.$executeRawUnsafe(
+          `UPDATE "Legal_Document_Versions" SET "versionNumber" = 9 WHERE "documentId" = $1::uuid`,
+          doc.id,
+        ),
+      ).rejects.toThrow();
+      await purgeSandbox(sql, TAG);
+    });
+  });
+
   it('the cleanup helper cannot touch a real document (predicate + triggers)', async () => {
     await purgeSandbox(sql);
     const n = await sql(

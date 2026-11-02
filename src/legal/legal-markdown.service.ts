@@ -1,10 +1,20 @@
-import { HttpStatus, Injectable } from '@nestjs/common';
-import { unified } from 'unified';
-import remarkParse from 'remark-parse';
-import remarkGfm from 'remark-gfm';
-import { toString as nodeToString } from 'mdast-util-to-string';
-import type { Nodes, Root } from 'mdast';
+import { createHash } from 'node:crypto';
+import {
+  HttpStatus,
+  Inject,
+  Injectable,
+  Optional,
+  type OnModuleDestroy,
+} from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
+import {
+  DEFAULT_POOL_OPTIONS,
+  MarkdownWorkerPool,
+  PoolFailure,
+  type MarkdownFact,
+  type MarkdownPoolOptions,
+  type MarkdownPoolStats,
+} from './legal-markdown-pool.js';
 
 export interface LegalTocEntry {
   depth: 2 | 3;
@@ -297,20 +307,6 @@ export function precheckMarkdown(md: string): LegalMarkdownIssue | null {
   return null;
 }
 
-/** Order-preserving, pre-order, no recursion (a deep AST cannot overflow the stack). */
-function* walkNodes(root: Nodes): Generator<Nodes> {
-  const stack: Nodes[] = [root];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    yield node;
-    if ('children' in node) {
-      for (let i = node.children.length - 1; i >= 0; i--) {
-        stack.push(node.children[i]);
-      }
-    }
-  }
-}
-
 /** Unique heading ids in O(n): per-base counter (`a`, `a-2`, `a-3`; `A-2` after `a-2` is `a-2-2`). */
 class HeadingIds {
   private readonly used = new Set<string>();
@@ -334,49 +330,92 @@ const PARSE_FAILED: LegalMarkdownIssue = {
   reason:
     'The Markdown is too complex to be processed (simplify its structure)',
 };
-const PARSE_ISSUES = [PARSE_FAILED];
+const PARSE_TIMEOUT: LegalMarkdownIssue = {
+  line: 1,
+  reason:
+    'The Markdown took too long to analyze (simplify its structure, e.g. unclosed [ brackets in long paragraphs)',
+};
+
+/** Options token (tests tune the pool; production uses the defaults). */
+export const LEGAL_MARKDOWN_OPTIONS = 'LEGAL_MARKDOWN_OPTIONS';
+export type LegalMarkdownOptions = Partial<MarkdownPoolOptions> & {
+  /** Entries of the toc cache (content-addressed). */
+  tocCacheSize?: number;
+};
+
+type Analysis = { issues: LegalMarkdownIssue[]; toc: LegalTocEntry[] };
 
 /**
  * Story 19.1 (AD-90, FR-109): server-side Markdown validation on the AST
  * (unified + remark-parse + remark-gfm). The frontend renders with its own
  * allow-list; this keeps forbidden constructs out of the database.
+ *
+ * ATTEMPT 3 (QA D1): NOTHING parses Markdown on the API event loop. The cheap
+ * O(n) `precheckMarkdown` is the first barrier; whatever passes it is parsed by
+ * `MarkdownWorkerPool` (bounded `worker_thread`s with a hard deadline), so a
+ * pattern nobody has thought of can burn at most one worker for `timeoutMs`
+ * and never blocks other requests. Hence `validate`/`buildToc` are async.
+ *
+ * READ PATH (public GET): `buildToc` is also worker-based, and its result is
+ * cached by SHA-256 of the body (versions are immutable, so the key never
+ * goes stale and a changed body simply hashes differently): the normal read
+ * is a Map lookup, no parse and no thread hop. `validate` primes the cache
+ * with the toc it just computed, so a document published after validation is
+ * a cache hit on its first read. A miss (process restart, content inserted
+ * without validation) is parsed in the pool, concurrent misses of the same
+ * body share ONE job. If the body cannot be analyzed in time, the toc
+ * degrades to `[]` (the body is still served); that outcome is cached too
+ * (deterministic by content), a transient `BUSY` is not.
  */
 @Injectable()
-export class LegalMarkdownService {
-  private parse(md: string): Root {
-    return unified().use(remarkParse).use(remarkGfm).parse(md);
+export class LegalMarkdownService implements OnModuleDestroy {
+  private readonly pool: MarkdownWorkerPool;
+  private readonly tocCache = new Map<string, LegalTocEntry[]>();
+  private readonly inflight = new Map<string, Promise<LegalTocEntry[]>>();
+  private readonly tocCacheSize: number;
+
+  constructor(
+    @Optional()
+    @Inject(LEGAL_MARKDOWN_OPTIONS)
+    opts?: LegalMarkdownOptions,
+  ) {
+    const { tocCacheSize, ...poolOpts } = opts ?? {};
+    this.tocCacheSize = tocCacheSize ?? 256;
+    this.pool = new MarkdownWorkerPool({
+      ...DEFAULT_POOL_OPTIONS,
+      ...poolOpts,
+    });
   }
 
-  private analyze(md: string): {
-    issues: LegalMarkdownIssue[];
-    toc: LegalTocEntry[];
-  } {
+  async onModuleDestroy(): Promise<void> {
+    await this.pool.close();
+  }
+
+  /** Worker pool counters (alive/busy/queued/spawned/terminated). */
+  poolStats(): MarkdownPoolStats {
+    return this.pool.stats();
+  }
+
+  /** Turns the raw facts of the worker into issues and the toc (cheap, O(n)). */
+  private interpret(facts: MarkdownFact[]): Analysis {
     const issues: LegalMarkdownIssue[] = [];
     const toc: LegalTocEntry[] = [];
     const ids = new HeadingIds();
-    for (const node of walkNodes(this.parse(md))) {
-      const line = node.position?.start.line ?? 1;
-      switch (node.type) {
+    for (const f of facts) {
+      switch (f[0]) {
         case 'html':
-          issues.push({ line, reason: 'Raw HTML is not allowed' });
+          issues.push({ line: f[1], reason: 'Raw HTML is not allowed' });
           break;
         case 'image':
-        case 'imageReference':
-          issues.push({ line, reason: 'Images are not allowed' });
+          issues.push({ line: f[1], reason: 'Images are not allowed' });
           break;
-        case 'link':
-        case 'definition': {
-          const why = urlRejection(node.url);
+        case 'url': {
+          const [, type, url, written, line] = f;
+          const why = urlRejection(url);
           if (!why) break;
-          const start = node.position?.start.offset;
-          const end = node.position?.end.offset;
-          const written =
-            node.type === 'link' && start !== undefined && end !== undefined
-              ? md.slice(start, end)
-              : '';
           // GFM literal autolink (`www.x.com`, `http://x.com` in prose): the
           // author never wrote a link, so say what to write instead.
-          if (written !== '' && !/^[[<]/.test(written)) {
+          if (type === 'link' && written !== '' && !/^[[<]/.test(written)) {
             const shown =
               written.length > 60 ? `${written.slice(0, 57)}...` : written;
             issues.push({
@@ -388,69 +427,144 @@ export class LegalMarkdownService {
           }
           break;
         }
-        case 'heading':
-          if (node.depth === 2 || node.depth === 3) {
-            const text = nodeToString(node).trim();
-            toc.push({
-              depth: node.depth,
-              text,
-              id: ids.take(slugifyHeading(text)),
-            });
-          }
+        case 'h':
+          toc.push({
+            depth: f[1],
+            text: f[2],
+            id: ids.take(slugifyHeading(f[2])),
+          });
           break;
-        default:
       }
     }
     return { issues, toc };
   }
 
-  /** Issues found in the document (empty when it is safe). Pure. */
-  findIssues(md: string): LegalMarkdownIssue[] {
+  /**
+   * Prefilter + worker. Resolves with the analysis, or throws a `PoolFailure`
+   * (TIMEOUT / FAILED / BUSY / CLOSED); returns the precheck issue when the
+   * document breaks a limit.
+   */
+  private async analyze(
+    md: string,
+  ): Promise<{ pre: LegalMarkdownIssue } | { result: Analysis }> {
     const pre = precheckMarkdown(md);
-    if (pre) return [pre];
+    if (pre) return { pre };
+    return { result: this.interpret(await this.pool.run(md)) };
+  }
+
+  /** Issues found in the document (empty when it is safe). */
+  async findIssues(md: string): Promise<LegalMarkdownIssue[]> {
     try {
-      return this.analyze(md).issues;
-    } catch {
-      return [PARSE_FAILED];
+      const r = await this.analyze(md);
+      return 'pre' in r ? [r.pre] : r.result.issues;
+    } catch (e) {
+      if (e instanceof PoolFailure && e.kind === 'BUSY') throw this.busy();
+      return [
+        e instanceof PoolFailure && e.kind === 'TIMEOUT'
+          ? PARSE_TIMEOUT
+          : PARSE_FAILED,
+      ];
     }
   }
 
-  /** Table of contents of the `##`/`###` headings, with unique ids (`-2`, `-3`…). */
-  buildToc(md: string): LegalTocEntry[] {
-    try {
-      return this.analyze(md).toc;
-    } catch {
-      return [];
+  private busy(): ApiException {
+    return new ApiException(
+      HttpStatus.SERVICE_UNAVAILABLE,
+      'LEGAL_MARKDOWN_BUSY',
+      'The Markdown validator is busy; retry in a few seconds.',
+    );
+  }
+
+  private remember(key: string, toc: LegalTocEntry[]): void {
+    this.tocCache.delete(key);
+    this.tocCache.set(key, toc);
+    if (this.tocCache.size > this.tocCacheSize) {
+      const oldest = this.tocCache.keys().next().value;
+      if (oldest !== undefined) this.tocCache.delete(oldest);
     }
   }
 
   /**
-   * Throws 400 `LEGAL_MARKDOWN_INVALID` with `details.issues[{line,reason}]`;
-   * otherwise returns the toc. Never 500 and never unbounded CPU: the size and
-   * shape limits are checked before parsing, and a parser failure is a 400.
+   * Table of contents of the `##`/`###` headings, with unique ids (`-2`, `-3`…).
+   * Never throws and never parses on the event loop (see the class comment).
    */
-  validate(md: string): { toc: LegalTocEntry[] } {
-    let result: ReturnType<LegalMarkdownService['analyze']> | undefined;
-    const pre = precheckMarkdown(md);
-    let issues: LegalMarkdownIssue[] = pre ? [pre] : [];
-    if (!pre) {
-      try {
-        result = this.analyze(md);
-        issues = result.issues;
-      } catch {
-        issues = PARSE_ISSUES;
-      }
+  async buildToc(md: string): Promise<LegalTocEntry[]> {
+    const key = createHash('sha256').update(md).digest('base64');
+    const hit = this.tocCache.get(key);
+    if (hit) {
+      this.remember(key, hit); // LRU touch
+      return hit;
     }
-    if (issues.length > 0 || !result) {
+    const running = this.inflight.get(key);
+    if (running) return running;
+    const job = (async () => {
+      try {
+        const r = await this.analyze(md);
+        const toc = 'pre' in r ? [] : r.result.toc;
+        this.remember(key, toc);
+        return toc;
+      } catch (e) {
+        // BUSY/CLOSED are transient: do not remember them.
+        if (
+          e instanceof PoolFailure &&
+          e.kind !== 'BUSY' &&
+          e.kind !== 'CLOSED'
+        ) {
+          this.remember(key, []);
+        }
+        return [];
+      } finally {
+        this.inflight.delete(key);
+      }
+    })();
+    this.inflight.set(key, job);
+    return job;
+  }
+
+  /**
+   * Throws 400 `LEGAL_MARKDOWN_INVALID` with `details.issues[{line,reason}]`;
+   * otherwise returns the toc. Never 500, never blocks the event loop: the
+   * size and shape limits are checked before parsing, the parse runs in a
+   * worker with a hard deadline (400 on timeout/crash), and when every worker
+   * and the queue are taken it answers 503 `LEGAL_MARKDOWN_BUSY` at once.
+   */
+  async validate(md: string): Promise<{ toc: LegalTocEntry[] }> {
+    let issues: LegalMarkdownIssue[];
+    let tooComplex = true;
+    let toc: LegalTocEntry[] | undefined;
+    try {
+      const r = await this.analyze(md);
+      if ('pre' in r) {
+        issues = [r.pre];
+      } else {
+        issues = r.result.issues;
+        toc = r.result.toc;
+        tooComplex = false;
+      }
+    } catch (e) {
+      if (
+        e instanceof PoolFailure &&
+        (e.kind === 'BUSY' || e.kind === 'CLOSED')
+      ) {
+        throw this.busy();
+      }
+      issues = [
+        e instanceof PoolFailure && e.kind === 'TIMEOUT'
+          ? PARSE_TIMEOUT
+          : PARSE_FAILED,
+      ];
+    }
+    if (issues.length > 0 || !toc) {
       throw new ApiException(
         HttpStatus.BAD_REQUEST,
         'LEGAL_MARKDOWN_INVALID',
-        pre || issues === PARSE_ISSUES
+        tooComplex
           ? 'The Markdown is too large or too complex.'
           : 'The Markdown contains forbidden constructs.',
         { issues },
       );
     }
-    return { toc: result.toc };
+    this.remember(createHash('sha256').update(md).digest('base64'), toc);
+    return { toc };
   }
 }

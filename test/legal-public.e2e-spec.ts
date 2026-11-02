@@ -9,6 +9,7 @@ import request from 'supertest';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { LegalMarkdownService } from './../src/legal/legal-markdown.service.js';
 import {
   createSandboxDocument,
   insertSandboxAudit,
@@ -304,11 +305,71 @@ describe('Legal public API (e2e, Story 19.1)', () => {
       };
       expect(b.version.versionNumber).toBe(1);
       expect(b.upcoming).toBeDefined();
-      await new Promise((r) => setTimeout(r, 1800));
-      b = (await get(`/${d.slug}`).expect(200)).body as typeof b;
+      // Poll (not a fixed sleep): the DB clock passes effectiveFrom ~1.5 s
+      // after the insert; the wait is bounded by a generous deadline.
+      const deadline = performance.now() + 15_000;
+      for (;;) {
+        b = (await get(`/${d.slug}`).expect(200)).body as typeof b;
+        if (b.version.versionNumber === 2 || performance.now() > deadline)
+          break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
       expect(b.version.versionNumber).toBe(2);
       expect(b.upcoming).toBeUndefined();
     });
+
+    it('D1 (read path): a stored pathological body never blocks the event loop; toc degrades to [] and is cached', async () => {
+      const slow = await createSandboxDocument(sql, `${TAG}-slowbody`);
+      // Inserted straight into the DB (as if it had skipped validation): the
+      // QA vector, 13 s of parser time if it were parsed in-process.
+      const vector = ('[' + ('a '.repeat(40) + '\n').repeat(740) + '\n').repeat(
+        3,
+      );
+      await insertSandboxVersion(sql, slow.id, 1, {
+        effectiveFrom: '-1 day',
+        bodyMd: vector,
+      });
+      const md = app.get(LegalMarkdownService, { strict: false });
+      let last = performance.now();
+      let maxDelay = 0;
+      const iv = setInterval(() => {
+        const now = performance.now();
+        maxDelay = Math.max(maxDelay, now - last - 10);
+        last = now;
+      }, 10);
+      const t0 = performance.now();
+      const slowReq = get(`/${slow.slug}`).then((r) => ({
+        r,
+        ms: performance.now() - t0,
+      }));
+      // While the worker chews on it, normal reads are answered at once.
+      const normal: number[] = [];
+      for (let i = 0; i < 10; i++) {
+        const t = performance.now();
+        await get(`/${docs.multi.slug}`).expect(200);
+        normal.push(performance.now() - t);
+      }
+      const { r, ms } = await slowReq;
+      clearInterval(iv);
+      const t1 = performance.now();
+      const again = await get(`/${slow.slug}`).expect(200);
+      const againMs = performance.now() - t1;
+      console.log(
+        `[19.1 D1] GET stored vector: ${ms.toFixed(0)} ms first (200, toc []), ${againMs.toFixed(0)} ms cached; normal GETs max ${Math.max(...normal).toFixed(0)} ms; max loop delay ${maxDelay.toFixed(1)} ms; pool ${JSON.stringify(md.poolStats())}`,
+      );
+      expect(r.status).toBe(200);
+      const v = (r.body as { version: { toc: unknown[]; bodyMd: string } })
+        .version;
+      expect(v.toc).toEqual([]);
+      expect(v.bodyMd).toBe(vector);
+      expect(
+        (again.body as { version: { toc: unknown[] } }).version.toc,
+      ).toEqual([]);
+      expect(againMs).toBeLessThan(500);
+      expect(Math.max(...normal)).toBeLessThan(1_000);
+      expect(maxDelay).toBeLessThan(250);
+      expect(md.poolStats().alive).toBeLessThanOrEqual(2);
+    }, 30_000);
 
     it('404 LEGAL_DOCUMENT_NOT_FOUND for a slug outside the six (and for unknown sandbox format)', async () => {
       for (const s of [

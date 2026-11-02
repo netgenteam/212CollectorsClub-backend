@@ -20,6 +20,15 @@ import { restoreFx, snapshotFx, type FxState } from './helpers/db-snapshot.js';
  * (`lock_timeout`). Proven with REAL external locks held on a separate `pg`
  * connection and the REAL 25 s budget; the measured wait is logged.
  */
+// D3 (QA 19.1 attempt 3): elapsed times use the MONOTONIC clock. In WSL2 the
+// wall clock (`Date.now()`) steps backwards ~1.5 s from time to time (verified:
+// a 1 s timer measured -484 ms wall vs 1002 ms monotonic), which made a wait of
+// 3 s read as 1.5 s and failed "lock released after 3 s" in ~25-35 % of runs.
+// It was a test measurement problem, not a race in `release()` or the product.
+// Measured with the monotonic clock the real 25 s budget answers at ~26.5 s
+// (budget + request/transaction overhead), so the upper bound is budget + 3 s
+// (still far below Nginx's 60 s); the old +1.5 s only held because the wall
+// clock was losing time.
 const TAG = randomUUID().slice(0, 8);
 const USER = `e2e-fxlock-${TAG}`;
 const PASS = 'correct-horse-battery-staple-19-1';
@@ -129,16 +138,16 @@ describe('FX admin lock budget (e2e, Story 19.1)', () => {
       await prisma.$queryRaw`SELECT * FROM "Fx_Rate_Settings"`,
     );
     await hold('advisory');
-    const t0 = Date.now();
+    const t0 = performance.now();
     const res = await put();
-    const elapsed = Date.now() - t0;
+    const elapsed = performance.now() - t0;
     console.log(
       `[19.1] FX PUT, advisory lock held: HTTP ${res.status} in ${elapsed} ms`,
     );
     expect(res.status).toBe(409);
     expect(code(res)).toBe('FX_SETTINGS_BUSY');
     expect(elapsed).toBeGreaterThanOrEqual(FX_LOCK_BUDGET_MS - 500);
-    expect(elapsed).toBeLessThanOrEqual(FX_LOCK_BUDGET_MS + 1_500);
+    expect(elapsed).toBeLessThanOrEqual(FX_LOCK_BUDGET_MS + 3_000);
     expect(await audits()).toBe(before);
     expect(
       JSON.stringify(await prisma.$queryRaw`SELECT * FROM "Fx_Rate_Settings"`),
@@ -146,9 +155,9 @@ describe('FX admin lock budget (e2e, Story 19.1)', () => {
     // Reads are not stuck behind the lock.
     await request(server()).get(`${BASE}/status`).set(auth()).expect(200);
     await release();
-    const t1 = Date.now();
+    const t1 = performance.now();
     await put().expect(200);
-    expect(Date.now() - t1).toBeLessThan(5_000);
+    expect(performance.now() - t1).toBeLessThan(5_000);
     expect(await audits()).toBe(before + 1);
     const waiting = await prisma.$queryRaw<{ n: number }[]>`
       SELECT count(*)::int AS n FROM pg_stat_activity
@@ -160,16 +169,16 @@ describe('FX admin lock budget (e2e, Story 19.1)', () => {
     await setRejected();
     const before = await audits();
     await hold('row');
-    const t0 = Date.now();
+    const t0 = performance.now();
     const timed = async (r: request.Test) => {
       const res = await r;
-      return { res, ms: Date.now() - t0 };
+      return { res, ms: performance.now() - t0 };
     };
     const [pt, at] = await Promise.all([timed(put()), timed(accept())]);
     const p = pt.res;
     const a = at.res;
     console.log(`[19.1] FX row lock: PUT ${pt.ms} ms, accept ${at.ms} ms`);
-    const elapsed = Date.now() - t0;
+    const elapsed = performance.now() - t0;
     console.log(
       `[19.1] FX row lock held: PUT ${p.status}, accept-rejected ${a.status} in ${elapsed} ms`,
     );
@@ -179,7 +188,7 @@ describe('FX admin lock budget (e2e, Story 19.1)', () => {
       'FX_SETTINGS_BUSY',
     ]);
     expect(elapsed).toBeGreaterThanOrEqual(FX_LOCK_BUDGET_MS - 500);
-    expect(elapsed).toBeLessThanOrEqual(FX_LOCK_BUDGET_MS + 1_500);
+    expect(elapsed).toBeLessThanOrEqual(FX_LOCK_BUDGET_MS + 3_000);
     expect(await audits()).toBe(before);
     await release();
     // The rejected reading is still there and now applies.
@@ -192,9 +201,9 @@ describe('FX admin lock budget (e2e, Story 19.1)', () => {
     const before = await audits();
     await hold('advisory');
     setTimeout(() => void release(), 3_000);
-    const t0 = Date.now();
+    const t0 = performance.now();
     const res = await put();
-    const elapsed = Date.now() - t0;
+    const elapsed = performance.now() - t0;
     console.log(
       `[19.1] FX PUT, advisory released at 3 s: HTTP ${res.status} in ${elapsed} ms`,
     );
@@ -206,13 +215,13 @@ describe('FX admin lock budget (e2e, Story 19.1)', () => {
     await setRejected();
     await hold('row');
     setTimeout(() => void release(), 3_000);
-    const t1 = Date.now();
+    const t1 = performance.now();
     const acc = await accept();
     console.log(
-      `[19.1] FX accept-rejected, row released at 3 s: HTTP ${acc.status} in ${Date.now() - t1} ms`,
+      `[19.1] FX accept-rejected, row released at 3 s: HTTP ${acc.status} in ${performance.now() - t1} ms`,
     );
     expect(acc.status).toBe(200);
-    expect(Date.now() - t1).toBeGreaterThanOrEqual(2_500);
+    expect(performance.now() - t1).toBeGreaterThanOrEqual(2_500);
     expect(await audits()).toBe(before + 2);
   }, 60_000);
 });
