@@ -356,6 +356,15 @@ export class LegalAdminController {
     status: HttpStatus.NOT_FOUND,
     description: 'LEGAL_VERSION_NOT_FOUND | LEGAL_DOCUMENT_NOT_FOUND',
   })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description:
+      'LEGAL_DIFF_TOO_LARGE (the comparison exceeded its time limit or memory; it runs in a worker, never on the API thread)',
+  })
+  @ApiResponse({
+    status: HttpStatus.SERVICE_UNAVAILABLE,
+    description: 'LEGAL_MARKDOWN_BUSY (worker pool saturated; retry)',
+  })
   diff(
     @Param('slug', LegalSlugPipe) slug: string,
     @Query('from') from?: string,

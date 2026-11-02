@@ -131,7 +131,7 @@ export class LegalDraftService {
         [saved] = await tx.$queryRaw<DraftRow[]>`
           INSERT INTO "Legal_Drafts"
             ("id", "documentId", "bodyMd", "revision", "baseVersionNumber", "updatedAt", "updatedById", "updatedByEmail")
-          VALUES (gen_random_uuid(), ${doc.id}::uuid, ${dto.bodyMd}, 1,
+          VALUES (gen_random_uuid(), ${doc.id}::uuid, ${dto.bodyMd}, DEFAULT,
             (SELECT max("versionNumber") FROM "Legal_Document_Versions" WHERE "documentId" = ${doc.id}::uuid),
             now(), ${actor.id}::uuid, ${actor.email})
           ON CONFLICT ("documentId") DO NOTHING
@@ -145,7 +145,7 @@ export class LegalDraftService {
           documentId: doc.id,
           action: 'DRAFT_CREATED',
           actor,
-          meta: { revision: 1, bytes },
+          meta: { revision: saved.revision, bytes },
         });
         return saved;
       }
@@ -213,7 +213,7 @@ export class LegalDraftService {
         INSERT INTO "Legal_Drafts"
           ("id", "documentId", "bodyMd", "revision", "baseVersionNumber", "restoredFromVersion",
            "updatedAt", "updatedById", "updatedByEmail")
-        VALUES (gen_random_uuid(), ${doc.id}::uuid, ${src.bodyMd}, 1,
+        VALUES (gen_random_uuid(), ${doc.id}::uuid, ${src.bodyMd}, DEFAULT,
           (SELECT max("versionNumber") FROM "Legal_Document_Versions" WHERE "documentId" = ${doc.id}::uuid),
           ${version}, now(), ${actor.id}::uuid, ${actor.email})
         ON CONFLICT ("documentId") DO NOTHING

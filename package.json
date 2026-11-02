@@ -46,6 +46,7 @@
     "class-validator": "^0.15.1",
     "cookie-parser": "^1.4.7",
     "diff": "^9.0.0",
+    "express": "^5.2.1",
     "image-size": "^2.0.4",
     "mdast-util-to-string": "^4.0.0",
     "multer": "^2.4.0",

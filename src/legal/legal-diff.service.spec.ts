@@ -1,4 +1,4 @@
-import { diffMarkdown } from './legal-diff.service.js';
+import { diffMarkdown } from './legal-diff.core.mjs';
 
 const nums = (n: number, from = 1) =>
   Array.from({ length: n }, (_, i) => `l${from + i}`);

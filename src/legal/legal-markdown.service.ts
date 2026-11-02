@@ -10,6 +10,7 @@ import { ApiException } from '../common/api-exception.js';
 import {
   DEFAULT_POOL_OPTIONS,
   MarkdownWorkerPool,
+  type DiffResult,
   PoolFailure,
   type MarkdownFact,
   type MarkdownPoolOptions,
@@ -509,6 +510,14 @@ export class LegalMarkdownService implements OnModuleDestroy {
           : PARSE_FAILED,
       ];
     }
+  }
+
+  /**
+   * Line diff of two texts in the shared pool (Story 19.2, QA D1). Throws
+   * `PoolFailure` (TIMEOUT / FAILED / BUSY / CLOSED); the caller maps it.
+   */
+  diff(from: string, to: string): Promise<DiffResult> {
+    return this.pool.runDiff(from, to);
   }
 
   private busy(): ApiException {

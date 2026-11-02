@@ -1,3 +1,8 @@
+// Story 19.2 (QA D1): this worker also runs the legal line diff (job type
+// 'diff', see legal-diff.core.mjs), so the pool is shared. A message without
+// `type` (or type 'markdown') is the Markdown analysis below. Answers are
+// `{ id, ok: true, result }` or `{ id, ok: false, error }`.
+//
 // Story 19.1 (attempt 3, QA D1): Markdown parsing runs HERE, in a worker_thread,
 // never on the API event loop. remark/micromark is super-linear on some inputs
 // (a stray `[` followed by long text: 13 s for 177 KB), so the pool terminates
@@ -18,6 +23,7 @@ import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
 import { toString as nodeToString } from 'mdast-util-to-string';
+import { diffMarkdown } from './legal-diff.core.mjs';
 
 const MAX_WRITTEN = 2100;
 
@@ -65,9 +71,11 @@ function analyze(md) {
 }
 
 parentPort.on('message', (msg) => {
-  const { id, md } = msg;
+  const { id } = msg;
   try {
-    parentPort.postMessage({ id, ok: true, facts: analyze(md) });
+    const result =
+      msg.type === 'diff' ? diffMarkdown(msg.from, msg.to) : analyze(msg.md);
+    parentPort.postMessage({ id, ok: true, result });
   } catch (e) {
     parentPort.postMessage({
       id,

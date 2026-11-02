@@ -33,6 +33,8 @@ export interface MarkdownPoolOptions {
   maxQueue: number;
   /** Hard deadline for ONE parse, counted from when a worker starts it. */
   timeoutMs: number;
+  /** Same, for a diff job (Story 19.2): jsdiff is slower than the parser. */
+  diffTimeoutMs: number;
   resourceLimits: ResourceLimits;
   /** Worker script. Only tests override it (crash / out-of-memory simulations). */
   workerUrl: URL;
@@ -47,6 +49,7 @@ export const DEFAULT_POOL_OPTIONS: MarkdownPoolOptions = {
   maxWorkers: 2,
   maxQueue: 16,
   timeoutMs: 3_000,
+  diffTimeoutMs: 10_000,
   // A parse of a 200 KB document needs well under 100 MB; the cap only stops a
   // runaway thread from taking the API process down with it.
   resourceLimits: {
@@ -57,9 +60,22 @@ export const DEFAULT_POOL_OPTIONS: MarkdownPoolOptions = {
   workerUrl: new URL('./legal-markdown.worker.mjs', import.meta.url),
 };
 
+/** Result of a 'diff' job (see `legal-diff.core.mjs`). */
+export interface DiffResult {
+  stats: { added: number; removed: number };
+  hunks: {
+    type: 'added' | 'removed' | 'context';
+    lines: string[];
+    oldStart: number;
+    newStart: number;
+  }[];
+}
+
 interface Job {
-  md: string;
-  resolve: (facts: MarkdownFact[]) => void;
+  /** Message posted to the worker. */
+  request: { id: 0; type: 'markdown' | 'diff'; [k: string]: unknown };
+  timeoutMs: number;
+  resolve: (result: never) => void;
   reject: (e: PoolFailure) => void;
 }
 
@@ -121,9 +137,29 @@ export class MarkdownWorkerPool {
   }
 
   run(md: string): Promise<MarkdownFact[]> {
+    return this.submit<MarkdownFact[]>(
+      { id: 0, type: 'markdown', md },
+      this.opts.timeoutMs,
+    );
+  }
+
+  /** Line diff of two Markdown texts, computed off the event loop. */
+  runDiff(from: string, to: string): Promise<DiffResult> {
+    return this.submit<DiffResult>(
+      { id: 0, type: 'diff', from, to },
+      this.opts.diffTimeoutMs,
+    );
+  }
+
+  private submit<T>(request: Job['request'], timeoutMs: number): Promise<T> {
     if (this.closed) return Promise.reject(new PoolFailure('CLOSED'));
-    return new Promise<MarkdownFact[]>((resolve, reject) => {
-      const job: Job = { md, resolve, reject };
+    return new Promise<T>((resolve, reject) => {
+      const job: Job = {
+        request,
+        timeoutMs,
+        resolve,
+        reject,
+      };
       this.queue.push(job);
       this.pump();
       // Still waiting beyond the allowed queue: nobody can take it soon.
@@ -203,11 +239,12 @@ export class MarkdownWorkerPool {
     this.slots.add(slot);
     worker.on(
       'message',
-      (msg: { ok: boolean; facts?: MarkdownFact[]; error?: string }) => {
+      (msg: { ok: boolean; result?: unknown; error?: string }) => {
         const job = slot.job;
         if (!job || slot.dead) return;
         this.finish(slot);
-        if (msg.ok && Array.isArray(msg.facts)) job.resolve(msg.facts);
+        if (msg.ok && msg.result !== undefined)
+          job.resolve(msg.result as never);
         else job.reject(new PoolFailure('FAILED', msg.error ?? 'worker error'));
         this.pump();
       },
@@ -225,10 +262,10 @@ export class MarkdownWorkerPool {
   private dispatch(slot: Slot, job: Job): void {
     slot.job = job;
     slot.timer = setTimeout(() => {
-      void this.kill(slot, 'TIMEOUT', `no answer in ${this.opts.timeoutMs} ms`);
-    }, this.opts.timeoutMs);
+      void this.kill(slot, 'TIMEOUT', `no answer in ${job.timeoutMs} ms`);
+    }, job.timeoutMs);
     try {
-      slot.worker.postMessage({ id: 0, md: job.md });
+      slot.worker.postMessage(job.request);
     } catch (e) {
       void this.kill(slot, 'FAILED', e instanceof Error ? e.message : 'post');
     }

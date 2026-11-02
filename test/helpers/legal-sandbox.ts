@@ -131,6 +131,8 @@ export async function realLegalFingerprint(exec: Exec): Promise<string> {
 export interface LegalRealSnapshot {
   drafts: string;
   identity: string;
+  /** `draftRevisionFloor` of the real documents (a DB trigger raises it on every draft delete). */
+  floors: string;
 }
 
 /**
@@ -148,7 +150,15 @@ export async function snapshotLegalReal(
   const i = await exec(
     `SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY x."id"), '[]'::jsonb)::text AS j FROM "Seller_Identity_Settings" x`,
   );
-  return { drafts: d[0].j as string, identity: i[0].j as string };
+  const f = await exec(
+    `SELECT coalesce(jsonb_agg(jsonb_build_object('id', x."id", 'f', x."draftRevisionFloor") ORDER BY x."id"), '[]'::jsonb)::text AS j
+     FROM "Legal_Documents" x WHERE NOT x."isSandbox"`,
+  );
+  return {
+    drafts: d[0].j as string,
+    identity: i[0].j as string,
+    floors: f[0].j as string,
+  };
 }
 
 export async function restoreLegalReal(
@@ -161,6 +171,18 @@ export async function restoreLegalReal(
   await exec(
     `INSERT INTO "Legal_Drafts" SELECT * FROM jsonb_populate_recordset(NULL::"Legal_Drafts", $1::jsonb)`,
     [s.drafts],
+  );
+  // The insert trigger numbers drafts above the floor: put the saved revisions
+  // and the saved floors back (UPDATEs are not guarded by those triggers).
+  await exec(
+    `UPDATE "Legal_Drafts" d SET "revision" = r."revision"
+     FROM jsonb_populate_recordset(NULL::"Legal_Drafts", $1::jsonb) r WHERE r."id" = d."id"`,
+    [s.drafts],
+  );
+  await exec(
+    `UPDATE "Legal_Documents" x SET "draftRevisionFloor" = (j->>'f')::int
+     FROM jsonb_array_elements($1::jsonb) j WHERE x."id" = (j->>'id')::uuid`,
+    [s.floors],
   );
   await exec(`DELETE FROM "Seller_Identity_Settings"`);
   await exec(

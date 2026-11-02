@@ -6,7 +6,7 @@
     "deleteOutDir": true,
     "assets": [
       {
-        "include": "legal/*.worker.mjs",
+        "include": "legal/*.mjs",
         "outDir": "dist"
       }
     ]

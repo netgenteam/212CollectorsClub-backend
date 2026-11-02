@@ -16,9 +16,11 @@ import type { Prisma } from './../src/generated/prisma/client.js';
 import { legalTx } from './../src/legal/legal-admin.common.js';
 import { LegalAuditService } from './../src/legal/legal-audit.service.js';
 import { LegalMarkdownService } from './../src/legal/legal-markdown.service.js';
+import { PoolFailure } from './../src/legal/legal-markdown-pool.js';
 import {
   createSandboxDocument,
   insertSandboxDraft,
+  insertSandboxVersion,
   purgeSandbox,
   realLegalFingerprint,
   restoreLegalReal,
@@ -137,13 +139,35 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
   const createDraft = async (slug: string, bodyMd: string) =>
     (await put(`/${slug}/draft`, { bodyMd, baseRevision: 0 }).expect(200))
       .body as DraftBody;
-  const publish = (slug: string, over: object = {}) =>
-    post(`/${slug}/publish`, {
-      expectedRevision: 1,
-      changeSummary: 'Cambio de prueba e2e',
-      isSubstantial: false,
-      ...over,
-    });
+  /**
+   * POST publish. Revisions are monotonic per document (QA F), so unless the
+   * test passes `expectedRevision` the helper reads the draft's current one.
+   */
+  const publish = (slug: string, over: Record<string, unknown> = {}) => {
+    const send = async () => {
+      let expectedRevision = over.expectedRevision;
+      if (expectedRevision === undefined) {
+        const cur = await get(`/${slug}/draft`);
+        expectedRevision =
+          cur.status === 200 ? (cur.body as DraftBody).revision : 1;
+      }
+      return {
+        t: post(`/${slug}/publish`, {
+          changeSummary: 'Cambio de prueba e2e',
+          isSubstantial: false,
+          ...over,
+          expectedRevision,
+        }),
+      };
+    };
+    return {
+      expect: async (code: number) => (await send()).t.expect(code),
+      then: (
+        ok: (r: Awaited<ReturnType<typeof post>>) => unknown,
+        bad?: (e: unknown) => unknown,
+      ) => send().then(({ t }) => t.then(ok, bad), bad),
+    };
+  };
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -193,6 +217,8 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
       'aud',
       'busy',
       'trg',
+      'big',
+      'aba',
     ]) {
       docs[k] = await createSandboxDocument(sql, `${TAG}-${k}`);
     }
@@ -292,7 +318,9 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
       expect(errOf(r404).errorCode).toBe('LEGAL_DRAFT_NOT_FOUND');
 
       const created = await createDraft(slug, '## Uno\n\nTexto [[RIF]] aqui');
-      expect(created).toMatchObject({ slug, revision: 1 });
+      // Revisions never restart for a document (QA F): relative from here on.
+      const r1 = created.revision;
+      expect(created).toMatchObject({ slug });
       expect(created.placeholders).toEqual([{ token: '[[RIF]]', line: 3 }]);
 
       // A second creation (baseRevision 0 over an existing draft) is stale.
@@ -302,34 +330,35 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
       }).expect(409);
       expect(errOf(dup)).toMatchObject({
         errorCode: 'LEGAL_DRAFT_STALE',
-        details: { currentRevision: 1 },
+        details: { currentRevision: r1 },
       });
 
       const edited = (
         await put(`/${slug}/draft`, {
           bodyMd: '## Uno\n\nTexto resuelto',
-          baseRevision: 1,
+          baseRevision: r1,
         }).expect(200)
       ).body as DraftBody;
-      expect(edited.revision).toBe(2);
+      expect(edited.revision).toBe(r1 + 1);
       expect(edited.placeholders).toEqual([]);
 
       const stale = await put(`/${slug}/draft`, {
         bodyMd: '## Viejo',
-        baseRevision: 1,
+        baseRevision: r1,
       }).expect(409);
       expect(errOf(stale)).toMatchObject({
         errorCode: 'LEGAL_DRAFT_STALE',
-        details: { currentRevision: 2 },
+        details: { currentRevision: r1 + 1 },
       });
       const read = (await get(`/${slug}/draft`).expect(200)).body as DraftBody;
       expect(read.bodyMd).toBe('## Uno\n\nTexto resuelto');
-      expect(read.revision).toBe(2);
+      expect(read.revision).toBe(r1 + 1);
     });
 
     it('400 on a bad body or forbidden Markdown, 404 on an unknown document, edit of a missing draft is 404', async () => {
       const slug = docs.draft.slug;
-      await put(`/${slug}/draft`, { baseRevision: 2 }).expect(400);
+      const cur = ((await get(`/${slug}/draft`)).body as DraftBody).revision;
+      await put(`/${slug}/draft`, { baseRevision: cur }).expect(400);
       await put(`/${slug}/draft`, { bodyMd: 'x', baseRevision: -1 }).expect(
         400,
       );
@@ -338,12 +367,12 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
       );
       await put(`/${slug}/draft`, {
         bodyMd: 'x',
-        baseRevision: 2,
+        baseRevision: cur,
         extra: 1,
       }).expect(400);
       const html = await put(`/${slug}/draft`, {
         bodyMd: '## A\n\n<script>alert(1)</script>',
-        baseRevision: 2,
+        baseRevision: cur,
       }).expect(400);
       expect(errOf(html).errorCode).toBe('LEGAL_MARKDOWN_INVALID');
       expect(
@@ -351,12 +380,12 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
       ).toBeGreaterThan(0);
       const big = await put(`/${slug}/draft`, {
         bodyMd: ('x'.repeat(99) + '\n').repeat(2100),
-        baseRevision: 2,
+        baseRevision: cur,
       }).expect(400);
       expect(errOf(big).errorCode).toBe('LEGAL_MARKDOWN_INVALID');
       // The rejected edits changed nothing.
       expect(((await get(`/${slug}/draft`)).body as DraftBody).revision).toBe(
-        2,
+        cur,
       );
 
       await put('/nope/draft', { bodyMd: 'x', baseRevision: 0 }).expect(404);
@@ -396,7 +425,7 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
         );
       expect(Buffer.byteLength(body)).toBeGreaterThan(180_000);
       const d = await createDraft(docs.draft.slug, body);
-      expect(d.revision).toBe(1);
+      expect(d.revision).toBeGreaterThanOrEqual(1);
       await post(`/${docs.draft.slug}/draft/discard`).expect(204);
     });
   });
@@ -453,8 +482,8 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
   describe('AC8: audit and coalescence', () => {
     it('DRAFT_EDITED is written once per 10-minute window per admin; created/discarded always', async () => {
       const slug = docs.aud.slug;
-      await createDraft(slug, '## a');
-      for (let rev = 1; rev <= 4; rev++) {
+      const a0 = await createDraft(slug, '## a');
+      for (let rev = a0.revision; rev < a0.revision + 4; rev++) {
         await put(`/${slug}/draft`, {
           bodyMd: `## a${rev}`,
           baseRevision: rev,
@@ -464,10 +493,11 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
       expect(await countAudit(docs.aud.id, 'DRAFT_EDITED')).toBe(1);
       await post(`/${slug}/draft/discard`).expect(204);
       expect(await countAudit(docs.aud.id, 'DRAFT_DISCARDED')).toBe(1);
-      await createDraft(slug, '## b');
-      await put(`/${slug}/draft`, { bodyMd: '## b1', baseRevision: 1 }).expect(
-        200,
-      );
+      const b0 = await createDraft(slug, '## b');
+      await put(`/${slug}/draft`, {
+        bodyMd: '## b1',
+        baseRevision: b0.revision,
+      }).expect(200);
       expect(await countAudit(docs.aud.id, 'DRAFT_CREATED')).toBe(2);
       expect(await countAudit(docs.aud.id, 'DRAFT_EDITED')).toBe(1); // still the same window
       await post(`/${slug}/draft/discard`).expect(204);
@@ -684,7 +714,13 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
       const audit = await auditOf(slug);
       const pubs = audit.items.filter((i) => i.action === 'PUBLISHED');
       expect(pubs.map((p) => p.versionNumber).sort()).toEqual([1, 2]);
-      expect(pubs[0].meta).toMatchObject({ draftRevision: 1 });
+      // Both drafts are the first of their kind here, but the second one can
+      // never reuse the first one's number (QA F).
+      const revs = pubs
+        .sort((a, b) => a.versionNumber! - b.versionNumber!)
+        .map((p) => p.meta.draftRevision as number);
+      expect(revs[0]).toBe(1);
+      expect(revs[1]).toBeGreaterThan(revs[0]);
       expect(Buffer.byteLength(JSON.stringify(pubs[0].meta))).toBeLessThan(
         2048,
       );
@@ -713,10 +749,12 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
 
     it('5 simultaneous publishes of the same document: consecutive versions, no 5xx, one PUBLISHED row per version', async () => {
       const slug = docs.flow.slug;
-      await createDraft(slug, '## Carrera\n\nTexto.\n');
+      const c1 = await createDraft(slug, '## Carrera\n\nTexto.\n');
       const eff = await inMs(2_000);
       const rs = await Promise.all(
-        Array.from({ length: 5 }, () => publish(slug, { effectiveFrom: eff })),
+        Array.from({ length: 5 }, () =>
+          publish(slug, { effectiveFrom: eff, expectedRevision: c1.revision }),
+        ),
       );
       const statuses = rs.map((r) => r.status);
       expect(statuses.filter((s) => s === 201)).toHaveLength(1);
@@ -732,10 +770,13 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
 
       // Second round: 5 racers with a fresh draft each time, 3 rounds back to back.
       for (let round = 2; round <= 4; round++) {
-        await createDraft(slug, `## Carrera ${round}\n\nTexto.\n`);
+        const cr = await createDraft(slug, `## Carrera ${round}\n\nTexto.\n`);
         const rr = await Promise.all(
           Array.from({ length: 5 }, () =>
-            publish(slug, { effectiveFrom: eff }),
+            publish(slug, {
+              effectiveFrom: eff,
+              expectedRevision: cr.revision,
+            }),
           ),
         );
         expect(rr.filter((r) => r.status === 201)).toHaveLength(1);
@@ -758,12 +799,15 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
         await sql(`DELETE FROM "Legal_Drafts" WHERE "documentId" = $1::uuid`, [
           docs.busy.id,
         ]);
-        await createDraft(slug, base);
+        const d0 = await createDraft(slug, base);
         const [p, e] = await Promise.all([
-          publish(slug, { expectedRevision: 1, effectiveFrom: eff }),
+          publish(slug, {
+            expectedRevision: d0.revision,
+            effectiveFrom: eff,
+          }),
           put(`/${slug}/draft`, {
             bodyMd: `## Editado ${round}`,
-            baseRevision: 1,
+            baseRevision: d0.revision,
           }),
         ]);
         seen.push([p.status, e.status]);
@@ -903,7 +947,7 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
       const restored = (
         await post(`/${slug}/restore`, { version: 1 }).expect(201)
       ).body as DraftBody;
-      expect(restored).toMatchObject({ revision: 1, restoredFromVersion: 1 });
+      expect(restored).toMatchObject({ restoredFromVersion: 1 });
       expect(restored.bodyMd).toBe(bodies[0]);
       const exists = await post(`/${slug}/restore`, { version: 2 }).expect(409);
       expect(errOf(exists).errorCode).toBe('LEGAL_DRAFT_EXISTS');
@@ -916,7 +960,7 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
       // Edits keep restoredFromVersion; publishing records it on the version.
       await put(`/${slug}/draft`, {
         bodyMd: bodies[0] + 'linea restaurada y editada\n',
-        baseRevision: 1,
+        baseRevision: restored.revision,
       }).expect(200);
       expect(
         ((await get(`/${slug}/draft`)).body as DraftBody).restoredFromVersion,
@@ -1161,12 +1205,174 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
       expectIn('/{slug}/restore', 'post', '409', 'LEGAL_DRAFT_EXISTS');
       expectIn('/{slug}/history', 'get', '404', 'LEGAL_DOCUMENT_NOT_FOUND');
       expectIn('/{slug}/diff', 'get', '404', 'LEGAL_VERSION_NOT_FOUND');
+      expectIn('/{slug}/diff', 'get', '422', 'LEGAL_DIFF_TOO_LARGE');
+      expectIn('/{slug}/diff', 'get', '503', 'LEGAL_MARKDOWN_BUSY');
       for (const [path, ops] of Object.entries(openapi.paths)) {
         if (!path.startsWith(P)) continue;
         for (const op of Object.values(ops)) {
           expect(op.responses['401']?.description).toBe('INVALID_ADMIN_TOKEN');
         }
       }
+    });
+  });
+  describe('QA 19.2 D1: the diff never blocks the event loop; errors are 422/503', () => {
+    // 5990 lines of 33 characters, one blank every 900, every other line different.
+    const vector = (seed: string) => {
+      const out: string[] = [];
+      for (let i = 0; out.length < 5990; i++) {
+        out.push(
+          i % 900 === 899
+            ? ''
+            : `${seed}${i} lorem ipsum dolor sit amet`.slice(0, 33),
+        );
+      }
+      return out.join('\n');
+    };
+
+    it('two ~196 KB versions: the diff is complete and the event loop (same process as the server) is never held', async () => {
+      const slug = docs.big.slug;
+      await insertSandboxVersion(sql, docs.big.id, 1, {
+        bodyMd: vector('a'),
+      });
+      await insertSandboxVersion(sql, docs.big.id, 2, {
+        bodyMd: vector('b'),
+      });
+      let last = performance.now();
+      let maxDelay = 0;
+      const iv = setInterval(() => {
+        const now = performance.now();
+        maxDelay = Math.max(maxDelay, now - last - 10);
+        last = now;
+      }, 10);
+      const t = performance.now();
+      const res = await get(`/${slug}/diff?from=1&to=2`).expect(200);
+      const ms = performance.now() - t;
+      clearInterval(iv);
+      const body = res.body as {
+        stats: { added: number; removed: number };
+        hunks: unknown[];
+      };
+      console.log(
+        `[19.2 D1 e2e] diff 196 KB x2: ${ms.toFixed(0)} ms, response ${JSON.stringify(body).length} bytes, max event-loop delay ${maxDelay.toFixed(1)} ms`,
+      );
+      expect(body.stats).toEqual({ added: 5984, removed: 5984 });
+      expect(maxDelay).toBeLessThan(250);
+    });
+
+    it('a diff past its deadline is 422 LEGAL_DIFF_TOO_LARGE and a saturated pool is 503 LEGAL_MARKDOWN_BUSY, never 500', async () => {
+      const md = app.get(LegalMarkdownService);
+      const slug = docs.big.slug;
+      const spy = vi.spyOn(md, 'diff');
+      spy.mockRejectedValueOnce(new PoolFailure('TIMEOUT'));
+      const r422 = await get(`/${slug}/diff?from=1&to=2`).expect(422);
+      expect(errOf(r422).errorCode).toBe('LEGAL_DIFF_TOO_LARGE');
+      spy.mockRejectedValueOnce(new PoolFailure('FAILED', 'oom'));
+      await get(`/${slug}/diff?from=1&to=2`).expect(422);
+      spy.mockRejectedValueOnce(new PoolFailure('BUSY'));
+      const r503 = await get(`/${slug}/diff?from=1&to=2`).expect(503);
+      expect(errOf(r503).errorCode).toBe('LEGAL_MARKDOWN_BUSY');
+      spy.mockRestore();
+    });
+  });
+
+  describe('QA 19.2 E: JSON body limit is 100 KB except the legal draft route', () => {
+    const big = (kb: number) => 'x'.repeat(kb * 1024);
+
+    it('150 KB to public/anonymous routes is 413 before any guard or throttler', async () => {
+      const payload = { name: 'a', email: 'a@b.co', message: big(150) };
+      await request(http()).post('/api/v1/contact').send(payload).expect(413);
+      await request(http())
+        .post('/api/v1/cart/items')
+        .send({ productId: 'x', quantity: 1, pad: big(150) })
+        .expect(413);
+      await request(http())
+        .post('/api/v1/admin/auth/login')
+        .send({ usernameOrEmail: 'a', password: big(150) })
+        .expect(413);
+    });
+
+    it('the 400 KB parser applies only to PUT /admin/legal/:slug/draft with a Bearer header', async () => {
+      const slug = docs.big.slug;
+      const body = { bodyMd: big(150), baseRevision: 0 };
+      // Anonymous: keeps the 100 KB parser.
+      await request(http()).put(`${BASE}/${slug}/draft`).send(body).expect(413);
+      // Authenticated but another admin legal route: 413 as well.
+      await post(`/${slug}/publish`, {
+        expectedRevision: 1,
+        changeSummary: big(150),
+      }).expect(413);
+      await request(http())
+        .put(`${BASE}/identity`)
+        .set(auth())
+        .send({ legalName: big(150) })
+        .expect(413);
+      // Look-alike paths do not get it either.
+      await request(http())
+        .put(`${BASE}/${slug}/draft/x`)
+        .set(auth())
+        .send(body)
+        .expect(413);
+      await request(http())
+        .put(`/api/v1/admin/other/${slug}/draft`)
+        .set(auth())
+        .send(body)
+        .expect(413);
+      await request(http())
+        .put(`${BASE}/${slug}/draft`)
+        .set(auth())
+        .send({ ...body, bodyMd: big(401) })
+        .expect(413);
+    });
+
+    it('190 KB to PUT /admin/legal/:slug/draft with a token still works', async () => {
+      const slug = docs.big.slug;
+      const bodyMd =
+        'Linea de texto legal de prueba numero uno, con mas palabras para ocupar sitio.\n\n'.repeat(
+          2400,
+        );
+      expect(Buffer.byteLength(bodyMd)).toBeGreaterThan(190_000);
+      const d = await createDraft(slug, bodyMd);
+      expect(d.revision).toBeGreaterThanOrEqual(1);
+      await post(`/${slug}/draft/discard`).expect(204);
+    });
+  });
+
+  describe('QA 19.2 F: draft revision is monotonic per document (no ABA)', () => {
+    it('create, discard, create another text: a publish with the old revision is 409 and the new draft is never published by it', async () => {
+      const slug = docs.aba.slug;
+      const first = await createDraft(slug, '## Texto A\n\nPrimero.');
+      expect(first.revision).toBe(1); // first draft of a document keeps starting at 1
+      await post(`/${slug}/draft/discard`).expect(204);
+      const second = await createDraft(slug, '## Texto B\n\nOtro texto.');
+      expect(second.revision).toBeGreaterThan(first.revision);
+      const res = await publish(slug, {
+        expectedRevision: first.revision,
+        effectiveFrom: await inMs(1_000),
+      }).expect(409);
+      expect(errOf(res).errorCode).toBe('LEGAL_DRAFT_STALE');
+      expect(res.body).toMatchObject({
+        details: { currentRevision: second.revision },
+      });
+      expect((await versionRows(docs.aba.id))[0].n).toBe(0);
+      // Edits keep climbing; discard + restore also continues the sequence.
+      const edited = (
+        await put(`/${slug}/draft`, {
+          bodyMd: '## Texto B2',
+          baseRevision: second.revision,
+        }).expect(200)
+      ).body as DraftBody;
+      expect(edited.revision).toBe(second.revision + 1);
+      await post(`/${slug}/draft/discard`).expect(204);
+      const third = await createDraft(slug, '## Texto C');
+      expect(third.revision).toBe(edited.revision + 1);
+      // Publishing the draft also consumes its number: the next one is above it.
+      await publish(slug, {
+        expectedRevision: third.revision,
+        effectiveFrom: await inMs(1_000),
+      }).expect(201);
+      const fourth = await createDraft(slug, '## Texto D');
+      expect(fourth.revision).toBe(third.revision + 1);
+      await post(`/${slug}/draft/discard`).expect(204);
     });
   });
 });

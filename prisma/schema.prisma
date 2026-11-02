@@ -1361,6 +1361,8 @@ model LegalDocument {
   requiresAcceptance Boolean
   isSandbox          Boolean      @default(false)
   createdAt          DateTime     @default(now()) @db.Timestamptz(3)
+  /// Highest draft revision ever reached; DB triggers make new drafts start above it (never reused).
+  draftRevisionFloor Int          @default(0)
 
   versions LegalDocumentVersion[]
   draft    LegalDraft?

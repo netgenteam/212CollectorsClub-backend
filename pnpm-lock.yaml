@@ -59,6 +59,9 @@ importers:
       diff:
         specifier: ^9.0.0
         version: 9.0.0
+      express:
+        specifier: ^5.2.1
+        version: 5.2.1
       image-size:
         specifier: ^2.0.4
         version: 2.0.4

@@ -32,10 +32,9 @@ async function bootstrap() {
   // same reverse proxy.
   app.set('trust proxy', 1);
 
-  // Story 19.2 (A78): a legal draft is up to 200 KB of Markdown, above
-  // Express' 100 KB default. Nothing else sends bodies near this size; the
-  // per-route limits (200 KB of Markdown, image uploads via multer) are
-  // enforced by their own validators.
+  // Story 19.2 (A78, QA E): JSON bodies are capped at 100 KB (Express' default)
+  // everywhere, except PUT /admin/legal/:slug/draft (a 200 KB Markdown draft,
+  // only for requests carrying a Bearer token). See `json-body-limit.ts`.
   applyJsonBodyLimit(app);
 
   // Story 3.1 / AD-5: cookie-parser, given the COOKIE_SECRET from

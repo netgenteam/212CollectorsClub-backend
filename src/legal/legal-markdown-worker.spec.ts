@@ -497,3 +497,80 @@ describe('validate(): bounded error response (QA C)', () => {
     expect(Object.keys(res?.details ?? {})).toEqual(['issues']);
   });
 });
+
+/**
+ * Story 19.2 (QA D1): the line diff runs in the same pool. Vector: two valid
+ * versions of ~196 KB (5990 lines of 33 characters, one blank every 900, every
+ * line different): 3.8 s of event loop when jsdiff ran on the API thread.
+ */
+const diffVector = (seed: string) => {
+  const out: string[] = [];
+  for (let i = 0; out.length < 5990; i++) {
+    out.push(
+      i % 900 === 899
+        ? ''
+        : `${seed}${i} lorem ipsum dolor sit amet`.slice(0, 33),
+    );
+  }
+  return out.join('\n');
+};
+
+describe('Legal diff in the worker pool (QA D1, Story 19.2)', () => {
+  it('a normal diff is correct in content (changed line + 3 lines of context)', async () => {
+    const svc = make();
+    const a = Array.from({ length: 20 }, (_, i) => `l${i + 1}`);
+    const b = [...a];
+    b[9] = 'l10 CAMBIADA';
+    const d = await svc.diff(a.join('\n') + '\n', b.join('\n') + '\n');
+    expect(d.stats).toEqual({ added: 1, removed: 1 });
+    expect(
+      d.hunks.map((h) => [h.type, h.lines, h.oldStart, h.newStart]),
+    ).toEqual([
+      ['context', ['l7', 'l8', 'l9'], 7, 7],
+      ['removed', ['l10'], 10, 10],
+      ['added', ['l10 CAMBIADA'], 11, 10],
+      ['context', ['l11', 'l12', 'l13'], 11, 11],
+    ]);
+  });
+
+  it('the QA vector does not block the event loop (max delay measured) and the result is complete', async () => {
+    const svc = make();
+    const A = diffVector('a');
+    const B = diffVector('b');
+    expect(A.length).toBeGreaterThan(190_000);
+    const mon = loopMonitor();
+    const t = performance.now();
+    const d = await svc.diff(A, B);
+    const ms = performance.now() - t;
+    const maxDelay = mon.stop();
+    console.log(
+      `[19.2 D1] diff of the QA vector: ${ms.toFixed(0)} ms, max event-loop delay ${maxDelay.toFixed(1)} ms`,
+    );
+    // the 6 blank separators are the only lines the two texts share
+    expect(d.stats).toEqual({ added: 5984, removed: 5984 });
+    expect(maxDelay).toBeLessThan(250);
+  }, 30_000);
+
+  it('a diff over its hard deadline is a TIMEOUT and the worker is terminated', async () => {
+    const svc = make({ workerUrl: MISBEHAVING, diffTimeoutMs: 300 });
+    await expect(svc.diff('hang', 'x')).rejects.toMatchObject({
+      kind: 'TIMEOUT',
+    });
+    await settled(svc);
+    expect(svc.poolStats()).toMatchObject({ alive: 0, terminated: 1 });
+  });
+
+  it('a full pool answers BUSY at once for a diff too', async () => {
+    const svc = make({
+      workerUrl: MISBEHAVING,
+      diffTimeoutMs: 400,
+      maxWorkers: 1,
+      maxQueue: 1,
+    });
+    const first = svc.diff('hang', 'x').catch((e: unknown) => e);
+    const second = svc.diff('hang', 'x').catch((e: unknown) => e);
+    await expect(svc.diff('hang', 'x')).rejects.toMatchObject({ kind: 'BUSY' });
+    await first;
+    await second;
+  });
+});
