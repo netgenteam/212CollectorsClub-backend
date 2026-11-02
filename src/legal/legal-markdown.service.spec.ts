@@ -5,6 +5,7 @@ import {
   slugifyHeading,
   urlRejection,
 } from './legal-markdown.service.js';
+import { PoolFailure } from './legal-markdown-pool.js';
 import { XSS_ACCEPT, XSS_REJECT } from './xss-corpus.js';
 
 const svc = new LegalMarkdownService();
@@ -261,5 +262,50 @@ describe('LegalMarkdownService.validate (bounded, QA D1)', () => {
     expect(
       (await issuesOf('[a](http://x.com)'))!.details.issues[0].reason,
     ).toMatch(/scheme "http:"/);
+  });
+});
+
+describe('LegalMarkdownService.buildToc race with validate (QA 19.1, Story 19.2)', () => {
+  it('a failing toc job never overwrites the positive entry written by validate() meanwhile', async () => {
+    const s = new LegalMarkdownService({ negativeTtlMs: 60_000 });
+    const md = '## Alcance\n\nTexto.\n';
+    let failFirst!: (e: unknown) => void;
+    let calls = 0;
+    // First pool call (the toc job) hangs until released and then times out;
+    // the second (validate) answers right away.
+    (s as unknown as { pool: unknown }).pool = {
+      run: (): Promise<unknown[]> =>
+        ++calls === 1
+          ? new Promise((_res, rej) => {
+              failFirst = rej;
+            })
+          : Promise.resolve([['h', 2, 'Alcance', 1]]),
+      close: () => Promise.resolve(),
+      stats: () => ({}),
+    };
+    const tocJob = s.buildToc(md); // in flight
+    await s.validate(md); // primes the cache with the positive toc
+    failFirst(new PoolFailure('TIMEOUT'));
+    const fromJob = await tocJob;
+    expect(fromJob).toEqual([{ depth: 2, text: 'Alcance', id: 'alcance' }]);
+    // The cache still holds the positive entry: no new pool call is needed.
+    expect(await s.buildToc(md)).toEqual(fromJob);
+    expect(calls).toBe(2);
+  });
+
+  it('a TIMEOUT with nothing cached is still remembered as a negative entry', async () => {
+    const s = new LegalMarkdownService({ negativeTtlMs: 60_000 });
+    let calls = 0;
+    (s as unknown as { pool: unknown }).pool = {
+      run: (): Promise<unknown[]> => {
+        calls++;
+        return Promise.reject(new PoolFailure('TIMEOUT'));
+      },
+      close: () => Promise.resolve(),
+      stats: () => ({}),
+    };
+    expect(await s.buildToc('## A\n')).toEqual([]);
+    expect(await s.buildToc('## A\n')).toEqual([]);
+    expect(calls).toBe(1);
   });
 });

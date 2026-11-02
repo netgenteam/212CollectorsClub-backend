@@ -5,6 +5,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module.js';
+import { applyJsonBodyLimit } from './common/json-body-limit.js';
 import { createGlobalValidationPipe } from './common/global-validation-pipe.js';
 import {
   PUBLIC_STATIC_PREFIX,
@@ -30,6 +31,12 @@ async function bootstrap() {
   // actual client rather than every request looking like it came from the
   // same reverse proxy.
   app.set('trust proxy', 1);
+
+  // Story 19.2 (A78): a legal draft is up to 200 KB of Markdown, above
+  // Express' 100 KB default. Nothing else sends bodies near this size; the
+  // per-route limits (200 KB of Markdown, image uploads via multer) are
+  // enforced by their own validators.
+  applyJsonBodyLimit(app);
 
   // Story 3.1 / AD-5: cookie-parser, given the COOKIE_SECRET from
   // @nestjs/config, signs/verifies the HttpOnly cartId cookie. It also

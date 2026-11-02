@@ -1,12 +1,36 @@
 import { Module } from '@nestjs/common';
+import { PassportModule } from '@nestjs/passport';
+import { LegalAdminController } from './legal-admin.controller.js';
+import { LegalAuditService } from './legal-audit.service.js';
+import { LegalDiffService } from './legal-diff.service.js';
 import { LegalDocumentsService } from './legal-documents.service.js';
+import { LegalDraftService } from './legal-draft.service.js';
 import { LegalMarkdownService } from './legal-markdown.service.js';
 import { LegalPublicController } from './legal-public.controller.js';
+import { LegalPublishService } from './legal-publish.service.js';
+import { SellerIdentityService } from './seller-identity.service.js';
 
-/** Story 19.1 (AD-88..91). PrismaModule is global in the host app. */
+/** Stories 19.1 (public read) and 19.2 (admin). PrismaModule is global in the host app. */
 @Module({
-  controllers: [LegalPublicController],
-  providers: [LegalDocumentsService, LegalMarkdownService],
-  exports: [LegalDocumentsService, LegalMarkdownService],
+  imports: [PassportModule.register({ defaultStrategy: 'admin-jwt' })],
+  controllers: [LegalPublicController, LegalAdminController],
+  providers: [
+    LegalDocumentsService,
+    LegalMarkdownService,
+    LegalAuditService,
+    LegalDraftService,
+    LegalPublishService,
+    LegalDiffService,
+    SellerIdentityService,
+  ],
+  exports: [
+    LegalDocumentsService,
+    LegalMarkdownService,
+    LegalAuditService,
+    LegalDraftService,
+    LegalPublishService,
+    LegalDiffService,
+    SellerIdentityService,
+  ],
 })
 export class LegalModule {}

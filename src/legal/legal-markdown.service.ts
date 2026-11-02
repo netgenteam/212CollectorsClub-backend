@@ -557,6 +557,11 @@ export class LegalMarkdownService implements OnModuleDestroy {
       } catch (e) {
         // BUSY/CLOSED are transient: do not remember them. TIMEOUT/FAILED
         // only for a short while (see NEGATIVE_TOC_TTL_MS).
+        // A POSITIVE entry written meanwhile (validate() primes the cache while
+        // a toc job of the same body is in flight) must never be overwritten
+        // by the negative one: it is correct and permanent (QA 19.1).
+        const settled = this.tocCache.get(key);
+        if (settled && settled.expiresAt === undefined) return settled.toc;
         if (
           e instanceof PoolFailure &&
           e.kind !== 'BUSY' &&

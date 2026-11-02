@@ -446,7 +446,7 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
         [doc.id],
       );
       for (const row of r) {
-        expect(Number(row.age)).toBeGreaterThanOrEqual(0);
+        expect(Number(row.age)).toBeGreaterThanOrEqual(-0.01);
         expect(Number(row.age)).toBeLessThan(10);
       }
       await purgeSandbox(sql, TAG);
@@ -506,7 +506,9 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
         expect([name, code]).toEqual([name, '23000']);
       }
       expect(Object.keys(out)).toHaveLength(6);
-      expect(storedAge).toBeGreaterThanOrEqual(0);
+      // publishedAt is timestamptz(3): the clock is ROUNDED to the ms, so the
+      // age can be a few microseconds negative.
+      expect(storedAge).toBeGreaterThanOrEqual(-0.01);
       expect(storedAge).toBeLessThan(10);
       expect(await realLegalFingerprint(sql)).toBe(fingerprint);
     });
