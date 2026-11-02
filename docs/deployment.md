@@ -712,3 +712,112 @@ The new `Orders` columns are nullable and the new tables are independent, so the
 5. Start the backend against the copy and open one pre-existing order in `GET /admin/orders/:orderId`: it answers 200 with the new shipping fields `null`.
 
 The automated smoke of the whole epic is `test/epic-17-regression.e2e-spec.ts` (run with `pnpm test:e2e --no-file-parallelism`); it creates and removes its own data and restores the 4 seeded agencies.
+
+## 11. Tasa de cambio multi-fuente y vitrina inteligente (Epic 18, AD-78..AD-87)
+
+Everything below describes what the code does today; the automated smoke of the whole epic is `test/epic-18-regression.e2e-spec.ts` (run with `pnpm test:e2e --no-file-parallelism`).
+
+### 11.1 Environment variables (all optional, defaults shown; see `.env.example`)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FX_PROVIDER` | `dolarapi` | `dolarapi` (real, DolarAPI) or `fake` (deterministic, no network). Forced to the fake provider when `NODE_ENV=test`. Anything else behaves as `dolarapi`. |
+| `FX_PROVIDER_BASE_URL` | `https://ve.dolarapi.com` | Base URL of the provider. |
+| `FX_PROVIDER_TIMEOUT_MS` | `5000` | Per-request timeout; a positive integer, otherwise the default. |
+| `FX_REFRESH_CRON` | `*/30 * * * *` | Cron expression of the periodic refresh. **Read once when the module loads**: it must be in the process environment (see 11.2), a plain `.env` read later is not enough. |
+| `FX_REFRESH_ENABLED` | `true` (`false` under `NODE_ENV=test`) | Only `true`/`false` are recognised. `false` disables the cron AND the refresh at boot. The admin button (`POST /admin/fx/refresh`) keeps working. |
+| `VITRINA_RECOMPUTE_CRON` | `0 * * * *` (hourly) | Cron of the ranking recompute. Same loading rule as `FX_REFRESH_CRON`. |
+| `VITRINA_CRON_ENABLED` | `true` (`false` under `NODE_ENV=test`) | `false` disables the hourly recompute, the recompute at boot (only when there is no current run) and the daily purge of old runs / `Product_Daily_Stats` (> 180 days). |
+| `VIEW_DEDUP_WINDOW_SEC` | `1800` | Seconds in which a repeated view of one product from the same client is not counted. In memory, **per process**: a restart or a second replica forgets it. |
+| `VIEW_RATE_LIMIT_PER_MIN` | `120` | Per-IP limit of `POST /products/:id/view`. Over the limit it still answers 204 and just stops counting. |
+| `VIEW_DEDUP_SECRET` | random per process | Optional. The daily salt of the view dedupe derives from it; nothing is persisted, and no IP or user agent is ever stored. |
+
+The rate source, thresholds (`maxAgeHours`, `maxVariationPct`) and the manual rate live in the database (`Fx_Rate_Settings`), edited from the admin screen; they are not env vars.
+
+### 11.2 The process environment (systemd `EnvironmentFile`)
+
+`FX_REFRESH_CRON` and `VITRINA_RECOMPUTE_CRON` are evaluated by the `@Cron(...)` decorator when the class is loaded, before NestJS reads `.env`. In production the systemd units already load `EnvironmentFile=/opt/212cc/<env>/shared/.env`, so putting the variable in that file is enough; when running `node dist/main` by hand, export it first (`set -a; . shared/.env; set +a`). A custom expression only in a `.env` that the app itself loads is silently ignored and the default is used. Changing any variable needs a restart of the service.
+
+### 11.3 Nginx, `X-Forwarded-For` and the frontend's `BACKEND_API_URL`
+
+The view signal and its rate limit are per client IP, so the whole chain must deliver the real address:
+
+- **Nginx must be the only access** to the backend and to the Next server (both on loopback, ports 3000/3001 closed in the firewall; section 1.8). `main.ts` sets `trust proxy 1`, so Express uses the right-most `X-Forwarded-For` entry, i.e. the one Nginx appended.
+- Nginx must set `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` on every `location` that proxies to Next and to the backend (already in `deploy/nginx/*.conf.template`). Never replace it with `$remote_addr` alone and never pass a client-supplied header through. Same rule as 9.4.
+- The frontend (`212CollectorsClub-frontend`) must have `BACKEND_API_URL` pointing at the backend on **loopback** (e.g. `http://127.0.0.1:3000/api/v1` for production). If it points at the public URL (`https://api.<domain>/...`) the Next server calls the backend through Nginx and every view arrives with the IP of the Next server: all visits collapse into one IP, the dedupe and the rate limit swallow almost everything and the "interest" signal is under-counted without any error. The frontend proxy forwards the visitor's `X-Forwarded-For`.
+- Time budgets: Nginx cuts at `proxy_read_timeout 60s` (both templates). `PUT /admin/vitrina/algorithm` waits for the settings lock at most **25 s** (constant `PUT_LOCK_BUDGET_MS`) and then answers 409 `VITRINA_BUSY`, so the admin gets the application error and never an Nginx 504. The recompute keeps its own 60 s transaction budget (`TX_TIMEOUT_MS`); a 10 000-product catalog recomputes in well under 5 s. With `recompute: true` the PUT recomputes after saving, so its total time is the save plus one recompute.
+
+### 11.4 Migrations and deployment order
+
+1. `pnpm install`, then `pnpm prisma:deploy` (= `prisma migrate deploy`, forward-only, run by CI/CD before the restart) applies, in order:
+   - `20261101100000_add_fx_rate_sources`: enum `FxRateSource` (`BCV_USD`, `BCV_EUR`, `PARALELO_USD`, `MANUAL`); new columns in `Fx_Rate_Settings` (`source` default `BCV_USD`, `manualVesPerUsd`, `maxAgeHours` default 48, `maxVariationPct` default 15, `rateFetchedAt`, `providerUpdatedAt`, `lastError`, `lastErrorAt`, `rejectedReading`) plus a CHECK on thresholds; nullable `Orders.fxRateSource`; new tables `Fx_Rate_Snapshots` and `Fx_Setting_Audits`. The existing rate row is kept and gets `rateFetchedAt = updatedAt`.
+   - `20261101150000_add_fx_setting_audit_action`: enum `FxSettingAction` and `Fx_Setting_Audits.action` (default `SETTINGS_UPDATED`, so existing rows are backfilled).
+   - `20261101200000_add_vitrina_scoring`: enum `VitrinaRunMode`; tables `Product_Daily_Stats`, `Vitrina_Algorithm_Settings`, `Vitrina_Algorithm_Audits`, `Product_Score_Runs`, `Product_Scores`; `CREATE INDEX IF NOT EXISTS` on `Order_Lines(productId, createdAt)`, `Orders(status, createdAt)` and `Wishlist_Items(productId, createdAt)`; and an idempotent insert of the `default` row of `Vitrina_Algorithm_Settings` (the production deploy does not run `seed.ts`).
+2. **No data is lost or rewritten**: every change is additive (new columns have defaults or are nullable; existing orders keep `fxRateSource = NULL`, which is how "older than the epic" is told). The only `UPDATE` is the `rateFetchedAt` backfill of the single rate row.
+3. Deploy the backend **before** the frontend (new endpoints must exist when the new admin screens and the checkout call them).
+4. Verify: `pnpm exec prisma migrate status` is up to date and `prisma migrate diff` shows no drift. The first start refreshes the rate and, if there is no ranking yet, computes one (both in the background; they never block the boot).
+
+### 11.5 Home vitrina: stays `MANUAL` after deploying (A62)
+
+Existing published vitrinas have no `mode`; the backend treats that as `MANUAL` and returns exactly what it returned before (same products, same order, in-stock only, no `vitrina` key). Nothing changes on the Home after the deploy. To adopt the ranking, in the admin Home editor choose `AUTO` or `MIXED` (with a `size` of 4 to 12), review the draft and publish. `MANUAL` needs at least one product; `AUTO`/`MIXED` accept an empty list. Sold-out or deactivated products disappear from every mode on the next read, without recomputing. If there is no ranking (or it is empty): `AUTO` shows an empty list and `MIXED` only the pinned products, never a 5xx.
+
+### 11.6 Runbooks
+
+**Stale rate.** `GET /admin/fx/status` (or the "Tasa de cambio" screen) shows `stale` (older than `maxAgeHours`, default 48 h) and `hardStale` (older than `maxAgeHours x 3`, default 144 h). While `stale` the checkout keeps working with the last rate; once `hardStale` Pago Movil answers 503 `FX_RATE_UNAVAILABLE` (Stripe is unaffected) and `GET /fx/current` answers 503 too. A `MANUAL` rate never expires. Steps: (1) read `lastError` and `rejectedReading`; (2) `POST /admin/fx/refresh`; (3) if the provider is down, switch to `MANUAL` with a rate you trust (`PUT /admin/fx/settings` with `source` and `manualVesPerUsd`); (4) check the log for `FX refresh` errors. Switching source when the new source has no fresh reading falls back to that source's last snapshot; when that snapshot is older than `maxAgeHours x 3` the PUT response carries `hardStale: true` (checkout would answer 503): refresh again or use `MANUAL`.
+
+**Rejected reading.** A reading that is not finite, is <= 0, is out of range, is dated in the future or regresses, or varies more than `maxVariationPct` (default 15 %, exactly 15 % is accepted) is never applied: the rate stays, `rejectedReading` and `lastError` are filled, and the screen shows it. If the admin trusts it (a real devaluation jump), `POST /admin/fx/accept-rejected`; structurally invalid readings answer 422 `FX_REJECTED_READING_NOT_ACCEPTABLE` and with nothing to accept 409 `FX_NO_REJECTED_READING`. Every PUT and every acceptance is audited in `Fx_Setting_Audits` (`GET /admin/fx/audit`).
+
+**Concurrent refreshes.** Only one refresh runs at a time (advisory lock): the others get 409 `FX_REFRESH_IN_PROGRESS` or no-op. Same for the ranking: a second `POST /admin/vitrina/recompute` gets 409 `RECOMPUTE_IN_PROGRESS`. Retry after a few seconds.
+
+**`VITRINA_BUSY`.** `PUT /admin/vitrina/algorithm` waited 25 s for the settings lock held by a running recompute. Retry; if it persists look for a stuck transaction (`pg_stat_activity`).
+
+### 11.7 The dev/seed database has an old rate
+
+The rate row of a development or seed database is weeks old. After migrating, `rateFetchedAt = updatedAt` is older than `maxAgeHours x 3`, so **Pago Movil checkout answers 503 `FX_RATE_UNAVAILABLE` until the rate is refreshed** (Stripe works). It heals by itself at boot if `FX_REFRESH_ENABLED` is not `false` and the provider is reachable; otherwise use the admin button, `POST /admin/fx/refresh`, or set a `MANUAL` rate. In production this is the same situation right after the first deploy if the old rate is older than 144 h. The e2e suite pins `rateFetchedAt` to "now" for its duration and restores it afterwards (`test/helpers/global-fx-fresh.ts`), and also snapshots/restores `Landing_Config_Entries`, `Product_Daily_Stats` and the Vitrina tables, so running it never alters the real data.
+
+### 11.8 Rollback
+
+Prisma has no down migrations. The previous release keeps working against the migrated schema (new columns are nullable or have defaults; the new tables are ignored): roll back by redeploying the previous commit (section 5) and leave the migrations applied. Before rolling back, set the Home vitrina back to `MANUAL` with at least one product and publish it: a previous build does not understand `AUTO`/`MIXED` and would show an empty vitrina. Set `FX_REFRESH_ENABLED=false` and `VITRINA_CRON_ENABLED=false` if you want the crons off meanwhile.
+
+A full schema revert is only for a disaster, loses data (rate history and audits, the per-order `fxRateSource` label, the ranking runs and `Product_Daily_Stats`) and must be done on a backup first:
+
+```sql
+-- Vitrina (20261101200000)
+DROP TABLE "Product_Scores", "Product_Score_Runs", "Vitrina_Algorithm_Audits", "Vitrina_Algorithm_Settings", "Product_Daily_Stats";
+DROP TYPE "VitrinaRunMode";
+-- FX (20261101100000 and 20261101150000)
+ALTER TABLE "Orders" DROP COLUMN "fxRateSource";
+DROP TABLE "Fx_Setting_Audits", "Fx_Rate_Snapshots";
+ALTER TABLE "Fx_Rate_Settings" DROP CONSTRAINT "Fx_Rate_Settings_fx_config_check",
+  DROP COLUMN "source", DROP COLUMN "manualVesPerUsd", DROP COLUMN "maxAgeHours", DROP COLUMN "maxVariationPct",
+  DROP COLUMN "rateFetchedAt", DROP COLUMN "providerUpdatedAt", DROP COLUMN "lastError", DROP COLUMN "lastErrorAt", DROP COLUMN "rejectedReading";
+DROP TYPE "FxSettingAction";
+DROP TYPE "FxRateSource";
+DELETE FROM "_prisma_migrations" WHERE "migration_name" IN
+  ('20261101100000_add_fx_rate_sources','20261101150000_add_fx_setting_audit_action','20261101200000_add_vitrina_scoring');
+```
+
+The three indexes created with `IF NOT EXISTS` are harmless and can stay.
+
+### 11.9 `errorCode`s of the epic
+
+- Rate: `FX_RATE_UNAVAILABLE` (503, checkout Pago Movil and `GET /fx/current`), `FX_MANUAL_RATE_REQUIRED` (400), `FX_REFRESH_IN_PROGRESS` (409), `FX_NO_REJECTED_READING` (409), `FX_REJECTED_READING_NOT_ACCEPTABLE` (422).
+- Vitrina: `VITRINA_WEIGHTS_INVALID` (400, weights do not add up to 100), `VITRINA_PARAMS_INVALID` (400), `VITRINA_BUSY` (409), `RECOMPUTE_IN_PROGRESS` (409), `LANDING_BLOCK_INVALID` (400, invalid `mode`/`size`/empty `MANUAL`).
+
+Additive contract note: `PUT /admin/fx/settings` now also returns `hardStale` (boolean); no existing field changed.
+
+### 11.10 NFR-18.3: indexes and recompute time
+
+`test/vitrina-scoring-perf.e2e-spec.ts` seeds 10 000 products and 30 000 order lines: the recompute runs in < 5 s with a constant number of statements, and `EXPLAIN` (with `enable_seqscan = off`) shows that the sales query can use `Orders_status_createdAt_idx` and `Order_Lines_productId_createdAt_idx`, and that the lookup of a product's sales by date uses the latter on its own. Note the honest limit: the loader's sales query filters by date only (no `productId`), so on a table this size the planner prefers a sequential scan of `Order_Lines`, and the (productId, createdAt) index would serve it only as a full index scan. At the expected volume that is cheaper than an index and the measured time stays far below the limit; if `Order_Lines` grows into millions of rows, add an index on `Order_Lines(createdAt)`.
+
+### 11.11 Post-deploy verification checklist
+
+1. `pnpm exec prisma migrate status` up to date; the service is `active` and the log shows `FX refresh` (or `DISABLED`) without errors.
+2. `GET https://api.<domain>/api/v1/fx/current` -> 200 `{vesPerUsd, source, updatedAt, stale:false}`. If 503 follow 11.6/11.7.
+3. Admin "Tasa de cambio": `status` has a recent `fetchedAt`; change source to each live feed and back (an audit row per change), `rejectedReading` empty.
+4. A Pago Movil test checkout stores `fxRateSource` and `totalVes = totalUsd x rate`; the Stripe one keeps them `null`; an old order answers `fxRateSource: null`.
+5. `POST /admin/vitrina/recompute` -> 200 with `mode` `RANKED` (or `FALLBACK` with few sales); `GET /admin/vitrina/preview?mode=AUTO&size=8` lists products whose breakdown adds up to the score.
+6. The Home still shows the same vitrina (mode `MANUAL`, 11.5); publish an `AUTO`/`MIXED` draft only when ready.
+7. View signal: `curl -i -X POST https://<DOMAIN>/api/v1/products/<id>/view -H 'User-Agent: Mozilla/5.0 Firefox/130.0'` twice from the same machine -> 204 both and `views` of today's `Product_Daily_Stats` row +1 (not +2). Visits through the storefront must not all come from one IP (11.3: `BACKEND_API_URL` on loopback).
+8. Nginx: `grep -n 'X-Forwarded-For' /etc/nginx/sites-enabled/*` shows `$proxy_add_x_forwarded_for` on every proxy location; ports 3000/3001 unreachable from outside.
+9. After a few days: `Product_Daily_Stats` has no rows older than 180 days and only the last 3 runs of `Product_Score_Runs` remain.

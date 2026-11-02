@@ -103,9 +103,17 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
     app.setGlobalPrefix('api');
     app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
     app.useGlobalPipes(createGlobalValidationPipe());
-    await app.init();
+    // Story 18.12: ONE shared listening server. Without it supertest opens an
+    // ephemeral server per request and the staggered/concurrent rounds of
+    // "AC7 (real)" intermittently died with ECONNRESET (same fix as 18.7).
+    await app.listen(0);
     prisma = app.get(PrismaService);
     saved = await snapshotFx(prisma);
+    // Story 18.12: the suite owns the FX snapshot table while it runs (the
+    // real ones are restored verbatim in afterAll). Foreign snapshots dated
+    // after the fake provider's fixtures would turn every fresh reading into
+    // DATE_REGRESSION; each test seeds the snapshots it needs.
+    await prisma.fxRateSnapshot.deleteMany();
     const category = await prisma.category.findFirstOrThrow();
     productId = (
       await prisma.product.create({
@@ -141,7 +149,14 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
     adminToken = (res.body as { accessToken: string }).accessToken;
   });
 
+  // Each test starts from an empty snapshot table and seeds what it needs
+  // (a previous test may have left a future-dated one on purpose).
+  beforeEach(async () => {
+    await prisma.fxRateSnapshot.deleteMany();
+  });
+
   afterAll(async () => {
+    await prisma.fxRateSnapshot.deleteMany();
     await prisma.order.deleteMany({
       where: { lines: { some: { productId } } },
     });

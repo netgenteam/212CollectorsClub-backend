@@ -59,6 +59,11 @@ export class UpdateFxSettingsResponseDto extends FxSettingsResponseDto {
   })
   stale: boolean;
   @ApiProperty({
+    description:
+      'Story 18.12: true when the rate now in force is older than maxAgeHours x 3 (e.g. the switch fell back to an old snapshot of the new source): checkout answers 503 FX_RATE_UNAVAILABLE on Pago Movil until a fresh rate is obtained. Never true for MANUAL.',
+  })
+  hardStale: boolean;
+  @ApiProperty({
     example: 'UPDATED',
     description:
       'Outcome of the immediate refresh: UPDATED | NOOP | MANUAL | REJECTED | FAILED | IN_PROGRESS | SKIPPED.',

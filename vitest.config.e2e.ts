@@ -16,6 +16,8 @@ export default defineConfig({
       './test/helpers/global-fx-fresh.ts',
       './test/helpers/global-daily-stats-snapshot.ts',
       './test/helpers/global-vitrina-snapshot.ts',
+      // Story 18.12: legacy landing suites rewrite the real Home entries.
+      './test/helpers/global-landing-snapshot.ts',
     ],
   },
 });

@@ -20,12 +20,12 @@ import {
   VITRINA_SETTING_ID,
 } from './vitrina-settings.js';
 import type { SettingRow } from './vitrina-settings.js';
-import {
-  TX_TIMEOUT_MS,
-  VitrinaScoringService,
-} from './vitrina-scoring.service.js';
+import { VitrinaScoringService } from './vitrina-scoring.service.js';
 import type { RecomputeRun } from './vitrina-scoring.service.js';
 import { VitrinaSelectionService } from './vitrina-selection.service.js';
+
+/** Story 18.12: max wait of PUT /admin/vitrina/algorithm for the settings lock. */
+export const PUT_LOCK_BUDGET_MS = 25_000;
 
 const WEIGHT_KEYS = [
   'wSales',
@@ -134,9 +134,11 @@ export class AdminVitrinaService {
             },
           });
         },
-        // FOR UPDATE can queue behind a long recompute (up to TX_TIMEOUT_MS):
-        // same budget as the recompute, not Prisma's 5 s default.
-        { maxWait: TX_TIMEOUT_MS, timeout: TX_TIMEOUT_MS },
+        // FOR UPDATE can queue behind a long recompute. Own, SHORTER budget
+        // than the recompute's TX_TIMEOUT_MS (60 s): Nginx cuts at
+        // proxy_read_timeout 60 s, so the admin must get our 409 VITRINA_BUSY
+        // (not Nginx's 504) before that. Not Prisma's 5 s default either.
+        { maxWait: PUT_LOCK_BUDGET_MS, timeout: PUT_LOCK_BUDGET_MS },
       );
     } catch (err) {
       if (isTxTimeout(err)) {

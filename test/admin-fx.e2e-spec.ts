@@ -282,6 +282,7 @@ describe('Admin FX API (e2e, Story 18.2)', () => {
         source: 'PARALELO_USD',
         vesPerUsd: '777.0000',
         stale: true,
+        hardStale: false,
         refresh: 'FAILED',
         sourceChanged: true,
         reason: 'PROVIDER_ERROR',
@@ -290,6 +291,35 @@ describe('Admin FX API (e2e, Story 18.2)', () => {
       expect(row.providerUpdatedAt?.getTime()).toBe(at.getTime());
       expect(row.rateFetchedAt?.getTime()).toBe(fetchedAt.getTime());
       expect(row.lastError).toContain('boom');
+    });
+
+    it('Story 18.12: switching to a source whose only snapshot is older than maxAgeHours x 3 warns hardStale:true (additive field)', async () => {
+      await prisma.fxRateSnapshot.create({
+        data: {
+          source: 'PARALELO_USD',
+          rate: '777.0000',
+          providerUpdatedAt: new Date('2026-09-01T12:00:00.000Z'),
+          fetchedAt: new Date(Date.now() - 200 * 3600 * 1000), // > 48h x 3
+        },
+      });
+      fake.fail('boom');
+      const res = await put({ source: 'PARALELO_USD' }).expect(200);
+      expect(res.body).toMatchObject({
+        source: 'PARALELO_USD',
+        vesPerUsd: '777.0000',
+        stale: true,
+        hardStale: true,
+        refresh: 'FAILED',
+        reason: 'PROVIDER_ERROR',
+      });
+      // Healthy switch and MANUAL never warn.
+      fake.reset();
+      const ok = await put({ source: 'BCV_EUR' }).expect(200);
+      expect((ok.body as { hardStale: boolean }).hardStale).toBe(false);
+      const man = await put({ source: 'MANUAL', manualVesPerUsd: 5 }).expect(
+        200,
+      );
+      expect((man.body as { hardStale: boolean }).hardStale).toBe(false);
     });
 
     it('rejected reading of the new source => falls back to its snapshot; rejectedReading belongs to the NEW source (QA 18.3)', async () => {

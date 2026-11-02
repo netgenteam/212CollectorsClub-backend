@@ -124,6 +124,13 @@ export async function stashCursors(
 export type FxState = {
   setting: Prisma.FxRateSettingGetPayload<object> | null;
   snapshots: Prisma.FxRateSnapshotGetPayload<object>[];
+  /**
+   * Story 18.12: `to_jsonb` text of the rate row and of every snapshot. JS
+   * `Date` only keeps milliseconds, but Postgres timestamps keep microseconds
+   * (`now()`); restoring from these texts is byte faithful.
+   */
+  rawSetting?: string | null;
+  rawSnapshots?: string;
 };
 
 /** Story 18.1: snapshot of the real FX rate row and its snapshot history. */
@@ -133,6 +140,15 @@ export async function snapshotFx(prisma: PrismaService): Promise<FxState> {
       where: { id: 'default' },
     }),
     snapshots: await prisma.fxRateSnapshot.findMany(),
+    rawSetting: (
+      await prisma.$queryRaw<{ j: string | null }[]>`
+        SELECT to_jsonb(t)::text AS j FROM "Fx_Rate_Settings" t WHERE t."id" = 'default'`
+    )[0]?.j,
+    rawSnapshots: (
+      await prisma.$queryRaw<{ j: string }[]>`
+        SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t."id"), '[]'::jsonb)::text AS j
+        FROM "Fx_Rate_Snapshots" t`
+    )[0].j,
   };
 }
 
@@ -145,12 +161,29 @@ export async function restoreFx(
   s: FxState,
 ): Promise<void> {
   await prisma.fxRateSnapshot.deleteMany();
-  if (s.snapshots.length) {
+  if (s.rawSnapshots !== undefined) {
+    await prisma.$executeRaw`
+      INSERT INTO "Fx_Rate_Snapshots"
+      SELECT * FROM jsonb_populate_recordset(null::"Fx_Rate_Snapshots", ${s.rawSnapshots}::jsonb)`;
+  } else if (s.snapshots.length) {
     await prisma.fxRateSnapshot.createMany({ data: s.snapshots });
   }
   const r = s.setting;
   if (!r) {
     await prisma.fxRateSetting.deleteMany({ where: { id: 'default' } });
+    return;
+  }
+  if (s.rawSetting) {
+    // Every column, microseconds included (raw UPDATE: `updatedAt` is ours).
+    await prisma.$executeRaw`
+      UPDATE "Fx_Rate_Settings" t SET
+        "vesPerUsd" = r."vesPerUsd", "updatedAt" = r."updatedAt", "source" = r."source",
+        "manualVesPerUsd" = r."manualVesPerUsd", "maxAgeHours" = r."maxAgeHours",
+        "maxVariationPct" = r."maxVariationPct", "rateFetchedAt" = r."rateFetchedAt",
+        "providerUpdatedAt" = r."providerUpdatedAt", "lastError" = r."lastError",
+        "lastErrorAt" = r."lastErrorAt", "rejectedReading" = r."rejectedReading"
+      FROM jsonb_populate_record(null::"Fx_Rate_Settings", ${s.rawSetting}::jsonb) r
+      WHERE t."id" = r."id"`;
     return;
   }
   const rejected =

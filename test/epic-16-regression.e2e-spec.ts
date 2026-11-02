@@ -178,6 +178,7 @@ describe('Epic 16 regression (e2e)', () => {
     // 120 unique cards + 30 reverse printings of the first 30 commons.
     const base = (n: number, over: Record<string, unknown>) => ({
       externalProvider: provider,
+      externalId: `${P}${n}`,
       name: `E2E1611 Card ${n}`,
       cleanName: `e2e1611 card ${n}`,
       searchText: `e2e1611 card ${n}`,

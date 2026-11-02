@@ -1,6 +1,9 @@
 import { HttpStatus } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client.js';
-import { AdminVitrinaService } from './admin-vitrina.service.js';
+import {
+  AdminVitrinaService,
+  PUT_LOCK_BUDGET_MS,
+} from './admin-vitrina.service.js';
 import { TX_TIMEOUT_MS } from './vitrina-scoring.service.js';
 
 const DTO = {
@@ -18,7 +21,7 @@ const p2028 = () =>
   });
 
 describe('AdminVitrinaService.updateAlgorithm tx budget (Story 18.9)', () => {
-  it('runs the PUT transaction with the recompute budget, not the 5 s default', async () => {
+  it('runs the PUT transaction with its own lock budget (> 5 s default, well under Nginx 60 s)', async () => {
     const $transaction = vi.fn().mockRejectedValue(p2028());
     const svc = new AdminVitrinaService(
       { $transaction } as never,
@@ -28,10 +31,13 @@ describe('AdminVitrinaService.updateAlgorithm tx budget (Story 18.9)', () => {
     await expect(svc.updateAlgorithm(DTO, 'admin')).rejects.toBeDefined();
     expect($transaction).toHaveBeenCalledTimes(1);
     expect($transaction.mock.calls[0][1]).toEqual({
-      maxWait: TX_TIMEOUT_MS,
-      timeout: TX_TIMEOUT_MS,
+      maxWait: PUT_LOCK_BUDGET_MS,
+      timeout: PUT_LOCK_BUDGET_MS,
     });
-    expect(TX_TIMEOUT_MS).toBeGreaterThan(5000);
+    expect(PUT_LOCK_BUDGET_MS).toBeGreaterThan(5000);
+    // Story 18.12: must answer 409 before Nginx proxy_read_timeout (60 s).
+    expect(PUT_LOCK_BUDGET_MS).toBeLessThan(60_000);
+    expect(PUT_LOCK_BUDGET_MS).toBeLessThan(TX_TIMEOUT_MS);
   });
 
   it('answers 409 VITRINA_BUSY (not 500) when the lock wait times out', async () => {

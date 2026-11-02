@@ -237,9 +237,16 @@ export class AdminFxService {
       stale = !['UPDATED', 'NOOP', 'MANUAL'].includes(refresh);
     }
     const s = await this.loadSetting();
+    // Story 18.12: same threshold as getStatus() / checkout (maxAgeHours x 3).
+    // A switch that fell back to an old snapshot can leave the checkout in 503.
+    const hardStale =
+      s.source !== 'MANUAL' &&
+      Date.now() - (s.rateFetchedAt ?? s.updatedAt).getTime() >
+        s.maxAgeHours * HOUR_MS * 3;
     return {
       ...this.toSettings(s),
       stale,
+      hardStale,
       refresh,
       sourceChanged: outcome.sourceChanged ?? s.source === dto.source,
       reason: outcome.reason ?? null,

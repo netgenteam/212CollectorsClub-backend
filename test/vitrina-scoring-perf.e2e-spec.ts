@@ -167,4 +167,52 @@ maybe('Vitrina recompute performance (e2e, Story 18.8)', () => {
     expect(rows[0].n as number).toBeLessThanOrEqual(48);
     expect(r.mode).toBe('RANKED');
   }, 60_000);
+  /**
+   * Story 18.12 (NFR-18.3). Plans are taken with `enable_seqscan = off` inside
+   * a transaction: on a small table the planner rightly prefers a sequential
+   * scan, so what is asserted is that the new indexes are USABLE by the sales
+   * queries and that the lookup by product uses the index on its own. The
+   * loader query filters by date only (no productId), so the
+   * (productId, createdAt) index serves it as a full index scan, not as a
+   * range seek; this is documented in docs/deployment.md section 11.
+   */
+  it('EXPLAIN: sales queries can use the new Order_Lines and Orders indexes', async () => {
+    const plan = (query: string, params: unknown[] = []) =>
+      prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
+        const r = await tx.$queryRawUnsafe<Record<string, unknown>[]>(
+          `EXPLAIN (FORMAT JSON) ${query}`,
+          ...params,
+        );
+        return JSON.stringify(r[0]['QUERY PLAN']);
+      });
+    const loaderSales = await plan(
+      `SELECT ol."productId", SUM(ol."quantity")::int, SUM(ol."lineTotalUsd")::float8
+         FROM "Order_Lines" ol JOIN "Orders" o ON o."id" = ol."orderId"
+        WHERE o."status" IN ('PAID'::"OrderStatus", 'FULFILLED'::"OrderStatus")
+          AND ol."createdAt" >= now() - interval '90 days' AND ol."createdAt" <= now()
+        GROUP BY ol."productId", ol."createdAt"::date`,
+    );
+    expect(loaderSales).toContain('Order_Lines_productId_createdAt_idx');
+    // The join side on Orders is plan-dependent (tiny table): assert the
+    // status+date lookup on its own instead.
+    const byStatus = await plan(
+      `SELECT count(*) FROM "Orders"
+        WHERE "status" IN ('PAID'::"OrderStatus", 'FULFILLED'::"OrderStatus")
+          AND "createdAt" >= now() - interval '30 days'`,
+    );
+    expect(byStatus).toContain('Orders_status_createdAt_idx');
+    const perProduct = await plan(
+      `SELECT SUM(quantity) FROM "Order_Lines"
+        WHERE "productId" = $1::uuid AND "createdAt" >= now() - interval '30 days'`,
+      [(await sql(`SELECT id FROM "Products" LIMIT 1`))[0].id],
+    );
+    expect(perProduct).toContain('Order_Lines_productId_createdAt_idx');
+    const idx = await sql(
+      `SELECT indexname FROM pg_indexes
+        WHERE indexname IN ('Order_Lines_productId_createdAt_idx','Orders_status_createdAt_idx',
+                            'Wishlist_Items_productId_createdAt_idx','Product_Daily_Stats_day_idx')`,
+    );
+    expect(idx).toHaveLength(4);
+  }, 60_000);
 });

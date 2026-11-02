@@ -289,7 +289,11 @@ describe('Landing blocks draft/publish (e2e)', () => {
     await put('hero', validBlock('hero')).expect(200);
     await put('manifesto', validBlock('manifesto')).expect(200);
 
-    const service = app.get(LandingBlocksService);
+    // publishRow is protected: reach it through a structural view.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+    const service = app.get(LandingBlocksService) as unknown as {
+      publishRow: (...a: unknown[]) => Promise<unknown>;
+    };
     const original = service.publishRow.bind(service);
     let calls = 0;
     const spy = vi.spyOn(service, 'publishRow').mockImplementation((...a) => {
