@@ -1,5 +1,6 @@
 import { ApiException } from '../common/api-exception.js';
 import {
+  LEGAL_MD_LIMITS,
   LegalMarkdownService,
   slugifyHeading,
   urlRejection,
@@ -125,5 +126,147 @@ describe('LegalMarkdownService toc', () => {
       'seccion-2',
     ]);
     expect(slugifyHeading('  Ñandú -- ¿Qué?  ')).toBe('nandu-que');
+  });
+});
+
+describe('LegalMarkdownService.validate (bounded, QA D1)', () => {
+  // Generous for CI (the target on a dev machine is < 500 ms); the unbounded
+  // versions took 4 s to > 30 s, so this still catches any regression.
+  const MAX_MS = 1500;
+  const nest = (n: number) =>
+    Array.from({ length: n }, (_, i) => `${' '.repeat(2 * i)}- x`).join('\n');
+
+  const vectors: [string, string][] = [
+    ['5000 quotes (RangeError)', '>'.repeat(5000) + ' x'],
+    ['5000 list markers', '- '.repeat(5000)],
+    ['50000 list markers', '- '.repeat(50000)],
+    ['stacked markers x lines', '- - - x\n'.repeat(1000)],
+    ['500 nested levels', nest(500)],
+    ['1000 nested levels', nest(1000)],
+    ['15000 headings', '## A\n'.repeat(15000)],
+    ['30000 headings', '## A\n'.repeat(30000)],
+    ['setext x 50000', 'a\n=\n'.repeat(50000)],
+    ['100000 "a." (GFM autolink)', 'a.'.repeat(100000)],
+    ['30000 "[a]("', '[a]('.repeat(30000)],
+    ['nested emphasis', '**a_'.repeat(30000)],
+    ['nested emphasis with spaces', '*a **b '.repeat(20000)],
+    ['backtick runs', '`a``'.repeat(50000)],
+    ['100000 "["', '['.repeat(100000)],
+    ['refs and definitions', '[r1]: https://x.com\n[r1] [r1]\n'.repeat(4000)],
+    ['table of 25000 rows', `|a|b|\n|-|-|\n${'|1|2|\n'.repeat(25000)}`],
+    ['wide table', `|${'a|'.repeat(20000)}\n|${'-|'.repeat(20000)}\n`],
+    ['blank-separated items', '- a\n\n'.repeat(30000)],
+    ['more than 200 KB', 'palabra '.repeat(30000)],
+    [
+      'dense inline markup, many blocks',
+      '`a` '.repeat(2000).concat('\n\n').repeat(30),
+    ],
+  ];
+
+  it.each(vectors)('400 LEGAL_MARKDOWN_INVALID, fast: %s', (_n, md) => {
+    const t = performance.now();
+    const body = issuesOf(md);
+    const ms = performance.now() - t;
+    expect(body?.statusCode).toBe(400);
+    expect(body?.errorCode).toBe('LEGAL_MARKDOWN_INVALID');
+    expect(body?.details.issues.length).toBeGreaterThan(0);
+    expect(body?.details.issues[0].line).toBeGreaterThanOrEqual(1);
+    expect(ms).toBeLessThan(MAX_MS);
+  });
+
+  // Inputs that PASS the prefilter at (just under) each limit still finish fast.
+  const atLimit: [string, string][] = [
+    ['5999 flat list items', '- a\n'.repeat(5999)],
+    ['800 nested items', '* a\n  * b\n'.repeat(400)],
+    ['4 stacked markers x 266 lines', '- - - - x\n'.repeat(266)],
+    ['500 headings', '## Título\n\n'.repeat(250) + '### Sub\n\n'.repeat(249)],
+    ['58 KB table', '| a | b |\n| - | - |\n' + '| 1 | 2 |\n'.repeat(6000)],
+    ['20000 literal links', 'www.a. '.repeat(2800)],
+  ];
+  it.each(atLimit)('under the limits it still ends quickly: %s', (_n, md) => {
+    const t = performance.now();
+    issuesOf(md);
+    expect(performance.now() - t).toBeLessThan(MAX_MS);
+  });
+
+  it('a stray RangeError / parser failure from the parser is a 400, never a 500', () => {
+    const s = new LegalMarkdownService();
+    vi.spyOn(
+      s as unknown as { parse: () => never },
+      'parse',
+    ).mockImplementation(() => {
+      throw new RangeError('Maximum call stack size exceeded');
+    });
+    try {
+      s.validate('hola');
+      throw new Error('should have thrown');
+    } catch (e) {
+      const r = (e as ApiException).getResponse() as {
+        statusCode: number;
+        errorCode: string;
+      };
+      expect(r.statusCode).toBe(400);
+      expect(r.errorCode).toBe('LEGAL_MARKDOWN_INVALID');
+    }
+    expect(s.buildToc('## a')).toEqual([]);
+    vi.restoreAllMocks();
+  });
+
+  it('does not reject realistic legal documents (~100 KB, 3-4 level lists, tables, links)', () => {
+    const clause = (i: number) =>
+      [
+        `## Cláusula ${i}. Condiciones`,
+        `El comprador acepta **estos** términos y la [política de privacidad](/privacidad) (ver https://212collectorsclub.com/envios). `.repeat(
+          4,
+        ),
+        '- Primero\n  - Segundo nivel\n    - Tercer nivel\n      - Cuarto nivel\n- Otro punto',
+        '### Detalle\n\n| Concepto | Plazo |\n| - | - |\n| Envío | 5 días |\n| Devolución | 15 días |',
+        '> Nota: consulte el [[RIF]] del vendedor.',
+      ].join('\n\n');
+    const md = Array.from({ length: 180 }, (_, i) => clause(i)).join('\n\n');
+    expect(md.length).toBeGreaterThan(90_000);
+    expect(md.length).toBeLessThan(LEGAL_MD_LIMITS.maxBytes);
+    const t = performance.now();
+    const r = svc.validate(md);
+    expect(performance.now() - t).toBeLessThan(MAX_MS);
+    expect(r.toc.length).toBe(360);
+    expect(new Set(r.toc.map((x) => x.id)).size).toBe(360);
+  });
+
+  it('accepts a 190 KB prose document', () => {
+    const md = Array.from(
+      { length: 1050 },
+      (_, i) =>
+        `Párrafo ${i}: el comprador acepta estos términos y **condiciones** de uso del sitio, sin perjuicio de la ley. Lorem ipsum dolor sit amet consectetur adipiscing elit.`,
+    ).join('\n\n');
+    expect(Buffer.byteLength(md)).toBeGreaterThan(150_000);
+    expect(issuesOf(md)).toBeNull();
+  });
+
+  it('toc ids are unique and O(n): 500 equal headings, previous ids preserved', () => {
+    const toc = svc.buildToc('## A\n\n'.repeat(500));
+    expect(toc[0].id).toBe('a');
+    expect(toc[1].id).toBe('a-2');
+    expect(toc[499].id).toBe('a-500');
+    expect(new Set(toc.map((t) => t.id)).size).toBe(500);
+    // A-2 after a-2 already exists: 'a-2-2' (same as the old algorithm).
+    expect(
+      svc.buildToc('## a\n\n## a\n\n## A-2\n\n## a\n').map((t) => t.id),
+    ).toEqual(['a', 'a-2', 'a-2-2', 'a-3']);
+  });
+
+  it('N2: a literal www./http:// link gives a clear message with line and the fix', () => {
+    const body = issuesOf('Hola\n\nVisite www.ejemplo.com hoy y http://x.com');
+    const reasons = body!.details.issues;
+    expect(reasons.map((i) => i.line)).toEqual([3, 3]);
+    expect(reasons[0].reason).toContain('Line 3');
+    expect(reasons[0].reason).toContain('www.ejemplo.com');
+    expect(reasons[0].reason).toContain('https://');
+    expect(reasons[1].reason).toContain('http://x.com');
+    expect(reasons[1].reason).toContain('https://x.com');
+    // an explicit link with a bad scheme keeps the plain reason
+    expect(issuesOf('[a](http://x.com)')!.details.issues[0].reason).toMatch(
+      /scheme "http:"/,
+    );
   });
 });

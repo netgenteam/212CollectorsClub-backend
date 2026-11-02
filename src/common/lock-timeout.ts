@@ -32,8 +32,9 @@ type RawTx = Pick<Prisma.TransactionClient, '$executeRaw'>;
  * the n-th waiter can wait n x budget (measured: 2 concurrent callers = 50 s
  * with a 25 s budget). So each locking statement is armed with BOTH
  * `lock_timeout` and `statement_timeout` set to the time REMAINING until one
- * shared deadline, and `release()` lifts the statement cap once the last lock
- * is held so the write statements are not cut short.
+ * shared deadline, and `release()` lifts BOTH caps (statement_timeout and
+ * lock_timeout, left armed with ~1 ms it would turn a brief wait of the write
+ * phase into a spurious 409) once the last lock is held.
  *
  *   const budget = new LockBudget(tx, BUDGET_MS);
  *   await budget.arm();            // before EACH statement that can wait
@@ -58,7 +59,7 @@ export class LockBudget {
 
   async release(): Promise<void> {
     await this.tx
-      .$executeRaw`SELECT set_config('statement_timeout', '0', true)`;
+      .$executeRaw`SELECT set_config('statement_timeout', '0', true), set_config('lock_timeout', '0', true)`;
   }
 }
 

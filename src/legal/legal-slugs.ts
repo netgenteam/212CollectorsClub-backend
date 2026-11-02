@@ -15,5 +15,10 @@ export type LegalSlug = (typeof LEGAL_SLUGS)[number];
  */
 export const SANDBOX_SLUG_RE = /^e2e-[a-z0-9][a-z0-9-]{0,50}$/;
 
+/**
+ * `e2e-*` is accepted ONLY outside production (the DB still decides whether a
+ * sandbox document exists; in production none ever should).
+ */
 export const isLegalSlug = (v: string): boolean =>
-  (LEGAL_SLUGS as readonly string[]).includes(v) || SANDBOX_SLUG_RE.test(v);
+  (LEGAL_SLUGS as readonly string[]).includes(v) ||
+  (process.env.NODE_ENV !== 'production' && SANDBOX_SLUG_RE.test(v));

@@ -201,6 +201,18 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
               'make real document sandbox + slug',
               `UPDATE "Legal_Documents" SET "isSandbox" = true, "slug" = 'e2e-x' WHERE "id" = '${real}'`,
             ],
+            [
+              'real document kind change (D2)',
+              `UPDATE "Legal_Documents" SET "kind" = 'PRIVACY' WHERE "id" = '${real}'`,
+            ],
+            [
+              'real document requiresAcceptance change (D2)',
+              `UPDATE "Legal_Documents" SET "requiresAcceptance" = false WHERE "id" = '${real}'`,
+            ],
+            [
+              'real document id change (D2)',
+              `UPDATE "Legal_Documents" SET "id" = gen_random_uuid() WHERE "id" = '${real}'`,
+            ],
           ];
           for (const [name, stmt] of attempts) {
             await tx.$executeRawUnsafe('SAVEPOINT attempt');
@@ -236,7 +248,7 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
       // 23000 = integrity_constraint_violation (what the triggers raise).
       expect([name, code]).toEqual([name, '23000']);
     }
-    expect(Object.keys(results)).toHaveLength(14);
+    expect(Object.keys(results)).toHaveLength(17);
     // Nothing leaked out of the rolled-back transaction.
     expect(await realLegalFingerprint(sql)).toBe(fingerprint);
     const n = await sql(
@@ -284,6 +296,104 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
       [`e2e-${TAG}%`],
     );
     expect(left[0].n).toBe(0);
+  });
+
+  it('D2: a sandbox row cannot be re-parented / renumbered onto a real document (version and audit)', async () => {
+    const doc = await createSandboxDocument(sql, `${TAG}-evade`);
+    await insertSandboxVersion(sql, doc.id, 1);
+    await insertSandboxAudit(sql, doc.id);
+    const real = (
+      await sql(`SELECT "id" FROM "Legal_Documents" WHERE "slug" = 'terminos'`)
+    )[0].id as string;
+    const results: Record<string, string> = {};
+    // Rolled back even if (a regression) the evasion succeeded: never commit it.
+    await prisma
+      .$transaction(
+        async (tx) => {
+          const attempts: [string, string, unknown[]][] = [
+            [
+              'reparent + renumber version',
+              `UPDATE "Legal_Document_Versions" SET "documentId" = $1::uuid, "versionNumber" = 7 WHERE "documentId" = $2::uuid`,
+              [real, doc.id],
+            ],
+            [
+              'reparent version only',
+              `UPDATE "Legal_Document_Versions" SET "documentId" = $1::uuid WHERE "documentId" = $2::uuid`,
+              [real, doc.id],
+            ],
+            [
+              'renumber sandbox version',
+              `UPDATE "Legal_Document_Versions" SET "versionNumber" = 7 WHERE "documentId" = $1::uuid`,
+              [doc.id],
+            ],
+            [
+              'change version id',
+              `UPDATE "Legal_Document_Versions" SET "id" = gen_random_uuid() WHERE "documentId" = $1::uuid`,
+              [doc.id],
+            ],
+            [
+              'reparent audit',
+              `UPDATE "Legal_Audit_Logs" SET "documentId" = $1::uuid WHERE "documentId" = $2::uuid`,
+              [real, doc.id],
+            ],
+            [
+              'reparent audit to no document',
+              `UPDATE "Legal_Audit_Logs" SET "documentId" = NULL WHERE "documentId" = $1::uuid`,
+              [doc.id],
+            ],
+            [
+              'change audit id',
+              `UPDATE "Legal_Audit_Logs" SET "id" = gen_random_uuid() WHERE "documentId" = $1::uuid`,
+              [doc.id],
+            ],
+            [
+              'change sandbox document id',
+              `UPDATE "Legal_Documents" SET "id" = gen_random_uuid() WHERE "id" = $1::uuid`,
+              [doc.id],
+            ],
+          ];
+          for (const [name, stmt, params] of attempts) {
+            await tx.$executeRawUnsafe('SAVEPOINT attempt');
+            try {
+              await tx.$executeRawUnsafe(stmt, ...params);
+              results[name] = 'SUCCEEDED';
+            } catch (e) {
+              results[name] = sqlstate(e);
+            }
+            await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT attempt');
+          }
+          // Edits that keep the identity are still fine in the sandbox.
+          await tx.$executeRawUnsafe(
+            `UPDATE "Legal_Document_Versions" SET "bodyMd" = 'x', "changeSummary" = 'y' WHERE "documentId" = $1::uuid`,
+            doc.id,
+          );
+          throw ROLLBACK;
+        },
+        { timeout: 30_000 },
+      )
+      .catch((e: unknown) => {
+        if (e !== ROLLBACK) throw e;
+      });
+    for (const [name, code] of Object.entries(results)) {
+      expect([name, code]).toEqual([name, '23000']);
+    }
+    expect(Object.keys(results)).toHaveLength(8);
+    // Committed state: the real document has no forged rows, the sandbox keeps its own.
+    const forged = await sql(
+      `SELECT count(*)::int AS n FROM "Legal_Document_Versions" WHERE "documentId" = $1::uuid`,
+      [real],
+    );
+    expect(forged[0].n).toBe(0);
+    expect(await realLegalFingerprint(sql)).toBe(fingerprint);
+    // Cleanup of the sandbox still works with the app connection.
+    await purgeSandbox(sql, TAG);
+    const left = await sql(
+      `SELECT (SELECT count(*)::int FROM "Legal_Documents" WHERE "slug" LIKE $1) AS d,
+              (SELECT count(*)::int FROM "Legal_Document_Versions" WHERE "documentId" = $2::uuid) AS v,
+              (SELECT count(*)::int FROM "Legal_Audit_Logs" WHERE "documentId" = $2::uuid) AS a`,
+      [`e2e-${TAG}%`, doc.id],
+    );
+    expect(left[0]).toEqual({ d: 0, v: 0, a: 0 });
   });
 
   it('the cleanup helper cannot touch a real document (predicate + triggers)', async () => {

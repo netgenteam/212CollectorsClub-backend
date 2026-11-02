@@ -44,4 +44,17 @@ describe('detectPlaceholders', () => {
     expect(detectPlaceholders('[[RIF]]')).toHaveLength(1);
     expect(detectPlaceholders('[[RIF]]')).toHaveLength(1);
   });
+
+  it('N3: accented / Unicode upper-case names are placeholders too', () => {
+    const md =
+      'a [[RAZÓN_SOCIAL]] b\n[[DIRECCIÓN]] [[AÑO_2026]] [[RAZO\u0301N]]';
+    expect(detectPlaceholders(md).map((p) => p.token)).toEqual([
+      '[[RAZÓN_SOCIAL]]',
+      '[[DIRECCIÓN]]',
+      '[[AÑO_2026]]',
+      '[[RAZO\u0301N]]',
+    ]);
+    expect(detectPlaceholders(md)[1].line).toBe(2);
+    expect(detectPlaceholders('[[razón_social]] [[Razón]] [[ó]]')).toEqual([]);
+  });
 });

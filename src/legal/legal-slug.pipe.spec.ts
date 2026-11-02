@@ -35,6 +35,19 @@ describe('LegalSlugPipe', () => {
   it('lets sandbox-format slugs through (the DB decides)', () => {
     expect(pipe.transform('e2e-abc-123')).toBe('e2e-abc-123');
   });
+  it('N1: sandbox slugs are 404 in production, the six real ones still pass', () => {
+    const prev = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      expect(code(() => pipe.transform('e2e-abc-123'))).toBe(
+        '404 LEGAL_DOCUMENT_NOT_FOUND',
+      );
+      for (const s of LEGAL_SLUGS) expect(pipe.transform(s)).toBe(s);
+    } finally {
+      process.env.NODE_ENV = prev;
+    }
+    expect(pipe.transform('e2e-abc-123')).toBe('e2e-abc-123');
+  });
 });
 
 describe('parseVersionNumber', () => {

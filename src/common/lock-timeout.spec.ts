@@ -74,6 +74,7 @@ describe('lock-timeout helper', () => {
     expect(calls[3].sql).toContain(
       "set_config('statement_timeout', '0', true)",
     );
+    expect(calls[3].sql).toContain("set_config('lock_timeout', '0', true)");
   });
 
   it('SQLSTATE 57014 (statement_timeout cap) also counts as an expired wait', () => {
