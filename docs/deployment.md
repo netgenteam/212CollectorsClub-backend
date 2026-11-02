@@ -769,6 +769,8 @@ Existing published vitrinas have no `mode`; the backend treats that as `MANUAL` 
 
 **Concurrent refreshes.** Only one refresh runs at a time (advisory lock): the others get 409 `FX_REFRESH_IN_PROGRESS` or no-op. Same for the ranking: a second `POST /admin/vitrina/recompute` gets 409 `RECOMPUTE_IN_PROGRESS`. Retry after a few seconds.
 
+**`FX_SETTINGS_BUSY`.** `PUT /admin/fx/settings` / `POST /admin/fx/accept-rejected` could not get the FX advisory lock (`fx:refresh`) or the `Fx_Rate_Settings` row lock within 25 s (`SET LOCAL lock_timeout`; the transaction rolls back, nothing is written or audited). Usually a refresh or another change is stuck: retry; if it persists look for a long transaction in `pg_stat_activity` (`wait_event_type = 'Lock'`) and `pg_locks`.
+
 **`VITRINA_BUSY`.** `PUT /admin/vitrina/algorithm` waited 25 s for the settings lock held by a running recompute. Retry; if it persists look for a stuck transaction (`pg_stat_activity`).
 
 ### 11.7 The dev/seed database has an old rate
@@ -801,7 +803,7 @@ The three indexes created with `IF NOT EXISTS` are harmless and can stay.
 
 ### 11.9 `errorCode`s of the epic
 
-- Rate: `FX_RATE_UNAVAILABLE` (503, checkout Pago Movil and `GET /fx/current`), `FX_MANUAL_RATE_REQUIRED` (400), `FX_REFRESH_IN_PROGRESS` (409), `FX_NO_REJECTED_READING` (409), `FX_REJECTED_READING_NOT_ACCEPTABLE` (422).
+- Rate: `FX_RATE_UNAVAILABLE` (503, checkout Pago Movil and `GET /fx/current`), `FX_MANUAL_RATE_REQUIRED` (400), `FX_REFRESH_IN_PROGRESS` (409), `FX_SETTINGS_BUSY` (409, `PUT /admin/fx/settings` or `POST /admin/fx/accept-rejected` waited 25 s for the FX advisory lock / settings row and gave up; Story 19.1, same `lock_timeout` mechanism as `VITRINA_BUSY`: the wait is bounded by the database, so Nginx never shows a 504), `FX_NO_REJECTED_READING` (409), `FX_REJECTED_READING_NOT_ACCEPTABLE` (422).
 - Vitrina: `VITRINA_WEIGHTS_INVALID` (400, weights do not add up to 100), `VITRINA_PARAMS_INVALID` (400), `VITRINA_BUSY` (409), `RECOMPUTE_IN_PROGRESS` (409), `LANDING_BLOCK_INVALID` (400, invalid `mode`/`size`/empty `MANUAL`).
 
 Additive contract note: `PUT /admin/fx/settings` now also returns `hardStale` (boolean); no existing field changed.

@@ -1,6 +1,11 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client.js';
 import { ApiException } from '../common/api-exception.js';
+import {
+  isLockWaitExpired,
+  lockedTxOptions,
+  LockBudget,
+} from '../common/lock-timeout.js';
 import { buildPageMeta } from '../common/pagination.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type {
@@ -34,35 +39,6 @@ const WEIGHT_KEYS = [
   'wInterest',
   'wNovelty',
 ] as const;
-
-/** Slack so the DB-side lock_timeout always fires before Prisma's tx timeout. */
-const TX_SLACK_MS = 5_000;
-
-/**
- * Postgres lock_not_available (SQLSTATE 55P03). With `$queryRaw` + the pg
- * driver adapter Prisma reports P2010 and nests the SQLSTATE in
- * `meta.driverAdapterError.cause.code`; the message also says so.
- */
-const isLockTimeout = (err: unknown): boolean => {
-  if (!(err instanceof Error)) return false;
-  const e = err as { code?: unknown; meta?: unknown; cause?: unknown };
-  if (e.code === '55P03') return true;
-  let meta = '';
-  try {
-    meta = JSON.stringify(e.meta ?? '');
-  } catch {
-    /* unserializable meta: fall through to the message */
-  }
-  return (
-    meta.includes('55P03') ||
-    /55P03|lock timeout/i.test(err.message) ||
-    (e.cause !== undefined && isLockTimeout(e.cause))
-  );
-};
-
-/** Prisma P2028: interactive transaction timed out / could not start. */
-const isTxTimeout = (err: unknown): boolean =>
-  err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2028';
 
 export const toRunSummary = (r: RecomputeRun): VitrinaRunSummaryDto => ({
   runId: r.runId,
@@ -110,10 +86,12 @@ export class AdminVitrinaService {
           // queue its ROLLBACK behind the blocked FOR UPDATE on the same
           // connection and never fire. lockSetting's FOR UPDATE is the only
           // statement here that can wait on another transaction.
-          await tx.$executeRaw`SELECT set_config('lock_timeout', ${`${budget}ms`}, true)`;
+          const lockBudget = new LockBudget(tx, budget);
+          await lockBudget.arm();
           // FOR UPDATE: concurrent PUTs queue here, so each audit's `before` is
           // exactly the previous audit's `after` (a coherent chain).
           const current = await lockSetting(tx);
+          await lockBudget.release();
           const before = toScoringConfig(current);
           const after = {
             ...before,
@@ -169,10 +147,10 @@ export class AdminVitrinaService {
         // than the recompute's TX_TIMEOUT_MS (60 s): Nginx cuts at
         // proxy_read_timeout 60 s, so the admin must get our 409 VITRINA_BUSY
         // (not Nginx's 504) before that. Not Prisma's 5 s default either.
-        { maxWait: budget, timeout: budget + TX_SLACK_MS },
+        lockedTxOptions(budget),
       );
     } catch (err) {
-      if (isTxTimeout(err) || isLockTimeout(err)) {
+      if (isLockWaitExpired(err)) {
         throw new ApiException(
           HttpStatus.CONFLICT,
           'VITRINA_BUSY',

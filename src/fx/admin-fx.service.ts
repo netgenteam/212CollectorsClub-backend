@@ -3,6 +3,11 @@ import { Prisma } from '../generated/prisma/client.js';
 import type { FxRateSource } from '../generated/prisma/client.js';
 import { SINGLETON_FX_RATE_ID } from '../checkout/fx-rate.constants.js';
 import { ApiException } from '../common/api-exception.js';
+import {
+  isLockWaitExpired,
+  lockedTxOptions,
+  LockBudget,
+} from '../common/lock-timeout.js';
 import { buildPageMeta } from '../common/pagination.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type {
@@ -24,6 +29,13 @@ import {
 } from './fx-refresh.service.js';
 import { evaluateReading } from './fx-validation.js';
 import type { FxRejectReason } from './fx-validation.js';
+
+/**
+ * Story 19.1 (QA 18.12 follow-up): max wait of PUT /admin/fx/settings and
+ * POST /admin/fx/accept-rejected for the FX advisory lock / settings row lock.
+ * Enforced by the database (`lock_timeout`), below Nginx's 60 s.
+ */
+export const FX_LOCK_BUDGET_MS = 25_000;
 
 const LIVE_SOURCES = ['BCV_USD', 'BCV_EUR', 'PARALELO_USD'] as const;
 const HOUR_MS = 3600 * 1000;
@@ -85,9 +97,10 @@ export class AdminFxService {
       }
     }
 
-    const outcome = await this.prisma.$transaction(async (tx) => {
+    const outcome = await this.withLockBudget(async (tx, budget) => {
       // Same lock as FxRefreshService (blocking here: the cron just waits us).
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('fx:refresh', 0))`;
+      await budget.arm(); // the row lock gets only what is left of the budget
       const rows = await tx.$queryRaw<
         {
           source: FxRateSource;
@@ -96,6 +109,7 @@ export class AdminFxService {
       >`
         SELECT "source", "maxVariationPct" FROM "Fx_Rate_Settings"
         WHERE "id" = ${SINGLETON_FX_RATE_ID} FOR UPDATE`;
+      await budget.release();
       const current = rows[0];
       if (!current) this.unavailable();
       const now = new Date();
@@ -287,10 +301,11 @@ export class AdminFxService {
   }
 
   async acceptRejected(adminUserId: string): Promise<FxStatusResponseDto> {
-    await this.prisma.$transaction(async (tx) => {
+    await this.withLockBudget(async (tx, budget) => {
       const rows = await tx.$queryRaw<LockedRow[]>`
         SELECT "source", "rejectedReading" FROM "Fx_Rate_Settings"
         WHERE "id" = ${SINGLETON_FX_RATE_ID} FOR UPDATE`;
+      await budget.release();
       const row = rows[0];
       if (!row) this.unavailable();
       const rr = row.rejectedReading as {
@@ -395,6 +410,32 @@ export class AdminFxService {
       })),
       meta: buildPageMeta(q.page, q.limit, total),
     };
+  }
+
+  /**
+   * Runs `run` in a transaction whose lock waits (advisory lock, FOR UPDATE)
+   * are bounded in the database; an expired wait is a 409 `FX_SETTINGS_BUSY`,
+   * never a hang or a 500.
+   */
+  private async withLockBudget<T>(
+    run: (tx: Prisma.TransactionClient, budget: LockBudget) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const budget = new LockBudget(tx, FX_LOCK_BUDGET_MS);
+        await budget.arm();
+        return run(tx, budget);
+      }, lockedTxOptions(FX_LOCK_BUDGET_MS));
+    } catch (err) {
+      if (isLockWaitExpired(err)) {
+        throw new ApiException(
+          HttpStatus.CONFLICT,
+          'FX_SETTINGS_BUSY',
+          'The FX settings are locked by another change or refresh; try again in a moment.',
+        );
+      }
+      throw err;
+    }
   }
 
   private async loadSetting() {

@@ -1325,3 +1325,114 @@ model ProductScore {
   @@index([runId, rank])
   @@map("Product_Scores")
 }
+
+// ─── Story 19.1 (AD-88): documentos legales ────────────────────────────────
+// Versiones y bitácora son INMUTABLES en BD (triggers en la migración
+// 20261101300000_add_legal_documents): ningún servicio expone update/delete.
+
+enum LegalDocKind {
+  TERMS
+  PRIVACY
+  COOKIES
+  SHIPPING
+  RETURNS
+  LEGAL_NOTICE
+}
+
+/// FR-108: the six audited actions.
+enum LegalAuditAction {
+  DRAFT_CREATED
+  DRAFT_EDITED
+  PUBLISHED
+  DRAFT_DISCARDED
+  RESTORED
+  IDENTITY_UPDATED
+}
+
+/// The six fixed documents are inserted by the migration (ON CONFLICT DO NOTHING).
+/// Sandbox documents (`isSandbox`, slug `e2e-*`) are created by test helpers
+/// through SQL only; DB triggers forbid changing slug/isSandbox and deleting
+/// real documents. DB CHECKs: slug IN the six slugs unless sandbox.
+model LegalDocument {
+  id                 String       @id @default(uuid()) @db.Uuid
+  slug               String       @unique @db.VarChar(60)
+  title              String       @db.VarChar(120)
+  kind               LegalDocKind
+  requiresAcceptance Boolean
+  isSandbox          Boolean      @default(false)
+  createdAt          DateTime     @default(now()) @db.Timestamptz(3)
+
+  versions LegalDocumentVersion[]
+  draft    LegalDraft?
+  audits   LegalAuditLog[]
+
+  @@map("Legal_Documents")
+}
+
+/// Immutable once inserted. `publishedById`/`publishedByEmail` are snapshots
+/// WITHOUT FK (an FK SetNull would be an UPDATE blocked by the trigger).
+model LegalDocumentVersion {
+  id                  String        @id @default(uuid()) @db.Uuid
+  documentId          String        @db.Uuid
+  document            LegalDocument @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  versionNumber       Int
+  bodyMd              String
+  changeSummary       String
+  isSubstantial       Boolean
+  effectiveFrom       DateTime      @db.Timestamptz(3)
+  publishedAt         DateTime      @default(now()) @db.Timestamptz(3)
+  publishedById       String?       @db.Uuid
+  publishedByEmail    String?
+  restoredFromVersion Int?
+
+  @@unique([documentId, versionNumber])
+  @@index([documentId, effectiveFrom])
+  @@map("Legal_Document_Versions")
+}
+
+/// One draft per document; deleted on publish/discard.
+model LegalDraft {
+  id                  String        @id @default(uuid()) @db.Uuid
+  documentId          String        @unique @db.Uuid
+  document            LegalDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  bodyMd              String
+  /// Optimistic concurrency control (AD-90).
+  revision            Int           @default(1)
+  baseVersionNumber   Int?
+  restoredFromVersion Int?
+  updatedAt           DateTime      @default(now()) @db.Timestamptz(3)
+  updatedById         String?       @db.Uuid
+  updatedByEmail      String?
+
+  @@map("Legal_Drafts")
+}
+
+/// Append-only (triggers). `meta` never holds the document body (<= 2 KB by CHECK).
+model LegalAuditLog {
+  id            String           @id @default(uuid()) @db.Uuid
+  documentId    String?          @db.Uuid
+  document      LegalDocument?   @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  action        LegalAuditAction
+  adminUserId   String?          @db.Uuid
+  adminEmail    String?
+  versionNumber Int?
+  meta          Json             @default("{}")
+  createdAt     DateTime         @default(now()) @db.Timestamptz(3)
+
+  @@index([documentId, createdAt])
+  @@map("Legal_Audit_Logs")
+}
+
+/// Singleton `id = 'default'`, inserted empty by the migration (FR-111).
+model SellerIdentitySetting {
+  id            String   @id @db.VarChar(32)
+  legalName     String?
+  rif           String?
+  fiscalAddress String?
+  contactEmail  String?
+  phone         String?
+  updatedAt     DateTime @updatedAt @db.Timestamptz(3)
+  updatedById   String?  @db.Uuid
+
+  @@map("Seller_Identity_Settings")
+}

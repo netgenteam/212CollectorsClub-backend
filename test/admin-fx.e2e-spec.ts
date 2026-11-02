@@ -762,9 +762,14 @@ describe('Admin FX API (e2e, Story 18.2)', () => {
     expect(p(all[2]).post.responses['409'].description).toBe(
       'FX_REFRESH_IN_PROGRESS',
     );
-    expect(p(all[3]).post.responses['409'].description).toBe(
+    expect(p(all[3]).post.responses['409'].description).toContain(
       'FX_NO_REJECTED_READING',
     );
+    // Story 19.1: bounded lock waits.
+    expect(p(all[3]).post.responses['409'].description).toContain(
+      'FX_SETTINGS_BUSY',
+    );
+    expect(put_.responses['409'].description).toContain('FX_SETTINGS_BUSY');
     expect(p(all[4]).get.parameters?.map((x) => x.name)).toEqual(
       expect.arrayContaining(['source', 'limit']),
     );

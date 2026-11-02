@@ -150,6 +150,26 @@ describe('PUT /admin/vitrina/algorithm lock budget (Story 18.12)', () => {
     expect(waiting[0].n).toBe(0);
   }, 90_000);
 
+  it('two concurrent PUTs behind the same lock BOTH answer 409 within the budget (waiters do not compound)', async () => {
+    const auditsBefore = await audits();
+    await holdLock();
+    const t0 = Date.now();
+    const timed = async (r: request.Test) => {
+      const res = await r;
+      return { status: res.status, ms: Date.now() - t0 };
+    };
+    const [a, b] = await Promise.all([timed(put()), timed(put())]);
+    console.log(
+      `[19.1] vitrina 2 concurrent PUTs: ${a.status}/${a.ms} ms, ${b.status}/${b.ms} ms`,
+    );
+    expect([a.status, b.status]).toEqual([409, 409]);
+    for (const r of [a, b]) {
+      expect(r.ms).toBeGreaterThanOrEqual(PUT_LOCK_BUDGET_MS - 500);
+      expect(r.ms).toBeLessThanOrEqual(PUT_LOCK_BUDGET_MS + 1_500);
+    }
+    expect(await audits()).toBe(auditsBefore);
+  }, 90_000);
+
   it('lock released after 3 s: the PUT waits and answers 200 with its audit', async () => {
     const auditsBefore = await audits();
     await holdLock();

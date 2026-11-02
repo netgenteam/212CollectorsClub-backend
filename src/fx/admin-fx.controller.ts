@@ -76,6 +76,11 @@ export class AdminFxController {
     status: HttpStatus.SERVICE_UNAVAILABLE,
     description: 'FX_RATE_UNAVAILABLE (setting row missing)',
   })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description:
+      'FX_SETTINGS_BUSY: the FX advisory lock / settings row stayed locked by another change or refresh for 25 s (database lock_timeout); retry.',
+  })
   updateSettings(
     @Body(strictBody(UpdateFxSettingsDto))
     dto: Readonly<UpdateFxSettingsDto>,
@@ -121,7 +126,8 @@ export class AdminFxController {
   @ApiResponse(UNAUTH)
   @ApiResponse({
     status: HttpStatus.CONFLICT,
-    description: 'FX_NO_REJECTED_READING',
+    description:
+      'FX_NO_REJECTED_READING | FX_SETTINGS_BUSY (the settings row stayed locked for 25 s; retry)',
   })
   @ApiResponse({
     status: HttpStatus.UNPROCESSABLE_ENTITY,

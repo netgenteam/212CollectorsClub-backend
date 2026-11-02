@@ -23,6 +23,7 @@ import { AdminTcgModule } from './admin-tcg/admin-tcg.module.js';
 import { CustomerAddressesModule } from './customer-addresses/customer-addresses.module.js';
 import { ShippingModule } from './shipping/shipping.module.js';
 import { VitrinaModule } from './vitrina/vitrina.module.js';
+import { LegalModule } from './legal/legal.module.js';
 import { WishlistModule } from './wishlist/wishlist.module.js';
 
 @Module({
@@ -77,6 +78,8 @@ import { WishlistModule } from './wishlist/wishlist.module.js';
     FxModule,
     // Story 18.7 (AD-82): view/cart-add interest signals.
     VitrinaModule,
+    // Story 19.1 (AD-88..91): legal documents, safe Markdown, public read API.
+    LegalModule,
   ],
   controllers: [AppController],
   providers: [AppService],
