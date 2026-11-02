@@ -22,7 +22,7 @@ export type RecomputeOutcome =
 /** Runs kept after a successful recompute (AD-81). */
 export const VITRINA_RUNS_KEPT = 3;
 /** Interactive tx budget: the default 5 s is too tight for large catalogs. */
-const TX_TIMEOUT_MS = 60_000;
+export const TX_TIMEOUT_MS = 60_000;
 
 /**
  * Story 18.8 (AD-81, AD-84, FR-99): turns the pure `computeRanking` into

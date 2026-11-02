@@ -1,9 +1,17 @@
-import { HttpStatus, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { isISO8601 } from 'class-validator';
 import { ApiException } from '../common/api-exception.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { CatalogService } from '../catalog/catalog.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { VitrinaSelectionService } from '../vitrina/vitrina-selection.service.js';
+import {
+  VITRINA_BLOCK_MODES,
+  VITRINA_SIZE_DEFAULT,
+  VITRINA_SIZE_MAX,
+  VITRINA_SIZE_MIN,
+  type VitrinaBlockMode,
+} from '../vitrina/vitrina.types.js';
 import { LandingConfigEntryResponseDto } from './dto/landing-config-entry-response.dto.js';
 import { UpdateLandingBannerDto } from './dto/update-landing-banner.dto.js';
 import { UpdateLandingDrop212Dto } from './dto/update-landing-drop212.dto.js';
@@ -60,9 +68,12 @@ const ENTRY_SELECT = {
  */
 @Injectable()
 export class LandingContentService {
+  private readonly logger = new Logger(LandingContentService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly catalog: CatalogService,
+    private readonly selection: VitrinaSelectionService,
   ) {}
 
   async upsertText(
@@ -331,9 +342,17 @@ export class LandingContentService {
   }
 
   /**
-   * Story 16.2 (AD-63): adds `products` (the in-stock, active products of
-   * `productIds`, order kept; missing ones are skipped silently) to a
-   * vitrina value. Shared by the public GET and `GET draft`.
+   * Story 16.2 (AD-63) + Story 18.9 (AD-85): adds `products` to a vitrina
+   * value. Shared by the public GET and `GET draft`.
+   *
+   * - MANUAL (or no `mode`, the pre-18.9 shape): the in-stock, active products
+   *   of `productIds`, order kept; missing ones skipped. Output is exactly the
+   *   pre-18.9 payload (no `vitrina` key).
+   * - AUTO / MIXED: `VitrinaSelectionService.resolve` over the persisted
+   *   ranking (never recomputed here) + live availability; adds
+   *   `vitrina: { mode, size, computedAt, items: [{productId, source, reason}] }`.
+   *   No run / empty ranking => only the pinned ones (MIXED) or `[]` (AUTO);
+   *   never throws (a resolver failure degrades to the pinned-only list).
    */
   async expandVitrina(
     value: Record<string, unknown>,
@@ -343,9 +362,63 @@ export class LandingContentService {
           (id): id is string => typeof id === 'string',
         )
       : [];
+    const mode = readVitrinaMode(value.mode);
+    if (mode === 'MANUAL') return this.expandManual(value, ids);
+
+    const size = readVitrinaSize(value.size);
+    const pinned = mode === 'MIXED' ? ids : [];
+    try {
+      const r = await this.selection.resolve({ mode, size, pinned });
+      return {
+        ...value,
+        products: r.items.map((i) => i.product),
+        vitrina: {
+          mode,
+          size,
+          computedAt: r.computedAt ? r.computedAt.toISOString() : null,
+          items: r.items.map((i) => ({
+            productId: i.productId,
+            source: i.source,
+            reason: i.reason,
+          })),
+        },
+      };
+    } catch (err) {
+      this.logger.warn(
+        `Vitrina ${mode} resolution failed (${
+          err instanceof Error ? err.constructor.name : 'error'
+        }); falling back to pinned products.`,
+      );
+      const base = await this.expandManual(value, pinned);
+      return {
+        ...base,
+        vitrina: { mode, size, computedAt: null, items: [] },
+      };
+    }
+  }
+
+  private async expandManual(
+    value: Record<string, unknown>,
+    ids: string[],
+  ): Promise<Record<string, unknown>> {
     const items = await this.catalog.findListItemsByIds(ids);
     return { ...value, products: items.filter((p) => p.inStock) };
   }
+}
+
+/** Absent / null / unknown `mode` (pre-18.9 content) is MANUAL. */
+function readVitrinaMode(raw: unknown): VitrinaBlockMode {
+  return (VITRINA_BLOCK_MODES as readonly unknown[]).includes(raw)
+    ? (raw as VitrinaBlockMode)
+    : 'MANUAL';
+}
+
+function readVitrinaSize(raw: unknown): number {
+  return Number.isInteger(raw) &&
+    (raw as number) >= VITRINA_SIZE_MIN &&
+    (raw as number) <= VITRINA_SIZE_MAX
+    ? (raw as number)
+    : VITRINA_SIZE_DEFAULT;
 }
 
 function notEditableException(section: string, key: string): ApiException {

@@ -77,6 +77,11 @@ export class AdminVitrinaController {
     description:
       'VITRINA_WEIGHTS_INVALID (weights do not add up to 100) | VITRINA_PARAMS_INVALID (windowDays < halfLifeDays) | validation errors (ranges, unknown fields)',
   })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description:
+      'VITRINA_BUSY (the settings row stayed locked behind a long recompute; retry)',
+  })
   @ApiResponse(UNAUTH)
   updateAlgorithm(
     @Body(strictBody(UpdateVitrinaAlgorithmDto))

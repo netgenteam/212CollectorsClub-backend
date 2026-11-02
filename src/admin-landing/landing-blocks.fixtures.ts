@@ -42,6 +42,8 @@ export function validBlock(
         titleLines: [line],
         ctaLabel: 'Ver todo',
         productIds,
+        // Story 18.9: an empty MANUAL vitrina is invalid; AUTO needs no ids.
+        ...(productIds.length === 0 ? { mode: 'AUTO' } : {}),
       };
     case 'drop212':
       return {

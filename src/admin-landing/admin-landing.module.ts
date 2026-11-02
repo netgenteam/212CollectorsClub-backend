@@ -4,6 +4,7 @@ import { PassportModule } from '@nestjs/passport';
 import { MulterModule } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { CatalogModule } from '../catalog/catalog.module.js';
+import { VitrinaModule } from '../vitrina/vitrina.module.js';
 import { AdminLandingImagesController } from './admin-landing-images.controller.js';
 import { LandingImagesService } from './landing-images.service.js';
 import { AdminLandingContentController } from './admin-landing-content.controller.js';
@@ -32,6 +33,7 @@ import { LandingContentService } from './landing-content.service.js';
     PassportModule.register({ defaultStrategy: 'admin-jwt' }),
     // Story 16.2 (AD-63): vitrina expansion uses CatalogService.
     CatalogModule,
+    VitrinaModule,
     // Story 16.2 (AD-64): in-memory multipart, 1 file, size from env.
     MulterModule.registerAsync({
       inject: [ConfigService],

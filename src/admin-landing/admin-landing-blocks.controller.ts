@@ -14,6 +14,7 @@ import {
 import {
   ApiBearerAuth,
   ApiBody,
+  ApiExtraModels,
   ApiOperation,
   ApiParam,
   ApiResponse,
@@ -26,6 +27,8 @@ import {
   LandingBlockListResponseDto,
   LandingPublishAllResponseDto,
 } from './dto/landing-block-response.dto.js';
+import { SegmentDto } from './dto/blocks/common.dto.js';
+import { VitrinaBlockDto } from './dto/blocks/home-blocks.dto.js';
 import { LANDING_BLOCKS } from './landing-blocks.constants.js';
 import { LandingBlocksService } from './landing-blocks.service.js';
 
@@ -54,6 +57,9 @@ const UNKNOWN_BLOCK = {
  * Story 16.2 adds `GET draft` (effective values, vitrina expanded).
  */
 @ApiTags('admin-landing')
+// Story 18.9: documents the vitrina block shape (mode/size) even though the
+// body is validated imperatively per block.
+@ApiExtraModels(SegmentDto, VitrinaBlockDto)
 @ApiBearerAuth('admin-jwt')
 @UseGuards(AdminAuthGuard)
 @Controller('admin/landing-content')
@@ -108,7 +114,7 @@ export class AdminLandingBlocksController {
   @ApiBody({
     type: Object,
     description:
-      'Block value: ticker {items}, hero {panels}, heroScene {packImageUrl, cardImageUrls}, manifesto {items}, vitrina {eyebrow, titleLines, ctaLabel, productIds}, drop212 {eyebrow, caption, targetDate, tiers}, simulator {eyebrow, titleLines, description, ctaLabel}.',
+      'Block value: ticker {items}, hero {panels}, heroScene {packImageUrl, cardImageUrls}, manifesto {items}, vitrina {eyebrow, titleLines, ctaLabel, productIds, mode?: MANUAL|AUTO|MIXED, size?: 4..12 — see schema VitrinaBlockDto}, drop212 {eyebrow, caption, targetDate, tiers}, simulator {eyebrow, titleLines, description, ctaLabel}.',
   })
   @ApiResponse({ status: HttpStatus.OK, type: LandingBlockDetailDto })
   @ApiResponse({

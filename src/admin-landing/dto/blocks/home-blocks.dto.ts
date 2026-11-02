@@ -11,11 +11,25 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  IsInt,
   IsUUID,
   Matches,
+  Max,
   MaxLength,
+  Min,
+  Validate,
   ValidateNested,
+  ValidatorConstraint,
+  type ValidationArguments,
+  type ValidatorConstraintInterface,
 } from 'class-validator';
+import {
+  VITRINA_BLOCK_MODES,
+  VITRINA_SIZE_DEFAULT,
+  VITRINA_SIZE_MAX,
+  VITRINA_SIZE_MIN,
+  type VitrinaBlockMode,
+} from '../../../vitrina/vitrina.types.js';
 import {
   LINK_HREF_PATTERN,
   LinkDto,
@@ -158,6 +172,22 @@ export class ManifestoBlockDto {
 
 // ---- vitrina --------------------------------------------------------------
 
+/**
+ * Story 18.9 (AD-85): `productIds` may be empty only when `mode` is AUTO or
+ * MIXED (a MANUAL vitrina with no products has nothing to show).
+ */
+@ValidatorConstraint({ name: 'vitrinaPinnedNotEmpty', async: false })
+class VitrinaPinnedNotEmpty implements ValidatorConstraintInterface {
+  validate(value: unknown, args: ValidationArguments): boolean {
+    if (!Array.isArray(value) || value.length > 0) return true;
+    const mode = (args.object as { mode?: unknown }).mode;
+    return mode === 'AUTO' || mode === 'MIXED';
+  }
+  defaultMessage(): string {
+    return 'productIds must not be empty when mode is MANUAL';
+  }
+}
+
 export class VitrinaBlockDto {
   @ApiProperty({ minLength: 1, maxLength: 60 })
   @IsString()
@@ -188,13 +218,38 @@ export class VitrinaBlockDto {
   @ApiProperty({
     type: [String],
     maxItems: 12,
-    description: 'Product UUIDs, no repeats.',
+    description:
+      'Product UUIDs, no repeats. In MANUAL they are the whole vitrina (min 1); in MIXED they are the pinned products shown first (may be empty); ignored in AUTO (may be empty).',
   })
   @IsArray()
   @ArrayMaxSize(12)
   @ArrayUnique()
   @IsUUID('all', { each: true })
+  @Validate(VitrinaPinnedNotEmpty)
   productIds: string[];
+
+  @ApiPropertyOptional({
+    enum: VITRINA_BLOCK_MODES,
+    default: 'MANUAL',
+    description:
+      'MANUAL: exactly productIds. AUTO: ranking of the current run. MIXED: pinned productIds first, then ranking until size. Absent = MANUAL.',
+  })
+  @IsOptional()
+  @IsIn(VITRINA_BLOCK_MODES)
+  mode?: VitrinaBlockMode;
+
+  @ApiPropertyOptional({
+    type: Number,
+    minimum: VITRINA_SIZE_MIN,
+    maximum: VITRINA_SIZE_MAX,
+    default: VITRINA_SIZE_DEFAULT,
+    description: 'Total slots for AUTO/MIXED. Ignored in MANUAL.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(VITRINA_SIZE_MIN)
+  @Max(VITRINA_SIZE_MAX)
+  size?: number;
 }
 
 // ---- drop212 --------------------------------------------------------------

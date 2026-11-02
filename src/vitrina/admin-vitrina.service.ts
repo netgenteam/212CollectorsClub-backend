@@ -20,7 +20,10 @@ import {
   VITRINA_SETTING_ID,
 } from './vitrina-settings.js';
 import type { SettingRow } from './vitrina-settings.js';
-import { VitrinaScoringService } from './vitrina-scoring.service.js';
+import {
+  TX_TIMEOUT_MS,
+  VitrinaScoringService,
+} from './vitrina-scoring.service.js';
 import type { RecomputeRun } from './vitrina-scoring.service.js';
 import { VitrinaSelectionService } from './vitrina-selection.service.js';
 
@@ -31,6 +34,10 @@ const WEIGHT_KEYS = [
   'wInterest',
   'wNovelty',
 ] as const;
+
+/** Prisma P2028: interactive transaction timed out / could not start. */
+const isTxTimeout = (err: unknown): boolean =>
+  err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2028';
 
 export const toRunSummary = (r: RecomputeRun): VitrinaRunSummaryDto => ({
   runId: r.runId,
@@ -70,58 +77,77 @@ export class AdminVitrinaService {
       );
     }
 
-    await this.prisma.$transaction(async (tx) => {
-      // FOR UPDATE: concurrent PUTs queue here, so each audit's `before` is
-      // exactly the previous audit's `after` (a coherent chain).
-      const current = await lockSetting(tx);
-      const before = toScoringConfig(current);
-      const after = {
-        ...before,
-        wSales: dto.wSales,
-        wRevenue: dto.wRevenue,
-        wVelocity: dto.wVelocity,
-        wInterest: dto.wInterest,
-        wNovelty: dto.wNovelty,
-        halfLifeDays: dto.halfLifeDays ?? before.halfLifeDays,
-        windowDays: dto.windowDays ?? before.windowDays,
-        noveltyDays: dto.noveltyDays ?? before.noveltyDays,
-        maxPerFranchise: dto.maxPerFranchise ?? before.maxPerFranchise,
-        mmrLambda: dto.mmrLambda ?? before.mmrLambda,
-        priorM: dto.priorM ?? before.priorM,
-      };
-      if (after.windowDays < after.halfLifeDays) {
+    try {
+      await this.prisma.$transaction(
+        async (tx) => {
+          // FOR UPDATE: concurrent PUTs queue here, so each audit's `before` is
+          // exactly the previous audit's `after` (a coherent chain).
+          const current = await lockSetting(tx);
+          const before = toScoringConfig(current);
+          const after = {
+            ...before,
+            wSales: dto.wSales,
+            wRevenue: dto.wRevenue,
+            wVelocity: dto.wVelocity,
+            wInterest: dto.wInterest,
+            wNovelty: dto.wNovelty,
+            halfLifeDays: dto.halfLifeDays ?? before.halfLifeDays,
+            windowDays: dto.windowDays ?? before.windowDays,
+            noveltyDays: dto.noveltyDays ?? before.noveltyDays,
+            maxPerFranchise: dto.maxPerFranchise ?? before.maxPerFranchise,
+            mmrLambda: dto.mmrLambda ?? before.mmrLambda,
+            priorM: dto.priorM ?? before.priorM,
+          };
+          if (after.windowDays < after.halfLifeDays) {
+            throw new ApiException(
+              HttpStatus.BAD_REQUEST,
+              'VITRINA_PARAMS_INVALID',
+              'windowDays must be greater than or equal to halfLifeDays.',
+              {
+                windowDays: after.windowDays,
+                halfLifeDays: after.halfLifeDays,
+              },
+            );
+          }
+          await tx.vitrinaAlgorithmSetting.update({
+            where: { id: VITRINA_SETTING_ID },
+            data: {
+              wSales: after.wSales,
+              wRevenue: after.wRevenue,
+              wVelocity: after.wVelocity,
+              wInterest: after.wInterest,
+              wNovelty: after.wNovelty,
+              halfLifeDays: after.halfLifeDays,
+              windowDays: after.windowDays,
+              noveltyDays: after.noveltyDays,
+              maxPerFranchise: after.maxPerFranchise,
+              mmrLambda: new Prisma.Decimal(after.mmrLambda),
+              priorM: new Prisma.Decimal(after.priorM),
+              updatedById: adminUserId,
+            },
+          });
+          await tx.vitrinaAlgorithmAudit.create({
+            data: {
+              adminUserId,
+              before: before as unknown as Prisma.InputJsonObject,
+              after: after,
+            },
+          });
+        },
+        // FOR UPDATE can queue behind a long recompute (up to TX_TIMEOUT_MS):
+        // same budget as the recompute, not Prisma's 5 s default.
+        { maxWait: TX_TIMEOUT_MS, timeout: TX_TIMEOUT_MS },
+      );
+    } catch (err) {
+      if (isTxTimeout(err)) {
         throw new ApiException(
-          HttpStatus.BAD_REQUEST,
-          'VITRINA_PARAMS_INVALID',
-          'windowDays must be greater than or equal to halfLifeDays.',
-          { windowDays: after.windowDays, halfLifeDays: after.halfLifeDays },
+          HttpStatus.CONFLICT,
+          'VITRINA_BUSY',
+          'The algorithm settings are locked by a running recompute; try again in a moment.',
         );
       }
-      await tx.vitrinaAlgorithmSetting.update({
-        where: { id: VITRINA_SETTING_ID },
-        data: {
-          wSales: after.wSales,
-          wRevenue: after.wRevenue,
-          wVelocity: after.wVelocity,
-          wInterest: after.wInterest,
-          wNovelty: after.wNovelty,
-          halfLifeDays: after.halfLifeDays,
-          windowDays: after.windowDays,
-          noveltyDays: after.noveltyDays,
-          maxPerFranchise: after.maxPerFranchise,
-          mmrLambda: new Prisma.Decimal(after.mmrLambda),
-          priorM: new Prisma.Decimal(after.priorM),
-          updatedById: adminUserId,
-        },
-      });
-      await tx.vitrinaAlgorithmAudit.create({
-        data: {
-          adminUserId,
-          before: before as unknown as Prisma.InputJsonObject,
-          after: after,
-        },
-      });
-    });
+      throw err;
+    }
 
     // Optional recompute AFTER the save has committed: it can neither undo
     // the settings nor extend the PUT lock.
@@ -180,7 +206,12 @@ export class AdminVitrinaService {
       runMode: r.runMode,
       runId: r.runId,
       items: r.items.map((i) => ({
-        ...i,
+        productId: i.productId,
+        name: i.name,
+        source: i.source,
+        rank: i.rank,
+        score: i.score,
+        reason: i.reason,
         components: i.components as Record<string, unknown> | null,
       })),
     };

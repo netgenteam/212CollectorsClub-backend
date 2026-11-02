@@ -110,6 +110,56 @@ describe('validateLandingBlock', () => {
     await errorsOf('vitrina', validBlock('vitrina', ['nope']));
   });
 
+  describe('vitrina mode/size (Story 18.9)', () => {
+    const id = '0b5d6a3e-1c1e-4b57-9d0a-2a8f2c7e9a10';
+    const v = (extra: Record<string, unknown>, ids: string[] = [id]) => ({
+      ...validBlock('vitrina', ids),
+      ...extra,
+    });
+    const strip = (o: Record<string, unknown>) => {
+      delete o.mode;
+      return o;
+    };
+
+    it('accepts the legacy shape (no mode/size) and every mode with valid size', async () => {
+      await expect(
+        validateLandingBlock('vitrina', v({})),
+      ).resolves.toBeDefined();
+      for (const mode of ['MANUAL', 'AUTO', 'MIXED'])
+        for (const size of [4, 8, 12])
+          await expect(
+            validateLandingBlock('vitrina', v({ mode, size })),
+          ).resolves.toBeDefined();
+    });
+
+    it('rejects unknown mode and out-of-range / non-integer size', async () => {
+      expect(
+        (await errorsOf('vitrina', v({ mode: 'RANDOM' }))).map((e) => e.path),
+      ).toContain('mode');
+      for (const size of [3, 13, 8.5, '8', 0, -1])
+        expect(
+          (await errorsOf('vitrina', v({ size }))).map((e) => e.path),
+        ).toContain('size');
+    });
+
+    it('empty productIds only when mode is AUTO or MIXED', async () => {
+      expect(
+        (await errorsOf('vitrina', strip(v({}, [])))).map((e) => e.path),
+      ).toContain('productIds');
+      expect(
+        (await errorsOf('vitrina', v({ mode: 'MANUAL' }, []))).map(
+          (e) => e.path,
+        ),
+      ).toContain('productIds');
+      await expect(
+        validateLandingBlock('vitrina', v({ mode: 'AUTO' }, [])),
+      ).resolves.toBeDefined();
+      await expect(
+        validateLandingBlock('vitrina', v({ mode: 'MIXED' }, [])),
+      ).resolves.toBeDefined();
+    });
+  });
+
   it('validates drop212 date, null date, duplicate tier ids and tier limit', async () => {
     const base = validBlock('drop212') as { tiers: Record<string, unknown>[] };
     await errorsOf('drop212', { ...base, targetDate: 'mañana' });

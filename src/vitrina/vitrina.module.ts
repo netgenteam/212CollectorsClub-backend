@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { PassportModule } from '@nestjs/passport';
+import { CatalogModule } from '../catalog/catalog.module.js';
 import { AdminVitrinaController } from './admin-vitrina.controller.js';
 import { AdminVitrinaService } from './admin-vitrina.service.js';
 import { ProductSignalsService } from './product-signals.service.js';
@@ -15,7 +16,10 @@ import { VitrinaSelectionService } from './vitrina-selection.service.js';
  * cron and admin. PrismaService is global.
  */
 @Module({
-  imports: [PassportModule.register({ defaultStrategy: 'admin-jwt' })],
+  imports: [
+    PassportModule.register({ defaultStrategy: 'admin-jwt' }),
+    CatalogModule,
+  ],
   controllers: [ProductViewController, AdminVitrinaController],
   providers: [
     ProductSignalsService,

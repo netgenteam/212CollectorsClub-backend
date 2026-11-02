@@ -6,6 +6,13 @@
 
 export type VitrinaMode = 'RANKED' | 'FALLBACK';
 
+/** Story 18.9 (AD-85): how the Home `vitrina` block picks its products. */
+export const VITRINA_BLOCK_MODES = ['MANUAL', 'AUTO', 'MIXED'] as const;
+export type VitrinaBlockMode = (typeof VITRINA_BLOCK_MODES)[number];
+export const VITRINA_SIZE_MIN = 4;
+export const VITRINA_SIZE_MAX = 12;
+export const VITRINA_SIZE_DEFAULT = 8;
+
 export type VitrinaReason =
   'TOP_SALES' | 'TRENDING' | 'NEW_WITH_TRACTION' | 'WISHLIST_FAVORITE' | 'NEW';
 

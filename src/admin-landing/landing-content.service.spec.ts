@@ -1,3 +1,4 @@
+import { VitrinaSelectionService } from '../vitrina/vitrina-selection.service.js';
 import { Test, TestingModule } from '@nestjs/testing';
 import { LandingContentService } from './landing-content.service.js';
 import { CatalogService } from '../catalog/catalog.service.js';
@@ -21,7 +22,12 @@ describe('LandingContentService', () => {
     };
   };
 
+  const catalog = { findListItemsByIds: vi.fn() };
+  const selection = { resolve: vi.fn() };
+
   beforeEach(async () => {
+    catalog.findListItemsByIds.mockReset();
+    selection.resolve.mockReset();
     prisma = {
       landingConfigEntry: {
         upsert: vi.fn(),
@@ -33,7 +39,8 @@ describe('LandingContentService', () => {
       providers: [
         LandingContentService,
         { provide: PrismaService, useValue: prisma },
-        { provide: CatalogService, useValue: { findListItemsByIds: vi.fn() } },
+        { provide: CatalogService, useValue: catalog },
+        { provide: VitrinaSelectionService, useValue: selection },
       ],
     }).compile();
 
@@ -516,6 +523,95 @@ describe('LandingContentService', () => {
       );
       expect(result.texts).toBeDefined();
       expect(result.drop212).toBeDefined();
+    });
+  });
+
+  describe('expandVitrina (Story 18.9)', () => {
+    const A = '00000000-0000-4000-8000-00000000000a';
+    const B = '00000000-0000-4000-8000-00000000000b';
+    const prod = (id: string, inStock = true) => ({ id, name: id, inStock });
+    const base = {
+      eyebrow: 'V',
+      ctaLabel: 'Ver',
+      titleLines: [],
+      productIds: [A, B],
+    };
+
+    it.each([
+      ['no mode (pre-18.9 content)', { ...base }],
+      ['explicit MANUAL (size ignored)', { ...base, mode: 'MANUAL', size: 5 }],
+      ['unknown mode', { ...base, mode: 'WHATEVER' }],
+      ['null mode', { ...base, mode: null }],
+    ])(
+      '%s behaves as legacy MANUAL: no resolver, no vitrina key',
+      async (_n, value) => {
+        catalog.findListItemsByIds.mockResolvedValue([prod(A), prod(B, false)]);
+        const out = await service.expandVitrina(value);
+        expect(selection.resolve).not.toHaveBeenCalled();
+        expect(catalog.findListItemsByIds).toHaveBeenCalledWith([A, B]);
+        expect(out).toStrictEqual({ ...value, products: [prod(A)] });
+        expect('vitrina' in out).toBe(false);
+      },
+    );
+
+    it('AUTO ignores productIds and exposes vitrina meta', async () => {
+      const computedAt = new Date('2026-10-01T00:00:00.000Z');
+      selection.resolve.mockResolvedValue({
+        computedAt,
+        items: [
+          {
+            productId: B,
+            source: 'auto',
+            reason: 'TOP_SALES',
+            product: prod(B),
+          },
+        ],
+      });
+      const out = await service.expandVitrina({
+        ...base,
+        mode: 'AUTO',
+        size: 6,
+      });
+      expect(selection.resolve).toHaveBeenCalledWith({
+        mode: 'AUTO',
+        size: 6,
+        pinned: [],
+      });
+      expect(out.products).toEqual([prod(B)]);
+      expect(out.vitrina).toEqual({
+        mode: 'AUTO',
+        size: 6,
+        computedAt: computedAt.toISOString(),
+        items: [{ productId: B, source: 'auto', reason: 'TOP_SALES' }],
+      });
+    });
+
+    it('MIXED passes pinned in order and defaults size to 8', async () => {
+      selection.resolve.mockResolvedValue({ computedAt: null, items: [] });
+      const out = await service.expandVitrina({ ...base, mode: 'MIXED' });
+      expect(selection.resolve).toHaveBeenCalledWith({
+        mode: 'MIXED',
+        size: 8,
+        pinned: [A, B],
+      });
+      expect(out.products).toEqual([]);
+      expect(out.vitrina).toEqual({
+        mode: 'MIXED',
+        size: 8,
+        computedAt: null,
+        items: [],
+      });
+    });
+
+    it('a resolver failure never throws: MIXED degrades to pinned, AUTO to []', async () => {
+      selection.resolve.mockRejectedValue(new Error('db down'));
+      catalog.findListItemsByIds.mockResolvedValue([prod(A)]);
+      const mixed = await service.expandVitrina({ ...base, mode: 'MIXED' });
+      expect(mixed.products).toEqual([prod(A)]);
+      expect(mixed.vitrina).toMatchObject({ mode: 'MIXED', items: [] });
+      catalog.findListItemsByIds.mockResolvedValue([]);
+      const auto = await service.expandVitrina({ ...base, mode: 'AUTO' });
+      expect(auto.products).toEqual([]);
     });
   });
 });
