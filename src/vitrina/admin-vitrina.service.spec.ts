@@ -32,7 +32,7 @@ describe('AdminVitrinaService.updateAlgorithm tx budget (Story 18.9)', () => {
     expect($transaction).toHaveBeenCalledTimes(1);
     expect($transaction.mock.calls[0][1]).toEqual({
       maxWait: PUT_LOCK_BUDGET_MS,
-      timeout: PUT_LOCK_BUDGET_MS,
+      timeout: PUT_LOCK_BUDGET_MS + 5_000,
     });
     expect(PUT_LOCK_BUDGET_MS).toBeGreaterThan(5000);
     // Story 18.12: must answer 409 before Nginx proxy_read_timeout (60 s).
@@ -52,6 +52,37 @@ describe('AdminVitrinaService.updateAlgorithm tx budget (Story 18.9)', () => {
     expect((err as { getStatus(): number }).getStatus()).toBe(
       HttpStatus.CONFLICT,
     );
+    expect(
+      (err as { getResponse(): { errorCode: string } }).getResponse().errorCode,
+    ).toBe('VITRINA_BUSY');
+  });
+
+  it.each([
+    [
+      'driverAdapterError',
+      {
+        code: 'P2010',
+        meta: { driverAdapterError: { cause: { code: '55P03' } } },
+      },
+    ],
+    [
+      'message',
+      {
+        code: 'P2010',
+        message:
+          'Raw query failed. Code: `55P03`. Message: `canceling statement due to lock timeout`',
+      },
+    ],
+  ])('maps SQLSTATE 55P03 (%s) to 409 VITRINA_BUSY', async (_n, extra) => {
+    const e = Object.assign(new Error('raw'), extra);
+    const svc = new AdminVitrinaService(
+      { $transaction: vi.fn().mockRejectedValue(e) } as never,
+      {} as never,
+      {} as never,
+    );
+    const err = await svc
+      .updateAlgorithm(DTO, 'admin')
+      .catch((x: unknown) => x);
     expect(
       (err as { getResponse(): { errorCode: string } }).getResponse().errorCode,
     ).toBe('VITRINA_BUSY');

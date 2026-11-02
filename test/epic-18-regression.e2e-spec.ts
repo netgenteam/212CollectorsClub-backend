@@ -1,6 +1,8 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
+import tls from 'node:tls';
 import { resolve } from 'node:path';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Logger, VersioningType } from '@nestjs/common';
@@ -72,14 +74,22 @@ export function externalHostOf(
   args: unknown[],
   allowed: string[] = [],
 ): string | null {
-  const a0 = args[0];
+  // Node calls `Socket.prototype.connect` with a normalized `[options, cb]`
+  // array (net.connect / http / tls), or with raw (port, host) / (path) args.
+  const first = args[0];
+  const a0: unknown = Array.isArray(first) ? (first[0] as unknown) : first;
   let host: string | undefined;
   if (typeof a0 === 'object' && a0 !== null) {
-    const o = a0 as { host?: string; path?: string };
+    const o = a0 as { host?: string; hostname?: string; path?: string };
     if (o.path) return null; // unix socket
-    host = o.host ?? 'localhost';
-  } else if (typeof a0 === 'number' || typeof a0 === 'string') {
+    host = o.host ?? o.hostname ?? 'localhost';
+  } else if (typeof a0 === 'number') {
     host = typeof args[1] === 'string' ? args[1] : 'localhost';
+  } else if (typeof a0 === 'string') {
+    // (path) for a unix socket, (port-as-string, host) otherwise
+    if (/^\d+$/.test(a0)) {
+      host = typeof args[1] === 'string' ? args[1] : 'localhost';
+    } else return null;
   }
   if (!host) return null;
   const h = host.toLowerCase();
@@ -171,6 +181,9 @@ describe('Epic 18 regression (e2e, Story 18.12)', { timeout: 120_000 }, () => {
   const id: Record<string, string> = {};
   const fiveXX: string[] = [];
   const external: string[] = [];
+  // Negative test of the guard itself records here, never in `external`.
+  const probed: string[] = [];
+  let probing = false;
   const logged: string[] = [];
   const envBackup = { ...process.env };
 
@@ -365,7 +378,7 @@ describe('Epic 18 regression (e2e, Story 18.12)', { timeout: 120_000 }, () => {
       ...args: unknown[]
     ) {
       const h = externalHostOf(args, [dbHost.toLowerCase()]);
-      if (h) external.push(h);
+      if (h) (probing ? probed : external).push(h);
       return realConnect.apply(this, args);
     });
     const glob = globalThis as unknown as Record<string, Fn>;
@@ -542,14 +555,46 @@ describe('Epic 18 regression (e2e, Story 18.12)', { timeout: 120_000 }, () => {
 
   // ======================================================================
   describe('AC2: Frente A (tasa de cambio)', () => {
-    it('zero network: the socket guard only sees local hosts, and detects external ones', () => {
-      expect(externalHostOf([5432, 'localhost'])).toBeNull();
-      expect(externalHostOf([{ host: '127.0.0.1', port: 1 }])).toBeNull();
-      expect(externalHostOf([{ path: '/tmp/x.sock' }])).toBeNull();
-      expect(externalHostOf([{ host: 've.dolarapi.com', port: 443 }])).toBe(
-        've.dolarapi.com',
+    it('zero network: the real spy records net.connect / http.request / tls.connect to an external host (and ignores local ones)', async () => {
+      expect(externalHostOf([[{ host: '203.0.113.9', port: 80 }, null]])).toBe(
+        '203.0.113.9',
       );
+      expect(
+        externalHostOf([[{ host: '127.0.0.1', port: 80 }, null]]),
+      ).toBeNull();
+      expect(externalHostOf([5432, 'localhost'])).toBeNull();
+      expect(externalHostOf([{ path: '/tmp/x.sock' }])).toBeNull();
       expect(externalHostOf([443, '203.0.113.9'])).toBe('203.0.113.9');
+      const attempt = (
+        open: () => {
+          destroy(): unknown;
+          on(e: string, f: () => void): unknown;
+        },
+      ) =>
+        new Promise<void>((done) => {
+          const s = open();
+          s.on('error', () => undefined);
+          setTimeout(() => {
+            s.destroy();
+            done();
+          }, 150);
+        });
+      probing = true;
+      try {
+        const T = '203.0.113.9'; // TEST-NET-3: never routable
+        await attempt(() => net.connect({ host: T, port: 9 }));
+        await attempt(() =>
+          http.request({ host: T, port: 9, timeout: 100 }).end(),
+        );
+        await attempt(() => tls.connect({ host: T, port: 9 }));
+        // Local connections must not be flagged.
+        await attempt(() => net.connect({ host: '127.0.0.1', port: 9 }));
+      } finally {
+        probing = false;
+      }
+      expect(probed.filter((h) => h === '203.0.113.9')).toHaveLength(3);
+      expect(probed).not.toContain('127.0.0.1');
+      expect(external).toEqual([]);
       expect(fake.name).toBe('fake');
     });
 
@@ -880,7 +925,9 @@ describe('Epic 18 regression (e2e, Story 18.12)', { timeout: 120_000 }, () => {
       expect(rank('B')!).toBeLessThan(rank('A')!);
       expect(rank('C')).toBeDefined();
       expect(rank('E')).toBeDefined();
-      if (rank('D') !== undefined) expect(rank('E')!).toBeLessThan(rank('D')!);
+      // D (1 sale) is always ranked by the fixture; E (20 sales) must beat it.
+      expect(rank('D')).toBeDefined();
+      expect(rank('E')!).toBeLessThan(rank('D')!);
       expect(rank('SOLD')).toBeUndefined();
       const fr = Object.keys(id)
         .filter((k) => /^F\d$/.test(k))

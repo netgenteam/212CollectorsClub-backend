@@ -653,7 +653,7 @@ describe('Landing vitrina modes (e2e, Story 18.9)', () => {
           'beforePointerSwap',
         )
         .mockImplementation(async () => {
-          await sleep(6500);
+          await sleep(8000);
         });
       try {
         const slow = server().post(`${VIT}/recompute`).set(auth());

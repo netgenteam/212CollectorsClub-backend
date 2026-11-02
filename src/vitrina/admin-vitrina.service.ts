@@ -35,6 +35,31 @@ const WEIGHT_KEYS = [
   'wNovelty',
 ] as const;
 
+/** Slack so the DB-side lock_timeout always fires before Prisma's tx timeout. */
+const TX_SLACK_MS = 5_000;
+
+/**
+ * Postgres lock_not_available (SQLSTATE 55P03). With `$queryRaw` + the pg
+ * driver adapter Prisma reports P2010 and nests the SQLSTATE in
+ * `meta.driverAdapterError.cause.code`; the message also says so.
+ */
+const isLockTimeout = (err: unknown): boolean => {
+  if (!(err instanceof Error)) return false;
+  const e = err as { code?: unknown; meta?: unknown; cause?: unknown };
+  if (e.code === '55P03') return true;
+  let meta = '';
+  try {
+    meta = JSON.stringify(e.meta ?? '');
+  } catch {
+    /* unserializable meta: fall through to the message */
+  }
+  return (
+    meta.includes('55P03') ||
+    /55P03|lock timeout/i.test(err.message) ||
+    (e.cause !== undefined && isLockTimeout(e.cause))
+  );
+};
+
 /** Prisma P2028: interactive transaction timed out / could not start. */
 const isTxTimeout = (err: unknown): boolean =>
   err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2028';
@@ -77,9 +102,15 @@ export class AdminVitrinaService {
       );
     }
 
+    const budget = PUT_LOCK_BUDGET_MS;
     try {
       await this.prisma.$transaction(
         async (tx) => {
+          // The wait is bounded IN THE DATABASE: a Prisma tx timeout would
+          // queue its ROLLBACK behind the blocked FOR UPDATE on the same
+          // connection and never fire. lockSetting's FOR UPDATE is the only
+          // statement here that can wait on another transaction.
+          await tx.$executeRaw`SELECT set_config('lock_timeout', ${`${budget}ms`}, true)`;
           // FOR UPDATE: concurrent PUTs queue here, so each audit's `before` is
           // exactly the previous audit's `after` (a coherent chain).
           const current = await lockSetting(tx);
@@ -138,10 +169,10 @@ export class AdminVitrinaService {
         // than the recompute's TX_TIMEOUT_MS (60 s): Nginx cuts at
         // proxy_read_timeout 60 s, so the admin must get our 409 VITRINA_BUSY
         // (not Nginx's 504) before that. Not Prisma's 5 s default either.
-        { maxWait: PUT_LOCK_BUDGET_MS, timeout: PUT_LOCK_BUDGET_MS },
+        { maxWait: budget, timeout: budget + TX_SLACK_MS },
       );
     } catch (err) {
-      if (isTxTimeout(err)) {
+      if (isTxTimeout(err) || isLockTimeout(err)) {
         throw new ApiException(
           HttpStatus.CONFLICT,
           'VITRINA_BUSY',
