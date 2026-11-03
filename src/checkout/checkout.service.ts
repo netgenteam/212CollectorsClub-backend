@@ -39,6 +39,8 @@ import {
   resolveCheckoutShipping,
 } from './checkout-shipping.js';
 import { FxRateService } from '../fx/fx-rate.service.js';
+import { ConsentService } from '../legal/consent.service.js';
+import { ConsentContext } from '../generated/prisma/enums.js';
 import { PAGO_MOVIL_PLACEHOLDER_ACCOUNT } from './pago-movil-instructions.constant.js';
 
 /** Story 4.1 (AD-6): 24h soft-reservation window for a Pago Móvil StockHold. */
@@ -165,6 +167,7 @@ export class CheckoutService {
     private readonly config: ConfigService,
     private readonly shipping: ShippingValidationService,
     private readonly fxRates: FxRateService,
+    private readonly consent: ConsentService,
   ) {}
 
   /**
@@ -227,6 +230,17 @@ export class CheckoutService {
 
     const result = await this.prisma.$transaction(
       async (tx): Promise<CheckoutTransactionResult> => {
+        // Story 19.4 (AD-92, FR-114): FIRST statement of the transaction,
+        // before the cart is read, a StockHold is reserved or the Order is
+        // created. Plain SELECTs (no lock held). Guests and accounts, both
+        // rails, and the flat legacy format alike: every path to an Order
+        // goes through this transaction.
+        const accepted = await this.consent.assertAccepted(tx, {
+          terms: dto.acceptedTermsVersion,
+          shipping: dto.acceptedShippingVersion,
+          returns: dto.acceptedReturnsVersion,
+        });
+
         // Story 17.4: shipping (and saved-address snapshot) resolved inside
         // the checkout transaction.
         const shippingData = await resolveCheckoutShipping(
@@ -348,8 +362,26 @@ export class CheckoutService {
             totalVes,
             accessTokenHash: tokenHash,
             customerId: customer?.id ?? null,
+            // Story 19.4: NULL for a document with no version in force (then
+            // nothing was accepted, and no ConsentRecord exists for it).
+            termsVersion: accepted.versions.terms?.versionNumber ?? null,
+            shippingVersion: accepted.versions.shipping?.versionNumber ?? null,
+            returnsVersion: accepted.versions.returns?.versionNumber ?? null,
+            termsAcceptedAt: Object.keys(accepted.versions).length
+              ? accepted.now
+              : null,
             lines: { createMany: { data: lineCreates } },
           },
+        });
+
+        // Story 19.4: same transaction as the Order, so a later failure
+        // (stock, empty cart) leaves no ConsentRecord behind.
+        await this.consent.recordConsents(tx, {
+          context: ConsentContext.CHECKOUT,
+          orderId: order.id,
+          customerId: customer?.id ?? null,
+          accepted,
+          keys: ['terms', 'shipping', 'returns'],
         });
 
         // --- AD-6 / AD-50: both rails guardedly reserve stock at checkout.

@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { LegalModule } from '../legal/legal.module.js';
 import { FxModule } from '../fx/fx.module.js';
 import { CartModule } from '../cart/cart.module.js';
 import { PaymentsStripeModule } from '../payments-stripe/payments-stripe.module.js';
@@ -12,7 +13,13 @@ import { CheckoutService } from './checkout.service.js';
 // CartController already uses, per CartModule's own exports doc comment.
 // PaymentsStripeModule provides the STRIPE_CLIENT used by CheckoutService.
 @Module({
-  imports: [CartModule, FxModule, PaymentsStripeModule, ShippingModule],
+  imports: [
+    CartModule,
+    FxModule,
+    PaymentsStripeModule,
+    ShippingModule,
+    LegalModule,
+  ],
   controllers: [CheckoutController],
   providers: [CheckoutService],
 })

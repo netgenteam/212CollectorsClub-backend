@@ -15,6 +15,8 @@ import {
 import { MailerService } from '../common/mailer/mailer.service.js';
 import type { SendMailOptions } from '../common/mailer/mailer.service.js';
 import { Prisma } from '../generated/prisma/client.js';
+import { ConsentService } from '../legal/consent.service.js';
+import { ConsentContext } from '../generated/prisma/enums.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { CustomerResponseDto } from './dto/customer-response.dto.js';
 import type { RegisterCustomerDto } from './dto/register-customer.dto.js';
@@ -72,6 +74,7 @@ export class CustomerAuthService {
     @Inject(CUSTOMER_AUTH) private readonly customerAuth: CustomerAuth,
     private readonly mailer: MailerService,
     private readonly config: ConfigService,
+    private readonly consent: ConsentService,
   ) {}
 
   private get frontendUrl(): string {
@@ -115,6 +118,17 @@ export class CustomerAuthService {
   }
 
   private async registerInner(dto: RegisterCustomerDto): Promise<void> {
+    // Story 19.4 (AD-92, FR-112): BEFORE any account is created, and
+    // independent of the email, so it opens no enumeration oracle (a duplicate
+    // and a new email get the same 400/409). It runs inside the timing floor.
+    const accepted = await this.consent.assertAccepted(
+      this.prisma,
+      {
+        terms: dto.acceptedTermsVersion,
+        privacy: dto.acceptedPrivacyVersion,
+      },
+      { declared: dto.ageDeclared },
+    );
     let created;
     try {
       created = await this.customerAuth.api.signUpEmail({
@@ -137,6 +151,39 @@ export class CustomerAuthService {
     if (!isNew) {
       this.sendBestEffort(alreadyRegisteredEmail(dto.email, this.frontendUrl));
       return;
+    }
+    // Story 19.4 (A77): BetterAuth creates the Customer in its own
+    // transaction, so the evidence is written right after, in one small tx.
+    // If it cannot be written the brand-new account is removed (no account
+    // without evidence) and the caller gets a 500; if the process dies in
+    // between, the account is simply "pending" for FR-115 (safe degradation).
+    // The duplicate-email branches above never write anything.
+    try {
+      await this.prisma.$transaction((tx) =>
+        this.consent.recordConsents(tx, {
+          context: ConsentContext.REGISTER,
+          customerId: created.user.id,
+          accepted,
+          keys: ['terms', 'privacy'],
+          age: true,
+        }),
+      );
+    } catch (err) {
+      this.logger.error(
+        `Consent evidence for new customer ${created.user.id} could not be written; removing the account: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      await this.prisma.customer
+        .delete({ where: { id: created.user.id } })
+        .catch((delErr: unknown) => {
+          this.logger.error(
+            `Could not remove customer ${created.user.id} after a consent failure: ${delErr instanceof Error ? delErr.message : String(delErr)}`,
+          );
+        });
+      throw new ApiException(
+        HttpStatus.INTERNAL_SERVER_ERROR,
+        'CONSENT_RECORD_FAILED',
+        'The account could not be created. Please try again.',
+      );
     }
     // Account committed. Token + email run in the background so this branch
     // awaits exactly what the duplicate branch awaits (no timing oracle) and

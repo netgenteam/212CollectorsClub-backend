@@ -638,6 +638,14 @@ model Order {
   customerId String?   @db.Uuid
   customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
+  /// Story 19.4 (AD-92, FR-114): versions accepted at checkout and the DB
+  /// clock of the acceptance. NULL = historical order, or a document that had
+  /// no current version (LEGAL_REQUIRE_PUBLISHED=false): nothing was accepted.
+  termsVersion    Int?
+  shippingVersion Int?
+  returnsVersion  Int?
+  termsAcceptedAt DateTime? @db.Timestamptz(3)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -653,6 +661,7 @@ model Order {
   /// list non-empty" — see ProofOfPaymentService.
   proofOfPayments ProofOfPayment[]
   trackingEvents  OrderTrackingEvent[]
+  consents        ConsentRecord[]
 
   @@index([customerId, createdAt])
   @@index([stripePaymentIntentId])
@@ -1052,6 +1061,8 @@ model Customer {
   wishlists        Wishlist[]
   orders           Order[]
   addresses        CustomerAddress[]
+  /// Story 19.4 (AD-92): acceptance evidence; SetNull keeps it (append-only).
+  consents         ConsentRecord[]
 
   @@map("Customers")
 }
@@ -1387,6 +1398,8 @@ model LegalDocumentVersion {
   publishedByEmail    String?
   restoredFromVersion Int?
 
+  consents ConsentRecord[]
+
   @@unique([documentId, versionNumber])
   @@index([documentId, effectiveFrom])
   @@map("Legal_Document_Versions")
@@ -1437,4 +1450,47 @@ model SellerIdentitySetting {
   updatedById   String?  @db.Uuid
 
   @@map("Seller_Identity_Settings")
+}
+
+/// Story 19.4 (AD-92, FR-113). What a person accepted, when (DB clock) and in
+/// which context. NO IP, user agent, birth date or any buyer data (A71, NFR-19.6).
+enum ConsentType {
+  TERMS
+  PRIVACY
+  SHIPPING
+  RETURNS
+  AGE_DECLARATION
+  COOKIES
+}
+
+enum ConsentContext {
+  REGISTER
+  CHECKOUT
+  RE_ACCEPT
+}
+
+/// Append-only (triggers): UPDATE only as the FK `SetNull` cascade, DELETE only
+/// of rows already orphaned by it. `version >= 1` always points at a real,
+/// effective version of a document of the matching kind (insert trigger);
+/// `version = 0` with no document is only an AGE_DECLARATION made while TERMS
+/// had no current version (a declaration, not an acceptance of any text).
+model ConsentRecord {
+  id                String                @id @default(uuid()) @db.Uuid
+  customerId        String?               @db.Uuid
+  customer          Customer?             @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  orderId           String?               @db.Uuid
+  order             Order?                @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  type              ConsentType
+  documentVersionId String?               @db.Uuid
+  documentVersion   LegalDocumentVersion? @relation(fields: [documentVersionId], references: [id], onDelete: Restrict)
+  version           Int
+  /// DB clock: ConsentService.recordConsents writes with raw SQL that OMITS this column, so the database
+  /// default (CURRENT_TIMESTAMP = transaction start) applies; Prisma would fill `now()` with the app clock.
+  acceptedAt        DateTime              @default(now()) @db.Timestamptz(3)
+  context           ConsentContext
+
+  @@index([customerId, type, acceptedAt(sort: Desc)])
+  @@index([orderId])
+  @@index([documentVersionId])
+  @@map("Consent_Records")
 }

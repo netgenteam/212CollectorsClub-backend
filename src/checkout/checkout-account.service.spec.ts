@@ -69,6 +69,11 @@ describe('CheckoutService (account)', () => {
       {} as never,
       {} as never,
       new FxRateService(null as never),
+      {
+        assertAccepted: () =>
+          Promise.resolve({ now: new Date(), versions: {} }),
+        recordConsents: () => Promise.resolve(0),
+      } as never,
     );
   });
 

@@ -55,6 +55,11 @@ export class CheckoutController {
       'Malformed body: invalid paymentRail/fulfillmentType, missing recipientName, or fulfillmentType=delivery with a missing address field.',
   })
   @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      'errorCode CONSENT_REQUIRED (Story 19.4, FR-114): acceptedTermsVersion / acceptedShippingVersion / acceptedReturnsVersion missing for a document that has a version in force; `details.missing[]`. Guests and accounts, both rails and the flat legacy format alike. No Order, StockHold or ConsentRecord is created.',
+  })
+  @ApiResponse({
     status: HttpStatus.UNPROCESSABLE_ENTITY,
     description:
       'errorCode EMPTY_CART — there is no cart cookie, or it resolves to an empty/expired cart.',
@@ -62,7 +67,7 @@ export class CheckoutController {
   @ApiResponse({
     status: HttpStatus.CONFLICT,
     description:
-      'errorCode EMAIL_NOT_VERIFIED (Story 12.6) — a logged-in customer (cookie cc_session) whose email is not verified; no order and no stock hold are created. OR errorCode INSUFFICIENT_STOCK — one or more cart lines no longer have enough available stock. details.items lists every affected line with its requested/available quantities. The checkout is fully rejected — no Order is created.',
+      'errorCode EMAIL_NOT_VERIFIED (Story 12.6) — a logged-in customer (cookie cc_session) whose email is not verified; no order and no stock hold are created. OR errorCode INSUFFICIENT_STOCK — one or more cart lines no longer have enough available stock. details.items lists every affected line with its requested/available quantities. The checkout is fully rejected — no Order is created. OR errorCode CONSENT_VERSION_STALE (Story 19.4): a version sent is not the one in force (or that document has none); `details.current{slug: versionNumber}`, `details.stale[]`; no Order is created.',
   })
   @ApiResponse({
     status: HttpStatus.BAD_GATEWAY,
@@ -72,7 +77,7 @@ export class CheckoutController {
   @ApiResponse({
     status: HttpStatus.SERVICE_UNAVAILABLE,
     description:
-      'paymentRail=pago_movil only — errorCode FX_RATE_UNAVAILABLE (Story 18.3): the VES rate row is missing, <= 0, or older than maxAgeHours x 3 (non-MANUAL). No Order is created; Stripe is unaffected.',
+      'paymentRail=pago_movil only — errorCode FX_RATE_UNAVAILABLE (Story 18.3): the VES rate row is missing, <= 0, or older than maxAgeHours x 3 (non-MANUAL). No Order is created; Stripe is unaffected. OR errorCode LEGAL_NOT_PUBLISHED (Story 19.4, A75, either rail): LEGAL_REQUIRE_PUBLISHED=true and a required document (terminos / envios / devoluciones) has no version in force; `details.documents[]`; nothing is created.',
   })
   async checkout(
     @Body() dto: CheckoutDto,

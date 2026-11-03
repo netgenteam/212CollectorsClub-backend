@@ -12,6 +12,7 @@ import {
 } from './dto/checkout.dto.js';
 import { FxRateService } from '../fx/fx-rate.service.js';
 import { ShippingValidationService } from '../shipping/shipping-validation.service.js';
+import { ConsentService } from '../legal/consent.service.js';
 import { SINGLETON_FX_RATE_ID } from './fx-rate.constants.js';
 
 const CHARIZARD_ID = 'f65915f5-2931-4e50-af95-630b1fd7b950';
@@ -124,6 +125,15 @@ describe('CheckoutService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: STRIPE_CLIENT, useValue: stripeClient },
         { provide: ShippingValidationService, useValue: {} },
+        {
+          provide: ConsentService,
+          // Story 19.4: no document in force => nothing to accept (see consent.service.spec.ts).
+          useValue: {
+            assertAccepted: () =>
+              Promise.resolve({ now: new Date(), versions: {} }),
+            recordConsents: () => Promise.resolve(0),
+          },
+        },
         { provide: FxRateService, useValue: new FxRateService(null as never) },
         {
           provide: ConfigService,

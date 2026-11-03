@@ -2,6 +2,8 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsEnum,
   IsIn,
+  IsInt,
+  Min,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -247,4 +249,34 @@ export class CheckoutDto {
   @IsString()
   @MaxLength(200)
   referencePoint?: string;
+
+  @ApiPropertyOptional({
+    example: 3,
+    description:
+      'Story 19.4 (FR-114): version of `terminos` in force that the buyer accepts. Optional only at DTO level: when the document has a version in force, a missing value is 400 CONSENT_REQUIRED and a different one 409 CONSENT_VERSION_STALE. Applies to guests and accounts, to both rails and to the flat legacy format.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  acceptedTermsVersion?: number;
+
+  @ApiPropertyOptional({
+    example: 2,
+    description:
+      'Story 19.4: version of `envios` in force that the buyer accepts.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  acceptedShippingVersion?: number;
+
+  @ApiPropertyOptional({
+    example: 2,
+    description:
+      'Story 19.4: version of `devoluciones` in force that the buyer accepts.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  acceptedReturnsVersion?: number;
 }

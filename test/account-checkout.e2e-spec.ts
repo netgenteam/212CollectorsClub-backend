@@ -12,6 +12,7 @@ import * as argon2 from 'argon2';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { registerConsent } from './helpers/legal-consent.js';
 
 interface CheckoutBody {
   orderId: string;
@@ -166,7 +167,12 @@ describe(
       emails.push(email);
       await request(server())
         .post('/api/v1/auth/register')
-        .send({ email, password: PASSWORD, name: 'Acc Tester' })
+        .send({
+          ...registerConsent(),
+          email,
+          password: PASSWORD,
+          name: 'Acc Tester',
+        })
         .expect(201);
       const c = await prisma.customer.update({
         where: { email },

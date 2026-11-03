@@ -98,6 +98,15 @@ export async function insertSandboxAudit(
 export async function purgeSandbox(exec: Exec, tag?: string): Promise<void> {
   const like = tag ? `e2e-${tag}%` : 'e2e-%';
   const ids = `(SELECT "id" FROM "Legal_Documents" WHERE "isSandbox" = true AND "slug" LIKE $1)`;
+  // Story 19.4: acceptance evidence (append-only) that points at a sandbox
+  // version blocks its deletion (FK RESTRICT). Only rows already orphaned by
+  // their customer/order being removed can be deleted (the trigger decides);
+  // linked ones must be released first by deleting that customer/order.
+  await exec(
+    `DELETE FROM "Consent_Records" WHERE "customerId" IS NULL AND "orderId" IS NULL
+       AND "documentVersionId" IN (SELECT "id" FROM "Legal_Document_Versions" WHERE "documentId" IN ${ids})`,
+    [like],
+  );
   await exec(`DELETE FROM "Legal_Audit_Logs" WHERE "documentId" IN ${ids}`, [
     like,
   ]);

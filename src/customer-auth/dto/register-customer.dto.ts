@@ -1,7 +1,11 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
+  IsBoolean,
   IsEmail,
+  IsInt,
+  IsOptional,
+  Min,
   IsNotEmpty,
   IsString,
   MaxLength,
@@ -32,4 +36,31 @@ export class RegisterCustomerDto {
   @IsNotEmpty()
   @MaxLength(100)
   name: string;
+
+  @ApiPropertyOptional({
+    example: 3,
+    description:
+      'Story 19.4 (FR-112): version of `terminos` in force. Optional only at DTO level (a missing one is 400 CONSENT_REQUIRED from the service when that document has a version in force).',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  acceptedTermsVersion?: number;
+
+  @ApiPropertyOptional({
+    example: 2,
+    description: 'Story 19.4: version of `privacidad` in force.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  acceptedPrivacyVersion?: number;
+
+  @ApiPropertyOptional({
+    description:
+      "Story 19.4 (FR-116): declaration of being 18+ (or having a legal representative's authorization). Always required: anything other than `true` is 400 CONSENT_REQUIRED. Stored as a declaration; no birth date is asked.",
+  })
+  @IsOptional()
+  @IsBoolean()
+  ageDeclared?: boolean;
 }

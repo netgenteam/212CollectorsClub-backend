@@ -20,6 +20,7 @@ import {
   snapshotDailyStats,
   type DailyStatRows,
 } from './helpers/db-snapshot.js';
+import { registerConsent } from './helpers/legal-consent.js';
 
 const TAG = randomUUID().slice(0, 8);
 const PASSWORD = 'correct-horse-battery-18-7';
@@ -270,7 +271,12 @@ describe('Vitrina signals (e2e, Story 18.7)', () => {
       emails.push(email);
       await request(server())
         .post('/api/v1/auth/register')
-        .send({ email, password: PASSWORD, name: 'Sig Tester' })
+        .send({
+          ...registerConsent(),
+          email,
+          password: PASSWORD,
+          name: 'Sig Tester',
+        })
         .expect(201);
       const login = await request(server())
         .post('/api/v1/auth/login')

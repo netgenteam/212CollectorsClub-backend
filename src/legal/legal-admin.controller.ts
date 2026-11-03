@@ -40,12 +40,17 @@ import {
   RestoreDto,
   UpdateIdentityDto,
 } from './dto/legal-admin.dto.js';
+import { AdminConsentsResponseDto } from './dto/consent.dto.js';
+import { ADMIN_CONSENTS_LIMIT, ConsentService } from './consent.service.js';
 import { findLegalDoc } from './legal-admin.common.js';
 import { LegalDiffService } from './legal-diff.service.js';
 import { LegalDraftService } from './legal-draft.service.js';
 import { LegalPublishService } from './legal-publish.service.js';
 import { LegalSlugPipe, parseVersionNumber } from './legal-slug.pipe.js';
 import { SellerIdentityService } from './seller-identity.service.js';
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const UNAUTH = {
   status: HttpStatus.UNAUTHORIZED,
@@ -83,6 +88,7 @@ export class LegalAdminController {
     private readonly diffs: LegalDiffService,
     private readonly identity: SellerIdentityService,
     private readonly prisma: PrismaService,
+    private readonly consent: ConsentService,
   ) {}
 
   private actor(req: RequestWithAdminUser) {
@@ -98,6 +104,45 @@ export class LegalAdminController {
   @ApiResponse(UNAUTH)
   list(): Promise<AdminLegalListItemDto[]> {
     return this.drafts.list();
+  }
+
+  @Get('consents')
+  @ApiOperation({
+    summary: 'Acceptance evidence of a customer or an order (Story 19.4)',
+    description: `Lists the append-only Consent_Records (newest first, at most ${ADMIN_CONSENTS_LIMIT}): type, version, document version id, context, DB timestamp and the customer/order ids. No IP, no buyer data. An id that does not exist gives an empty list.`,
+  })
+  @ApiQuery({ name: 'customerId', required: false, description: 'uuid' })
+  @ApiQuery({ name: 'orderId', required: false, description: 'uuid' })
+  @ApiResponse({ status: HttpStatus.OK, type: AdminConsentsResponseDto })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      'CONSENT_FILTER_REQUIRED (neither customerId nor orderId) | CONSENT_FILTER_INVALID (not a uuid)',
+  })
+  @ApiResponse(UNAUTH)
+  async consents(
+    @Query('customerId') customerId?: string,
+    @Query('orderId') orderId?: string,
+  ): Promise<AdminConsentsResponseDto> {
+    if (customerId === undefined && orderId === undefined) {
+      throw new ApiException(
+        HttpStatus.BAD_REQUEST,
+        'CONSENT_FILTER_REQUIRED',
+        'Send customerId or orderId.',
+      );
+    }
+    for (const v of [customerId, orderId]) {
+      if (v !== undefined && !UUID_RE.test(v)) {
+        throw new ApiException(
+          HttpStatus.BAD_REQUEST,
+          'CONSENT_FILTER_INVALID',
+          'customerId and orderId must be UUIDs.',
+        );
+      }
+    }
+    return {
+      consents: await this.consent.listForAdmin({ customerId, orderId }),
+    };
   }
 
   @Get('audit')

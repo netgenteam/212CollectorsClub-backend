@@ -9,6 +9,7 @@ import request from 'supertest';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { registerConsent } from './helpers/legal-consent.js';
 
 const PASSWORD = 'Correct-horse-17-2!';
 const URL = '/api/v1/auth/addresses';
@@ -54,7 +55,12 @@ describe('Customer addresses list/create (e2e, Story 17.2)', () => {
     const email = `e2e-addr-${k}-${tag}@212collectorsclub.test`;
     await request(server())
       .post('/api/v1/auth/register')
-      .send({ email, password: PASSWORD, name: 'Addr Tester' })
+      .send({
+        ...registerConsent(),
+        email,
+        password: PASSWORD,
+        name: 'Addr Tester',
+      })
       .expect(201);
     const c = await prisma.customer.update({
       where: { email },

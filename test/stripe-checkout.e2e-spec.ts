@@ -13,6 +13,7 @@ import { PrismaService } from './../src/prisma/prisma.service.js';
 import { PaymentProcessingTimeoutCronService } from './../src/orders/cron/payment-processing-timeout-cron.service.js';
 import { StockHoldExpiryCronService } from './../src/orders/cron/stock-hold-expiry-cron.service.js';
 import { FakeStripeClient } from './../src/payments-stripe/fake-stripe-client.js';
+import { registerConsent } from './helpers/legal-consent.js';
 
 // Story 14.4 e2e: checkout with paymentRail=stripe (FR-57, AD-46, AD-44).
 const TAG = randomUUID().slice(0, 8);
@@ -277,7 +278,12 @@ describe('Stripe checkout (e2e, Story 14.4)', () => {
     emails.push(email);
     await request(server())
       .post('/api/v1/auth/register')
-      .send({ email, password: PASSWORD, name: 'Acc Tester' })
+      .send({
+        ...registerConsent(),
+        email,
+        password: PASSWORD,
+        name: 'Acc Tester',
+      })
       .expect(201);
     const c = await prisma.customer.update({
       where: { email },

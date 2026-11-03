@@ -202,6 +202,12 @@ export class OrderLookupService {
       lines,
       createdAt: order.createdAt.toISOString(),
       updatedAt: order.updatedAt.toISOString(),
+      termsVersion: order.termsVersion,
+      shippingVersion: order.shippingVersion,
+      returnsVersion: order.returnsVersion,
+      termsAcceptedAt: order.termsAcceptedAt
+        ? order.termsAcceptedAt.toISOString()
+        : null,
     };
   }
 

@@ -49,6 +49,11 @@ function buildOrderWithLines(
         : overrides.totalVes,
     createdAt: new Date('2026-09-24T17:41:08.000Z'),
     updatedAt: new Date('2026-09-24T17:45:12.000Z'),
+    // Story 19.4: historical order (nothing accepted)
+    termsVersion: null,
+    shippingVersion: null,
+    returnsVersion: null,
+    termsAcceptedAt: null,
     lines: [
       {
         productId: 'product-1',
@@ -126,6 +131,10 @@ describe('OrderLookupService', () => {
         ],
         createdAt: '2026-09-24T17:41:08.000Z',
         updatedAt: '2026-09-24T17:45:12.000Z',
+        termsVersion: null,
+        shippingVersion: null,
+        returnsVersion: null,
+        termsAcceptedAt: null,
       });
     });
 

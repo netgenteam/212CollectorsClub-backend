@@ -73,9 +73,24 @@ export class CustomerAuthController {
   @ApiResponse({
     status: 400,
     description:
-      'Invalid email, password < 8 chars, empty name or unknown field.',
+      'Invalid email, password < 8 chars, empty name or unknown field. OR errorCode CONSENT_REQUIRED (Story 19.4): acceptedTermsVersion / acceptedPrivacyVersion missing (only while that document has a version in force) or ageDeclared not true (always required); `details.missing[]` lists the fields. Checked BEFORE the account is created and independently of the email.',
+  })
+  @ApiResponse({
+    status: 409,
+    description:
+      'errorCode CONSENT_VERSION_STALE (Story 19.4): a version sent is not the one in force (or the document has none); `details.current{slug: versionNumber}`, `details.stale[]`. No account is created.',
   })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded.' })
+  @ApiResponse({
+    status: 500,
+    description:
+      'errorCode CONSENT_RECORD_FAILED (Story 19.4): the acceptance could not be written; the just-created account is removed.',
+  })
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode LEGAL_NOT_PUBLISHED (Story 19.4): LEGAL_REQUIRE_PUBLISHED=true and a required document has no version in force.',
+  })
   async register(
     @Body(strictBody(RegisterCustomerDto)) dto: Readonly<RegisterCustomerDto>,
   ): Promise<RegisterCustomerResponseDto> {

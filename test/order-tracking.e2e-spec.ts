@@ -9,6 +9,7 @@ import * as argon2 from 'argon2';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { registerConsent } from './helpers/legal-consent.js';
 
 type App = Parameters<typeof request>[0];
 interface Body {
@@ -145,7 +146,12 @@ describe('Order shipping exposure + tracking (e2e)', () => {
     const email = `e2e-17-5-${TAG}@212collectorsclub.test`;
     await request(server())
       .post('/api/v1/auth/register')
-      .send({ email, password: PASSWORD, name: 'Track Tester' })
+      .send({
+        ...registerConsent(),
+        email,
+        password: PASSWORD,
+        name: 'Track Tester',
+      })
       .expect(201);
     customerId = (
       await prisma.customer.update({

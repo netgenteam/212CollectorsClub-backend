@@ -1,6 +1,7 @@
 import * as argon2 from 'argon2';
 import { APIError } from 'better-auth/api';
 import { Prisma } from '../generated/prisma/client.js';
+import { ApiException } from '../common/api-exception.js';
 import { CustomerAuthService } from './customer-auth.service.js';
 
 vi.mock('argon2', async (importOriginal) => {
@@ -33,8 +34,19 @@ describe('CustomerAuthService', () => {
     customerSession: { deleteMany: ReturnType<typeof vi.fn> };
   };
   let service: CustomerAuthService;
+  /** Story 19.4: ConsentService double (its own rules are in consent.service.spec.ts). */
+  let consent: {
+    assertAccepted: ReturnType<typeof vi.fn>;
+    recordConsents: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(() => {
+    consent = {
+      assertAccepted: vi
+        .fn()
+        .mockResolvedValue({ now: new Date(), versions: {} }),
+      recordConsents: vi.fn().mockResolvedValue(3),
+    };
     vi.mocked(argon2.hash).mockClear();
     signUpEmail = vi.fn();
     signInEmail = vi.fn();
@@ -70,6 +82,7 @@ describe('CustomerAuthService', () => {
         get: (k: string, d: unknown) =>
           k === 'REGISTER_MIN_DURATION_MS' ? 0 : d,
       } as never,
+      consent as never,
     );
   });
 
@@ -83,6 +96,80 @@ describe('CustomerAuthService', () => {
     expect(
       (sendMail.mock.calls[0] as [{ subject: string }])[0].subject,
     ).toMatch(/Verify/);
+  });
+
+  describe('Story 19.4: consent', () => {
+    const ACCEPT = {
+      ...DTO,
+      acceptedTermsVersion: 3,
+      acceptedPrivacyVersion: 2,
+      ageDeclared: true,
+    };
+
+    it('validates BEFORE creating the account, with the email-independent fields only', async () => {
+      consent.assertAccepted.mockRejectedValue(
+        new ApiException(400, 'CONSENT_REQUIRED', 'x', {
+          missing: ['ageDeclared'],
+        }),
+      );
+      await expect(service.register(DTO)).rejects.toMatchObject({
+        status: 400,
+      });
+      expect(signUpEmail).not.toHaveBeenCalled();
+      expect(consent.recordConsents).not.toHaveBeenCalled();
+      expect(consent.assertAccepted).toHaveBeenCalledWith(
+        expect.anything(),
+        { terms: undefined, privacy: undefined },
+        { declared: undefined },
+      );
+    });
+
+    it('a new account records TERMS, PRIVACY and AGE_DECLARATION (REGISTER) for its id', async () => {
+      prisma.customer.count.mockResolvedValue(1);
+      signUpEmail.mockResolvedValue({ user: { id: 'u1' } });
+      await service.register(ACCEPT);
+      expect(consent.assertAccepted).toHaveBeenCalledWith(
+        expect.anything(),
+        { terms: 3, privacy: 2 },
+        { declared: true },
+      );
+      expect(consent.recordConsents).toHaveBeenCalledTimes(1);
+      expect(consent.recordConsents.mock.calls[0][1]).toMatchObject({
+        context: 'REGISTER',
+        customerId: 'u1',
+        keys: ['terms', 'privacy'],
+        age: true,
+      });
+    });
+
+    it('a duplicate email (error or synthetic success) writes no consent', async () => {
+      signUpEmail.mockResolvedValue({ user: { id: 'fake' } });
+      prisma.customer.count.mockResolvedValue(0);
+      await service.register(ACCEPT);
+      expect(consent.recordConsents).not.toHaveBeenCalled();
+      signUpEmail.mockRejectedValue(
+        new APIError('UNPROCESSABLE_ENTITY', {
+          code: 'USER_ALREADY_EXISTS',
+          message: 'exists',
+        }),
+      );
+      prisma.customer.count.mockResolvedValue(1);
+      await service.register(ACCEPT);
+      expect(consent.recordConsents).not.toHaveBeenCalled();
+    });
+
+    it('if the evidence cannot be written the new customer is deleted and the answer is a 500', async () => {
+      prisma.customer.count.mockResolvedValue(1);
+      signUpEmail.mockResolvedValue({ user: { id: 'u1' } });
+      consent.recordConsents.mockRejectedValue(new Error('db down'));
+      const del = vi.fn().mockResolvedValue({});
+      (prisma.customer as Record<string, unknown>).delete = del;
+      await expect(service.register(ACCEPT)).rejects.toMatchObject({
+        status: 500,
+      });
+      expect(del).toHaveBeenCalledWith({ where: { id: 'u1' } });
+      expect(sendMail).not.toHaveBeenCalled(); // no verification mail for a removed account
+    });
   });
 
   it('register: duplicate email (BetterAuth error) resolves identically and pays a dummy hash', async () => {
@@ -285,6 +372,7 @@ describe('CustomerAuthService', () => {
           get: (k: string) =>
             k === 'REGISTER_MIN_DURATION_MS' ? 120 : 'http://x',
         } as never,
+        consent as never,
       );
       signUpEmail.mockResolvedValue({ user: { id: 'u1' } });
       prisma.customer.count.mockResolvedValue(1);

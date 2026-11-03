@@ -7,6 +7,7 @@ import * as argon2 from 'argon2';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { registerConsent } from './helpers/legal-consent.js';
 
 type App = Parameters<typeof request>[0];
 type Body = { errorCode?: string; phone?: string | null; name?: string };
@@ -78,6 +79,7 @@ describe('Customer auth (Story 12.3, e2e)', () => {
     request(server())
       .post('/api/v1/auth/register')
       .send({
+        ...registerConsent(),
         email: EMAIL,
         password: PASSWORD,
         name: 'Ada Collector',

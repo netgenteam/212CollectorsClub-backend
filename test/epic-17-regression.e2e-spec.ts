@@ -10,6 +10,7 @@ import * as argon2 from 'argon2';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { registerConsent } from './helpers/legal-consent.js';
 
 const PASSWORD = 'Correct-horse-17-6!';
 const SEEDED = ['MRW', 'ZOOM', 'TEALCA', 'DOMESA'];
@@ -64,7 +65,12 @@ describe('Epic 17 regression (e2e, Story 17.6)', { timeout: 60000 }, () => {
     emails.push(email);
     await request(server())
       .post('/api/v1/auth/register')
-      .send({ email, password: PASSWORD, name: 'Epic17 Tester' })
+      .send({
+        ...registerConsent(),
+        email,
+        password: PASSWORD,
+        name: 'Epic17 Tester',
+      })
       .expect(201);
     const c = await prisma.customer.update({
       where: { email },

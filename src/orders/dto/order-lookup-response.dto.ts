@@ -197,6 +197,27 @@ export class OrderDetailResponseDto {
       'Last time this Order row changed (e.g. its last status transition).',
   })
   updatedAt: string;
+
+  @ApiProperty({
+    nullable: true,
+    example: 3,
+    description:
+      'Story 19.4: version of `terminos` accepted at checkout. Null for historical orders or when that document had no version in force.',
+  })
+  termsVersion: number | null;
+
+  @ApiProperty({ nullable: true, example: 2 })
+  shippingVersion: number | null;
+
+  @ApiProperty({ nullable: true, example: 2 })
+  returnsVersion: number | null;
+
+  @ApiProperty({
+    nullable: true,
+    example: '2026-09-24T17:41:08.000Z',
+    description: 'DB clock of the acceptance; null when nothing was accepted.',
+  })
+  termsAcceptedAt: string | null;
 }
 
 /**

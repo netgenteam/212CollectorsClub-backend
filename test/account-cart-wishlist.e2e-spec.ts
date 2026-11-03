@@ -9,6 +9,7 @@ import request from 'supertest';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { registerConsent } from './helpers/legal-consent.js';
 
 interface CartBody {
   items: { productId: string; quantity: number }[];
@@ -123,7 +124,12 @@ describe('Account cart and wishlist with login merge (e2e, Story 12.5)', () => {
     emails.push(email);
     await request(server())
       .post('/api/v1/auth/register')
-      .send({ email, password: PASSWORD, name: 'Acc Tester' })
+      .send({
+        ...registerConsent(),
+        email,
+        password: PASSWORD,
+        name: 'Acc Tester',
+      })
       .expect(201);
     return email;
   }

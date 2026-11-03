@@ -18,6 +18,7 @@ import { defaultPokemonTemplate } from './../src/simulator/simulator-defaults.js
 import { validBlock } from './../src/admin-landing/landing-blocks.fixtures.js';
 
 import { snapshotLanding, restoreLanding } from './helpers/db-snapshot.js';
+import { registerConsent } from './helpers/legal-consent.js';
 
 type App = Parameters<typeof request>[0];
 const P = 'e2e1611-';
@@ -164,7 +165,12 @@ describe('Epic 16 regression (e2e)', () => {
     await prisma.customer.deleteMany({ where: { email: CUSTOMER_EMAIL } });
     await server()
       .post('/api/v1/auth/register')
-      .send({ email: CUSTOMER_EMAIL, password: CUSTOMER_PASS, name: 'Ada' })
+      .send({
+        ...registerConsent(),
+        email: CUSTOMER_EMAIL,
+        password: CUSTOMER_PASS,
+        name: 'Ada',
+      })
       .expect(201);
     const cl = await server()
       .post('/api/v1/auth/login')

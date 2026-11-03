@@ -246,7 +246,11 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
       });
     for (const [name, code] of Object.entries(results)) {
       // 23000 = integrity_constraint_violation (what the triggers raise).
-      expect([name, code]).toEqual([name, '23000']);
+      // Story 19.4: Consent_Records now references Legal_Document_Versions, and
+      // Postgres refuses TRUNCATE of a referenced table (0A000) before any
+      // trigger runs: still rejected, with that code.
+      const expected = name === 'version TRUNCATE' ? '0A000' : '23000';
+      expect([name, code]).toEqual([name, expected]);
     }
     expect(Object.keys(results)).toHaveLength(17);
     // Nothing leaked out of the rolled-back transaction.

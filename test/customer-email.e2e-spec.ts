@@ -7,6 +7,7 @@ import request from 'supertest';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { registerConsent } from './helpers/legal-consent.js';
 
 type App = Parameters<typeof request>[0];
 type Body = { errorCode?: string; emailVerified?: boolean; message?: string };
@@ -124,7 +125,12 @@ describe(
     const register = () =>
       request(server())
         .post('/api/v1/auth/register')
-        .send({ email: EMAIL, password: PASSWORD, name: 'Ada' });
+        .send({
+          ...registerConsent(),
+          email: EMAIL,
+          password: PASSWORD,
+          name: 'Ada',
+        });
     const login = (password = PASSWORD) =>
       request(server())
         .post('/api/v1/auth/login')
