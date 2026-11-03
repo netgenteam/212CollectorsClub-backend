@@ -1,0 +1,48 @@
+> **Plantilla — revisar con un abogado antes de publicar.** Borrador orientativo, no es asesoría jurídica. Venezuela no tiene una ley específica de cookies; se usan estándares internacionales como referencia. Reemplaza cada marcador `[[...]]`, verifica la tabla contra el sitio publicado y elimina este bloque. [[ELIMINAR_AVISO_DE_PLANTILLA]]
+
+## Política de Cookies
+
+Versión del borrador: [[FECHA_VERSION]]. Responsable: **[[RAZON_SOCIAL]]**, RIF **[[RIF]]**, contacto [[EMAIL_CONTACTO]].
+
+## 1. Qué son
+
+Las cookies son pequeños archivos que el navegador guarda para recordar información entre páginas. Esta política explica cuáles usa 212 Collectors Club y cómo controlarlas.
+
+## 2. Categorías
+
+### Esenciales (siempre activas)
+
+Necesarias para que el sitio funcione: mantener tu sesión, tu carrito y tu lista de deseos, y recordar tu elección sobre cookies. No pueden desactivarse desde el banner porque sin ellas no podrías comprar.
+
+| Cookie | Finalidad | Duración |
+|---|---|---|
+| `cc_session` | Sesión de cliente iniciada (httpOnly) | 7 días con renovación diaria |
+| `cartId` | Identifica tu carrito (firmada) | 30 días |
+| `wishlistId` | Identifica tu lista de deseos (firmada) | 30 días |
+| `212_cookie_prefs` | Guarda tu elección sobre cookies y la versión de esta política | 1 año |
+
+[[VERIFICAR_NOMBRES_Y_DURACIONES_CONTRA_EL_SITIO_PUBLICADO]] Las cookies de la zona de administración solo las usa el personal de la Tienda.
+
+### Analíticas (desactivadas por defecto)
+
+Servirían para medir el uso del sitio. **Hoy el sitio no usa cookies analíticas.** Si algún día se incorporan, solo se activarán si las aceptas.
+
+### Marketing (desactivadas por defecto)
+
+Servirían para personalizar publicidad. **Hoy el sitio no usa cookies de marketing.** Si se incorporan, solo se activarán con tu consentimiento.
+
+## 3. Cómo gestionarlas
+
+En el banner puedes aceptar, rechazar o configurar las categorías no esenciales. Rechazar o cerrar el banner sin elegir equivale a usar solo las esenciales. Puedes cambiar tu decisión en cualquier momento con el botón «Preferencias de cookies» del pie de página. También puedes borrar o bloquear cookies desde tu navegador; si bloqueas las esenciales, el carrito y el inicio de sesión no funcionarán.
+
+## 4. Contador de vistas de producto
+
+El sitio puede sumar una vista anónima a un contador agregado por producto y por día. Esta medición **no usa cookies ni identificadores**, no guarda tu IP y no te identifica, por lo que no depende de tu consentimiento. Aun así **respetamos Global Privacy Control (GPC) y Do Not Track (DNT)**: si tu navegador los emite, no se envía. Más información en la [Política de Privacidad](/privacidad). [[CONFIRMAR_CON_ABOGADO]]
+
+## 5. Cambios
+
+Si cambia esta política de forma sustancial, el banner volverá a mostrarse para que elijas de nuevo.
+
+## 🔗 Relacionado
+
+[Privacidad](/privacidad) · [Términos](/terminos) · [Aviso Legal](/aviso-legal)

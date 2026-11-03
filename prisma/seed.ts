@@ -14,6 +14,7 @@
 // and never has to worry about FK ordering on the way down — only the
 // deterministic ids need to stay stable across edits to this file.
 import 'dotenv/config';
+import { fileURLToPath } from 'node:url';
 import * as argon2 from 'argon2';
 import { PrismaPg } from '@prisma/adapter-pg';
 import {
@@ -38,6 +39,10 @@ import {
   type LandingDrop212Key,
   type LandingTextKey,
 } from '../src/admin-landing/landing-content.constants.js';
+import {
+  LegalSeedService,
+  loadLegalSeedTemplates,
+} from '../src/legal/legal-seed.service.js';
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -918,6 +923,20 @@ async function main(): Promise<void> {
   await seedAdminUser();
   await seedLandingContent();
   await seedShippingAgencies();
+  await seedLegalDrafts();
+}
+
+// Story 19.3 (AD-88/94, FR-110): one DRAFT per legal document (never a
+// published version), only where the document has neither a version nor a
+// draft. Idempotent and safe to run in parallel: see LegalSeedService.
+async function seedLegalDrafts(): Promise<void> {
+  const templates = await loadLegalSeedTemplates(
+    fileURLToPath(new URL('./seed-data/legal/', import.meta.url)),
+  );
+  const results = await new LegalSeedService(prisma).seedDrafts(templates);
+  console.log(
+    `Legal drafts: ${results.map((r) => `${r.slug}=${r.outcome}`).join(' ')}`,
+  );
 }
 
 main()

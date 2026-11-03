@@ -10,7 +10,8 @@ export const DRAFT_EDIT_COALESCE_MINUTES = 10;
 export interface LegalAuditInput {
   documentId: string | null;
   action: LegalAuditAction;
-  actor: LegalActor;
+  /** `null` = a system action with no admin behind it (the Story 19.3 seed). */
+  actor: LegalActor | null;
   versionNumber?: number | null;
   /** Never the document body. */
   meta?: Record<string, unknown>;
@@ -42,8 +43,8 @@ export class LegalAuditService {
       data: {
         documentId: input.documentId,
         action: input.action,
-        adminUserId: input.actor.id,
-        adminEmail: input.actor.email,
+        adminUserId: input.actor?.id ?? null,
+        adminEmail: input.actor?.email ?? null,
         versionNumber: input.versionNumber ?? null,
         meta: LegalAuditService.boundMeta(input.meta ?? {}),
       },
@@ -59,7 +60,10 @@ export class LegalAuditService {
    */
   async recordDraftEdited(
     tx: Tx,
-    input: Omit<LegalAuditInput, 'action'> & { documentId: string },
+    input: Omit<LegalAuditInput, 'action' | 'actor'> & {
+      documentId: string;
+      actor: LegalActor;
+    },
   ): Promise<boolean> {
     const [{ recent }] = await tx.$queryRaw<{ recent: boolean }[]>`
       SELECT EXISTS (
