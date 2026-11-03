@@ -97,7 +97,7 @@ describe('drawPack', () => {
         );
       }
     }
-  });
+  }, 60_000); // 19.3b: 1000 packs x2 is CPU-heavy; correctness only, roomy test timeout
 
   it('without reverse printings the reverse slot uses COMMON/UNCOMMON/RARE flagged isReverse', () => {
     const pool = buildPool(rows());

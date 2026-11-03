@@ -10,7 +10,7 @@ import { LEGAL_TEMPLATE_NOTICE } from './legal-placeholders.js';
  * the text the PUBLIC reads. Runs the REAL worker, so the AST normalization
  * (entities, escapes, quote prefixes, emphasis, links) is the one in production.
  */
-const svc = new LegalMarkdownService();
+const svc = new LegalMarkdownService({ timeoutMs: 30_000 }); // 19.3b: roomy test deadline, product default stays 3 s;
 afterAll(() => svc.onModuleDestroy());
 const residuals = async (md: string): Promise<LegalResidual[]> =>
   (await svc.validate(md)).residuals;

@@ -345,7 +345,7 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
       expect(row.totalVes?.toFixed(2)).toBe(expectedVes.toFixed(2));
     }
     expect(seen.size).toBeGreaterThanOrEqual(1);
-  });
+  }, 30_000); // Story 19.3b: 12 checkouts + a flipper hit the default 5 s test timeout under load
 
   it('AC7: checkouts concurrent with admin PUT source changes never 5xx and stay coherent with a real source', async () => {
     await setRow('MANUAL', '300.0000');

@@ -50,7 +50,8 @@ must never contain committed secrets.
 | `pnpm build` | Compile to `dist/` |
 | `pnpm lint` | ESLint, zero warnings/errors allowed |
 | `pnpm lint:fix` | ESLint with autofix |
-| `pnpm test` / `pnpm test:e2e` | Vitest unit / e2e tests |
+| `pnpm test` / `pnpm test:e2e` | Vitest unit (correctness only) / e2e tests |
+| `pnpm test:perf` | Performance assertions (`*.perf.spec.ts`: time budgets, event-loop delay), one file at a time on one thread; run it on a quiet machine, not under load |
 | `pnpm prisma:generate` | Regenerate the Prisma client (also runs on `postinstall`) |
 | `pnpm prisma:migrate` | `prisma migrate dev` (local dev only) |
 | `pnpm prisma:deploy` | `prisma migrate deploy` (CI/CD — never run automatically at app boot) |

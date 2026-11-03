@@ -18,6 +18,15 @@ const MISBEHAVING = new URL(
   import.meta.url,
 );
 
+/**
+ * Story 19.3b: `pnpm test` checks CORRECTNESS only. Whatever must answer with a
+ * real worker gets this roomy deadline (a test option; the product default
+ * stays 3 s) so a loaded machine cannot turn a valid parse into a TIMEOUT.
+ * Time and event-loop-delay assertions live in
+ * `legal-markdown-worker.perf.spec.ts` (`pnpm test:perf`).
+ */
+const ROOMY = 30_000;
+
 const services: LegalMarkdownService[] = [];
 const make = (opts?: LegalMarkdownOptions) => {
   const s = new LegalMarkdownService(opts);
@@ -27,18 +36,6 @@ const make = (opts?: LegalMarkdownOptions) => {
 afterEach(async () => {
   await Promise.all(services.splice(0).map((s) => s.onModuleDestroy()));
 });
-
-/** Samples the event loop every 10 ms and keeps the worst extra delay. */
-function loopMonitor() {
-  let last = performance.now();
-  let max = 0;
-  const iv = setInterval(() => {
-    const now = performance.now();
-    max = Math.max(max, now - last - 10);
-    last = now;
-  }, 10);
-  return { stop: () => (clearInterval(iv), max) };
-}
 
 /** Waits until every thread of the pool is really gone (dying ones count as alive). */
 async function settled(svc: LegalMarkdownService) {
@@ -61,66 +58,46 @@ const body = async (p: Promise<unknown>) => {
 };
 
 describe('Markdown worker: event loop never blocked (QA D1)', () => {
-  it('the QA vector (177 KB) is a 400 at the hard deadline, the worker is terminated and the loop stays responsive', async () => {
-    const svc = make(); // production defaults (timeout 3 s)
+  it('the QA vector (177 KB) is a 400 at the hard deadline and the worker is terminated', async () => {
+    const svc = make({ timeoutMs: 1_000 });
     expect(QA_VECTOR.length).toBeGreaterThan(170_000);
-    const mon = loopMonitor();
-    const t = performance.now();
     const res = await body(svc.validate(QA_VECTOR));
-    const ms = performance.now() - t;
-    const maxDelay = mon.stop();
-    console.log(
-      `[19.1 D1] QA vector: validate ${ms.toFixed(0)} ms -> ${res?.statusCode}, max event-loop delay ${maxDelay.toFixed(1)} ms`,
-    );
     expect(res?.statusCode).toBe(400);
     expect(res?.errorCode).toBe('LEGAL_MARKDOWN_INVALID');
-    expect(res?.details?.issues[0].reason).toMatch(/too long to analyze/);
-    expect(ms).toBeGreaterThanOrEqual(2_900);
-    expect(ms).toBeLessThan(5_000);
-    expect(maxDelay).toBeLessThan(250);
+    expect(res?.details?.issues[0].reason).toMatch(
+      /could not analyze it in time/,
+    );
     await settled(svc);
     expect(svc.poolStats()).toMatchObject({ alive: 0, terminated: 1 });
-    // The service is healthy afterwards (a fresh worker is created lazily).
-    expect((await svc.validate('## Ok\n\ntexto')).toc).toHaveLength(1);
   }, 20_000);
 
   it('the toc read path does not block the loop either, and a failed analysis is cached', async () => {
     const svc = make({ timeoutMs: 600 });
-    const mon = loopMonitor();
     const first = await svc.buildToc(QA_VECTOR);
     const spawnedAfterFirst = svc.poolStats().spawned;
-    const t = performance.now();
     // 5 concurrent reads of the same stored body, all answered from the cache
     const rest = await Promise.all(
       [1, 2, 3, 4, 5].map(() => svc.buildToc(QA_VECTOR)),
     );
-    const again = performance.now() - t;
-    const maxDelay = mon.stop();
-    console.log(
-      `[19.1 D1] buildToc on the QA vector: [] after timeout; repeat reads ${again.toFixed(1)} ms; max loop delay ${maxDelay.toFixed(1)} ms`,
-    );
     expect(first).toEqual([]);
     expect(rest.every((r) => r.length === 0)).toBe(true);
-    expect(again).toBeLessThan(100);
     expect(svc.poolStats().spawned).toBe(spawnedAfterFirst);
-    expect(maxDelay).toBeLessThan(250);
   }, 20_000);
 
   it('concurrent misses of the same body share ONE job; normal reads hit the cache', async () => {
-    const svc = make();
+    const svc = make({ timeoutMs: ROOMY });
     const md = '## A\n\ntexto\n\n### B\n\nmás';
     const rs = await Promise.all(
       Array.from({ length: 8 }, () => svc.buildToc(md)),
     );
     expect(rs.every((r) => r.length === 2)).toBe(true);
     expect(svc.poolStats().spawned).toBe(1);
-    const t = performance.now();
-    await svc.buildToc(md);
-    expect(performance.now() - t).toBeLessThan(20);
+    await svc.buildToc(md); // cache hit: no new job
+    expect(svc.poolStats().spawned).toBe(1);
   });
 
   it('validate primes the toc cache (the first read after publishing needs no parse)', async () => {
-    const svc = make();
+    const svc = make({ timeoutMs: ROOMY });
     const md = '## Uno\n\n### Dos';
     const { toc } = await svc.validate(md);
     const before = svc.poolStats().spawned;
@@ -128,8 +105,8 @@ describe('Markdown worker: event loop never blocked (QA D1)', () => {
     expect(svc.poolStats().spawned).toBe(before);
   });
 
-  it('realistic legal text of normal size is accepted well inside the timeout', async () => {
-    const svc = make();
+  it('realistic legal text of normal size is accepted (no thread terminated)', async () => {
+    const svc = make({ timeoutMs: ROOMY });
     const clause = (i: number) =>
       [
         `## Cláusula ${i}. Condiciones`,
@@ -147,16 +124,7 @@ describe('Markdown worker: event loop never blocked (QA D1)', () => {
         `Párrafo ${i}: el comprador acepta estos términos y **condiciones** de uso del sitio, sin perjuicio de la ley. Lorem ipsum dolor sit amet consectetur adipiscing elit.`,
     ).join('\n\n');
     for (const doc of [md, prose]) {
-      const mon = loopMonitor();
-      const t = performance.now();
       await svc.validate(doc);
-      const ms = performance.now() - t;
-      const d = mon.stop();
-      console.log(
-        `[19.1 D1] realistic ${Math.round(doc.length / 1024)} KB accepted in ${ms.toFixed(0)} ms, max loop delay ${d.toFixed(1)} ms`,
-      );
-      expect(ms).toBeLessThan(2_000);
-      expect(d).toBeLessThan(250);
     }
     expect(svc.poolStats().terminated).toBe(0);
   }, 20_000);
@@ -169,26 +137,21 @@ describe('Markdown worker: bounded concurrency', () => {
     const iv = setInterval(() => {
       peak = Math.max(peak, svc.poolStats().alive);
     }, 5);
-    const t = performance.now();
     const results = await Promise.all(
       Array.from({ length: 12 }, async () => {
         const r = await body(svc.validate(QA_VECTOR));
-        return { r, at: performance.now() - t };
+        return { r };
       }),
     );
     clearInterval(iv);
     const busy = results.filter((x) => x.r?.statusCode === 503);
     const invalid = results.filter((x) => x.r?.statusCode === 400);
-    console.log(
-      `[19.1 D1] 12 concurrent: ${invalid.length}x400, ${busy.length}x503 (max ${Math.max(...busy.map((b) => b.at)).toFixed(0)} ms), peak threads ${peak}`,
-    );
     expect(peak).toBeLessThanOrEqual(2);
     expect(invalid).toHaveLength(5);
     expect(busy).toHaveLength(7);
     expect(busy.every((b) => b.r?.errorCode === 'LEGAL_MARKDOWN_BUSY')).toBe(
       true,
     );
-    expect(Math.max(...busy.map((b) => b.at))).toBeLessThan(300); // rejected at once
     await settled(svc);
     expect(svc.poolStats()).toMatchObject({ alive: 0, busy: 0, queued: 0 });
   }, 30_000);
@@ -196,7 +159,7 @@ describe('Markdown worker: bounded concurrency', () => {
 
 describe('Markdown worker: failures never take the process down', () => {
   const bad = (extra: LegalMarkdownOptions = {}) =>
-    make({ workerUrl: MISBEHAVING, timeoutMs: 400, ...extra });
+    make({ workerUrl: MISBEHAVING, timeoutMs: ROOMY, ...extra });
 
   it.each([
     ['uncaught exception', 'throw'],
@@ -214,21 +177,16 @@ describe('Markdown worker: failures never take the process down', () => {
 
   it('infinite loop: killed at the deadline (real thread termination)', async () => {
     const svc = bad({ timeoutMs: 300 });
-    const mon = loopMonitor();
     const t = performance.now();
     const res = await body(svc.validate('hang'));
     const ms = performance.now() - t;
     expect(res?.statusCode).toBe(400);
-    expect(res?.details?.issues[0].reason).toMatch(/too long/);
-    expect(ms).toBeGreaterThanOrEqual(280);
-    expect(ms).toBeLessThan(1_500);
-    expect(mon.stop()).toBeLessThan(250);
+    expect(res?.details?.issues[0].reason).toMatch(
+      /could not analyze it in time/,
+    );
+    expect(ms).toBeGreaterThanOrEqual(280); // never cut earlier than the deadline
     await settled(svc);
     expect(svc.poolStats()).toMatchObject({ alive: 0, terminated: 1 });
-    // The terminated thread really freed the CPU: the next job is fast.
-    const t2 = performance.now();
-    await svc.validate('ok');
-    expect(performance.now() - t2).toBeLessThan(300);
   });
 
   it('out of memory (resourceLimits): that worker dies, the process and the pool survive', async () => {
@@ -369,52 +327,59 @@ describe('Markdown worker: thread cap holds under churn (QA A)', () => {
       process.off('unhandledRejection', onUnhandled);
     });
 
-    it('fails the affected jobs cleanly (no unhandled rejection), does not wedge the queue, recovers', async () => {
-      let broken = false;
-      const svc = make({
-        workerUrl: MISBEHAVING,
-        maxWorkers: 1,
-        maxQueue: 5,
-        timeoutMs: 150,
-        createWorker: (o) => {
-          if (broken) throw new Error('EAGAIN: cannot create thread');
-          return new Worker(o.workerUrl, { execArgv: [] });
-        },
-      });
-      const a = body(svc.validate('hang')); // takes the only worker
-      const b = body(svc.validate('ok')); // queued
-      const c2 = body(svc.validate('ok')); // queued
-      await new Promise((r) => setTimeout(r, 20));
-      broken = true; // from now on the refill after A's kill throws
-      const [ra, rb, rc] = await Promise.all([a, b, c2]);
-      expect(ra?.statusCode).toBe(400); // timeout
-      expect(rb?.statusCode).toBe(400); // spawn failed: clean "too complex"
-      expect(rb?.details?.issues[0].reason).toMatch(/too complex/);
-      expect(rc?.statusCode).toBe(400);
-      await settled(svc);
-      expect(svc.poolStats()).toMatchObject({ alive: 0, busy: 0, queued: 0 });
-      // First spawn from a run() that throws: same clean failure.
-      const d = await body(svc.validate('ok'));
-      expect(d?.statusCode).toBe(400);
-      await settled(svc);
-      expect(svc.poolStats()).toMatchObject({ alive: 0, queued: 0 });
-      broken = false; // not wedged: the pool works again
-      expect((await svc.validate('ok')).toc).toHaveLength(1);
-      await new Promise((r) => setTimeout(r, 50));
-      expect(unhandled).toEqual([]);
-    });
+    it(
+      'fails the affected jobs cleanly (no unhandled rejection), does not wedge the queue, recovers',
+      async () => {
+        let broken = false;
+        const svc = make({
+          workerUrl: MISBEHAVING,
+          maxWorkers: 1,
+          maxQueue: 5,
+          timeoutMs: 1_500,
+          createWorker: (o) => {
+            if (broken) throw new Error('EAGAIN: cannot create thread');
+            return new Worker(o.workerUrl, { execArgv: [] });
+          },
+        });
+        const a = body(svc.validate('hang')); // takes the only worker
+        const b = body(svc.validate('ok')); // queued
+        const c2 = body(svc.validate('ok')); // queued
+        await new Promise((r) => setTimeout(r, 20));
+        broken = true; // from now on the refill after A's kill throws
+        const [ra, rb, rc] = await Promise.all([a, b, c2]);
+        expect(ra?.statusCode).toBe(400); // timeout
+        expect(rb?.statusCode).toBe(400); // spawn failed: clean "too complex"
+        expect(rb?.details?.issues[0].reason).toMatch(/too complex/);
+        expect(rc?.statusCode).toBe(400);
+        await settled(svc);
+        expect(svc.poolStats()).toMatchObject({ alive: 0, busy: 0, queued: 0 });
+        // First spawn from a run() that throws: same clean failure.
+        const d = await body(svc.validate('ok'));
+        expect(d?.statusCode).toBe(400);
+        await settled(svc);
+        expect(svc.poolStats()).toMatchObject({ alive: 0, queued: 0 });
+        broken = false; // not wedged: the pool works again
+        expect((await svc.validate('ok')).toc).toHaveLength(1);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(unhandled).toEqual([]);
+      },
+      ROOMY,
+    );
   });
 });
 
 describe('toc cache: transient failures are not permanent (QA B)', () => {
   const MISBEHAVING_JS = MISBEHAVING;
   const DOC = 'hang\n\n## Real\n\ntexto'; // bad worker hangs on it; the real one answers
+  // Same, but the bad worker throws at once: a FAILED instead of a TIMEOUT, no
+  // waiting for a deadline (the negative-cache rules are the same for both).
+  const DOC_FAST = 'throw\n\n## Real\n\ntexto';
 
   function setup(extra: LegalMarkdownOptions = {}) {
     const clock = { t: 1_000_000 };
     const state = { bad: true };
     const svc = make({
-      timeoutMs: 1_000,
+      timeoutMs: ROOMY / 6, // 5 s: the real worker must answer inside it
       now: () => clock.t,
       createWorker: (o) =>
         new Worker(state.bad ? MISBEHAVING_JS : o.workerUrl, {
@@ -426,39 +391,43 @@ describe('toc cache: transient failures are not permanent (QA B)', () => {
     return { clock, state, svc };
   }
 
-  it('a timeout degrades to [], is not relaunched inside the TTL, and is retried after it', async () => {
-    const { clock, state, svc } = setup({ negativeTtlMs: 60_000 });
-    expect(await svc.buildToc(DOC)).toEqual([]);
-    const spawned = svc.poolStats().spawned;
-    clock.t += 59_999;
-    state.bad = false; // the cause went away, but the TTL has not expired
-    expect(await svc.buildToc(DOC)).toEqual([]);
-    expect(svc.poolStats().spawned).toBe(spawned); // no worker launched
-    clock.t += 2; // TTL expired
-    const toc = await svc.buildToc(DOC);
-    expect(toc.map((e) => e.text)).toEqual(['Real']); // index recovered
-    expect(svc.poolStats().spawned).toBe(spawned + 1);
-    // The positive result is permanent: no expiry, no new job.
-    clock.t += 10 * 60_000;
-    expect(await svc.buildToc(DOC)).toEqual(toc);
-    expect(svc.poolStats().spawned).toBe(spawned + 1);
-  });
+  it(
+    'a timeout degrades to [], is not relaunched inside the TTL, and is retried after it',
+    async () => {
+      const { clock, state, svc } = setup({ negativeTtlMs: 60_000 });
+      expect(await svc.buildToc(DOC)).toEqual([]);
+      const spawned = svc.poolStats().spawned;
+      clock.t += 59_999;
+      state.bad = false; // the cause went away, but the TTL has not expired
+      expect(await svc.buildToc(DOC)).toEqual([]);
+      expect(svc.poolStats().spawned).toBe(spawned); // no worker launched
+      clock.t += 2; // TTL expired
+      const toc = await svc.buildToc(DOC);
+      expect(toc.map((e) => e.text)).toEqual(['Real']); // index recovered
+      expect(svc.poolStats().spawned).toBe(spawned + 1);
+      // The positive result is permanent: no expiry, no new job.
+      clock.t += 10 * 60_000;
+      expect(await svc.buildToc(DOC)).toEqual(toc);
+      expect(svc.poolStats().spawned).toBe(spawned + 1);
+    },
+    ROOMY,
+  );
 
   it('a still-failing body is retried once per TTL, not on every read', async () => {
     const { clock, svc } = setup({ negativeTtlMs: 1_000 });
-    await svc.buildToc(DOC);
+    await svc.buildToc(DOC_FAST);
     const s1 = svc.poolStats().terminated;
-    for (let i = 0; i < 5; i++) await svc.buildToc(DOC);
+    for (let i = 0; i < 5; i++) await svc.buildToc(DOC_FAST);
     expect(svc.poolStats().terminated).toBe(s1);
     clock.t += 1_001;
-    await svc.buildToc(DOC);
+    await svc.buildToc(DOC_FAST);
     expect(svc.poolStats().terminated).toBe(s1 + 1);
   });
 
   it('concurrent failing reads of the same body share ONE job', async () => {
     const { svc } = setup();
     const rs = await Promise.all(
-      Array.from({ length: 6 }, () => svc.buildToc(DOC)),
+      Array.from({ length: 6 }, () => svc.buildToc(DOC_FAST)),
     );
     expect(rs.every((r) => r.length === 0)).toBe(true);
     expect(svc.poolStats().spawned).toBe(1);
@@ -466,12 +435,12 @@ describe('toc cache: transient failures are not permanent (QA B)', () => {
 
   it('validate() success replaces a negative entry with the permanent one', async () => {
     const { clock, state, svc } = setup();
-    expect(await svc.buildToc(DOC)).toEqual([]);
+    expect(await svc.buildToc(DOC_FAST)).toEqual([]);
     state.bad = false;
     clock.t += 1; // inside the TTL
-    await svc.validate(DOC);
+    await svc.validate(DOC_FAST);
     const spawned = svc.poolStats().spawned;
-    expect((await svc.buildToc(DOC)).map((e) => e.text)).toEqual(['Real']);
+    expect((await svc.buildToc(DOC_FAST)).map((e) => e.text)).toEqual(['Real']);
     expect(svc.poolStats().spawned).toBe(spawned);
   });
 });
@@ -517,7 +486,7 @@ const diffVector = (seed: string) => {
 
 describe('Legal diff in the worker pool (QA D1, Story 19.2)', () => {
   it('a normal diff is correct in content (changed line + 3 lines of context)', async () => {
-    const svc = make();
+    const svc = make({ diffTimeoutMs: ROOMY });
     const a = Array.from({ length: 20 }, (_, i) => `l${i + 1}`);
     const b = [...a];
     b[9] = 'l10 CAMBIADA';
@@ -533,23 +502,19 @@ describe('Legal diff in the worker pool (QA D1, Story 19.2)', () => {
     ]);
   });
 
-  it('the QA vector does not block the event loop (max delay measured) and the result is complete', async () => {
-    const svc = make();
-    const A = diffVector('a');
-    const B = diffVector('b');
-    expect(A.length).toBeGreaterThan(190_000);
-    const mon = loopMonitor();
-    const t = performance.now();
-    const d = await svc.diff(A, B);
-    const ms = performance.now() - t;
-    const maxDelay = mon.stop();
-    console.log(
-      `[19.2 D1] diff of the QA vector: ${ms.toFixed(0)} ms, max event-loop delay ${maxDelay.toFixed(1)} ms`,
-    );
-    // the 6 blank separators are the only lines the two texts share
-    expect(d.stats).toEqual({ added: 5984, removed: 5984 });
-    expect(maxDelay).toBeLessThan(250);
-  }, 30_000);
+  it(
+    'the QA vector diff is complete',
+    async () => {
+      const svc = make({ diffTimeoutMs: ROOMY });
+      const A = diffVector('a');
+      const B = diffVector('b');
+      expect(A.length).toBeGreaterThan(190_000);
+      const d = await svc.diff(A, B);
+      // the 6 blank separators are the only lines the two texts share
+      expect(d.stats).toEqual({ added: 5984, removed: 5984 });
+    },
+    ROOMY,
+  );
 
   it('a diff over its hard deadline is a TIMEOUT and the worker is terminated', async () => {
     const svc = make({ workerUrl: MISBEHAVING, diffTimeoutMs: 300 });

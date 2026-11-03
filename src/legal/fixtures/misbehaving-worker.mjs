@@ -4,7 +4,7 @@ import { parentPort } from 'node:worker_threads';
 parentPort.on('message', ({ id, md = '', type, from }) => {
   if (type === 'diff' && from === 'hang') for (;;);
   if (md === 'hang' || md.startsWith('hang\n')) for (;;); // synchronous infinite loop
-  if (md === 'throw') throw new Error('boom');
+  if (md === 'throw' || md.startsWith('throw\n')) throw new Error('boom');
   if (md === 'exit') process.exit(3); // in a worker: ends only that thread
   if (md === 'oom') {
     const hog = [];

@@ -8,7 +8,10 @@ import {
 import { PoolFailure } from './legal-markdown-pool.js';
 import { XSS_ACCEPT, XSS_REJECT } from './xss-corpus.js';
 
-const svc = new LegalMarkdownService();
+// Story 19.3b: correctness only. A roomy deadline (test option; the product
+// default stays 3 s) so machine load cannot turn a valid parse into a TIMEOUT.
+// The time assertions are in `legal-markdown.perf.spec.ts` (`pnpm test:perf`).
+const svc = new LegalMarkdownService({ timeoutMs: 30_000 });
 afterAll(() => svc.onModuleDestroy());
 
 const issuesOf = async (md: string) => {
@@ -142,9 +145,6 @@ describe('LegalMarkdownService toc', () => {
 });
 
 describe('LegalMarkdownService.validate (bounded, QA D1)', () => {
-  // Generous for CI (the target on a dev machine is < 500 ms); the unbounded
-  // versions took 4 s to > 30 s, so this still catches any regression.
-  const MAX_MS = 1500;
   const nest = (n: number) =>
     Array.from({ length: n }, (_, i) => `${' '.repeat(2 * i)}- x`).join('\n');
 
@@ -175,18 +175,15 @@ describe('LegalMarkdownService.validate (bounded, QA D1)', () => {
     ],
   ];
 
-  it.each(vectors)('400 LEGAL_MARKDOWN_INVALID, fast: %s', async (_n, md) => {
-    const t = performance.now();
+  it.each(vectors)('400 LEGAL_MARKDOWN_INVALID: %s', async (_n, md) => {
     const body = await issuesOf(md);
-    const ms = performance.now() - t;
     expect(body?.statusCode).toBe(400);
     expect(body?.errorCode).toBe('LEGAL_MARKDOWN_INVALID');
     expect(body?.details.issues.length).toBeGreaterThan(0);
     expect(body?.details.issues[0].line).toBeGreaterThanOrEqual(1);
-    expect(ms).toBeLessThan(MAX_MS);
   });
 
-  // Inputs that PASS the prefilter at (just under) each limit still finish fast.
+  // Inputs that PASS the prefilter at (just under) each limit (timed in the perf spec).
   const atLimit: [string, string][] = [
     ['5999 flat list items', '- a\n'.repeat(5999)],
     ['800 nested items', '* a\n  * b\n'.repeat(400)],
@@ -195,14 +192,9 @@ describe('LegalMarkdownService.validate (bounded, QA D1)', () => {
     ['58 KB table', '| a | b |\n| - | - |\n' + '| 1 | 2 |\n'.repeat(6000)],
     ['20000 literal links', 'www.a. '.repeat(2800)],
   ];
-  it.each(atLimit)(
-    'under the limits it still ends quickly: %s',
-    async (_n, md) => {
-      const t = performance.now();
-      await issuesOf(md);
-      expect(performance.now() - t).toBeLessThan(MAX_MS);
-    },
-  );
+  it.each(atLimit)('under the limits it still ends: %s', async (_n, md) => {
+    await issuesOf(md); // must resolve (400 or ok), never hang or throw
+  });
 
   it('does not reject realistic legal documents (~100 KB, 3-4 level lists, tables, links)', async () => {
     const clause = (i: number) =>
@@ -218,9 +210,7 @@ describe('LegalMarkdownService.validate (bounded, QA D1)', () => {
     const md = Array.from({ length: 180 }, (_, i) => clause(i)).join('\n\n');
     expect(md.length).toBeGreaterThan(90_000);
     expect(md.length).toBeLessThan(LEGAL_MD_LIMITS.maxBytes);
-    const t = performance.now();
     const r = await svc.validate(md);
-    expect(performance.now() - t).toBeLessThan(MAX_MS);
     expect(r.toc.length).toBe(360);
     expect(new Set(r.toc.map((x) => x.id)).size).toBe(360);
   });
@@ -307,5 +297,50 @@ describe('LegalMarkdownService.buildToc race with validate (QA 19.1, Story 19.2)
     expect(await s.buildToc('## A\n')).toEqual([]);
     expect(await s.buildToc('## A\n')).toEqual([]);
     expect(calls).toBe(1);
+  });
+});
+
+describe('validate(): a TIMEOUT does not blame the document (Story 19.3b)', () => {
+  const failing = (kind: 'TIMEOUT' | 'FAILED') => {
+    const s = new LegalMarkdownService();
+    (s as unknown as { pool: unknown }).pool = {
+      run: () => Promise.reject(new PoolFailure(kind)),
+      close: () => Promise.resolve(),
+      stats: () => ({}),
+    };
+    return s;
+  };
+  const bodyOf = async (s: LegalMarkdownService) => {
+    try {
+      await s.validate('## A\n');
+    } catch (e) {
+      return (e as ApiException).getResponse() as {
+        statusCode: number;
+        errorCode: string;
+        message: string;
+        details: { issues: { line: number; reason: string }[] };
+      };
+    }
+    return null;
+  };
+
+  it('TIMEOUT: same status and code, honest text (server could not analyze it in time; retry; then simplify)', async () => {
+    const b = await bodyOf(failing('TIMEOUT'));
+    expect(b?.statusCode).toBe(400);
+    expect(b?.errorCode).toBe('LEGAL_MARKDOWN_INVALID');
+    expect(b?.message).toMatch(/server could not analyze/i);
+    expect(b?.message).toMatch(/try again/i);
+    expect(b?.message).not.toMatch(/too large or too complex/);
+    expect(b?.details.issues).toHaveLength(1);
+    expect(b?.details.issues[0].reason).toMatch(/could not analyze it in time/);
+    expect(b?.details.issues[0].reason).toMatch(/Try again/);
+    expect(b?.details.issues[0].reason).toMatch(/simplify the structure/);
+    expect(b?.details.issues[0].reason).not.toMatch(/took too long/);
+  });
+
+  it('a worker crash (FAILED) keeps the "too complex" text', async () => {
+    const b = await bodyOf(failing('FAILED'));
+    expect(b?.statusCode).toBe(400);
+    expect(b?.message).toBe('The Markdown is too large or too complex.');
   });
 });

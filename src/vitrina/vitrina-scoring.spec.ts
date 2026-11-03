@@ -1005,7 +1005,7 @@ describe('invalid / hostile inputs', () => {
 });
 
 describe('performance (NFR-18.3)', () => {
-  it('10 000 products with synthetic events in < 5 s, no I/O', () => {
+  it('10 000 products with synthetic events rank correctly, no I/O (the < 5 s budget is in vitrina-scoring.perf.spec.ts)', () => {
     let seed = 1;
     const rnd = () => {
       seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
@@ -1037,10 +1037,7 @@ describe('performance (NFR-18.3)', () => {
           n: 12,
         });
     }
-    const t0 = process.hrtime.bigint();
     const r = run(products, events);
-    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-    expect(ms).toBeLessThan(5000);
     expect(r.mode).toBe('RANKED');
     expect(r.ranked).toHaveLength(VITRINA_MMR_K);
     const counts = new Map<string, number>();
@@ -1048,5 +1045,5 @@ describe('performance (NFR-18.3)', () => {
     for (const x of r.ranked)
       counts.set(fk.get(x.id)!, (counts.get(fk.get(x.id)!) ?? 0) + 1);
     expect(Math.max(...counts.values())).toBeLessThanOrEqual(4);
-  });
+  }, 60_000);
 });

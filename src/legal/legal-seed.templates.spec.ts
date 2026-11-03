@@ -11,7 +11,7 @@ import { LEGAL_SLUGS } from './legal-slugs.js';
  * Story 19.3 (AC2-AC4): the six seed templates, checked against the REAL
  * validator (async, worker thread) and the real placeholder detector.
  */
-const md = new LegalMarkdownService();
+const md = new LegalMarkdownService({ timeoutMs: 30_000 }); // 19.3b: roomy test deadline, product default stays 3 s;
 afterAll(() => md.onModuleDestroy());
 
 const SIMULATOR =

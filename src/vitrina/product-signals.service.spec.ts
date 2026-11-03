@@ -60,7 +60,7 @@ describe('ProductSignalsService.recordView', () => {
     expect(
       await svc.recordView('p', `ip-${VIEW_DEDUP_MAX_ENTRIES + 9}`, UA, T0),
     ).toBe(false);
-  });
+  }, 60_000);
 
   it('resets on a new UTC day (salt rotates)', async () => {
     const { svc } = mk();

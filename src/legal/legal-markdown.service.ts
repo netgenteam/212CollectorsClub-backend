@@ -347,7 +347,7 @@ const PARSE_FAILED: LegalMarkdownIssue = {
 const PARSE_TIMEOUT: LegalMarkdownIssue = {
   line: 1,
   reason:
-    'The Markdown took too long to analyze (simplify its structure, e.g. unclosed [ brackets in long paragraphs)',
+    'The server could not analyze it in time (the machine may be busy). Try again; if it persists, simplify the structure (e.g. unclosed [ brackets in long paragraphs)',
 };
 
 /** Options token (tests tune the pool; production uses the defaults). */
@@ -617,6 +617,7 @@ export class LegalMarkdownService implements OnModuleDestroy {
   ): Promise<{ toc: LegalTocEntry[]; residuals: LegalResidual[] }> {
     let issues: LegalMarkdownIssue[];
     let tooComplex = true;
+    let timedOut = false;
     let toc: LegalTocEntry[] | undefined;
     let residuals: LegalResidual[] = [];
     try {
@@ -636,19 +637,20 @@ export class LegalMarkdownService implements OnModuleDestroy {
       ) {
         throw this.busy();
       }
-      issues = [
-        e instanceof PoolFailure && e.kind === 'TIMEOUT'
-          ? PARSE_TIMEOUT
-          : PARSE_FAILED,
-      ];
+      timedOut = e instanceof PoolFailure && e.kind === 'TIMEOUT';
+      issues = [timedOut ? PARSE_TIMEOUT : PARSE_FAILED];
     }
     if (issues.length > 0 || !toc) {
+      // Story 19.3b: a deadline can be the server's load, not the text: do not
+      // blame the document. Same code and status (the admin UI depends on them).
       throw new ApiException(
         HttpStatus.BAD_REQUEST,
         'LEGAL_MARKDOWN_INVALID',
-        tooComplex
-          ? 'The Markdown is too large or too complex.'
-          : 'The Markdown contains forbidden constructs.',
+        timedOut
+          ? 'The server could not analyze the Markdown in time. Try again; if it persists, simplify its structure.'
+          : tooComplex
+            ? 'The Markdown is too large or too complex.'
+            : 'The Markdown contains forbidden constructs.',
         capIssues(issues),
       );
     }
