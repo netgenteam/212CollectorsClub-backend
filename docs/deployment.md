@@ -824,79 +824,194 @@ Additive contract note: `PUT /admin/fx/settings` now also returns `hardStale` (b
 8. Nginx: `grep -n 'X-Forwarded-For' /etc/nginx/sites-enabled/*` shows `$proxy_add_x_forwarded_for` on every proxy location; ports 3000/3001 unreachable from outside.
 9. After a few days: `Product_Daily_Stats` has no rows older than 180 days and only the last 3 runs of `Product_Score_Runs` remain.
 
-## 12. Legal documents: Markdown worker and version-insert guard (Story 19.1)
+## 12. Epic 19: documentos legales, consentimiento y lanzamiento (Stories 19.1 a 19.9)
 
-- **Worker thread.** `LegalMarkdownService` never parses Markdown on the API event loop. After the O(n) `precheckMarkdown`, the analysis runs in a bounded pool of `worker_thread`s (`src/legal/legal-markdown-pool.ts`): at most 2 threads, at most 16 queued jobs (more: 503 `LEGAL_MARKDOWN_BUSY` at once), 3 s hard deadline per parse (the thread is terminated; the answer is 400 `LEGAL_MARKDOWN_INVALID`), `resourceLimits` of 192 MB old-gen per thread (an out-of-memory only kills that thread). `onModuleDestroy` terminates every thread.
-- **Build artifact.** The worker is the plain-JS file `src/legal/legal-markdown.worker.mjs`; `nest build` copies it to `dist/legal/` through the `assets` entry of `nest-cli.json`. If `dist/legal/legal-markdown.worker.mjs` is missing, every validation answers 400 "too complex" and every toc is `[]`: check it after a build. It imports `unified`, `remark-parse`, `remark-gfm` and `mdast-util-to-string` from `node_modules`, so those must be production dependencies (they are).
-- **Public read path.** `GET /legal/...` obtains the toc from a content-addressed cache (SHA-256 of the body, 256 entries, LRU); `validate` primes it. A miss is analyzed in the pool (concurrent misses share one job); if the body cannot be analyzed in time the toc is `[]` and the body is still served.
-- **DB guard.** Migration `20261102200000_enforce_legal_version_insert`: a BEFORE INSERT trigger on `Legal_Document_Versions` takes a per-document advisory lock, rejects any `versionNumber` other than `max + 1` (SQLSTATE 23000) and overwrites `publishedAt` with the database clock. Publishers must compute `max + 1` and retry on 23000. Restricting `DISABLE TRIGGER` for the app role is Story 20.1.
+Esta sección es para Angel. Se lee de arriba abajo en el orden en que se hace: 12.1 desplegar, 12.2 si la migración se queda esperando, 12.3 si una migración falla, 12.4 las dos variables que se activan antes de abrir al público, 12.5 la checklist de lanzamiento, 12.6 riesgos y 12.7 volver atrás. Lo que **no** está verificado se dice en cada punto.
 
-### 12.1 Consent records and `LEGAL_REQUIRE_PUBLISHED` (Story 19.4)
+### 12.1 Qué cambia y cómo se despliega
 
-- **Migration** `20261103100000_add_consent_records` (additive: `Consent_Records`, two enums, four NULLable `Orders` columns; it contains `SET LOCAL lock_timeout = '10s'`, which has NO effect under `prisma migrate deploy`; see §12.2). Historical orders keep NULL. The table is append-only (triggers: UPDATE/DELETE/TRUNCATE rejected; the only accepted change is the FK `SetNull` cascade, and only orphaned rows can be deleted).
-- **Launch checklist (R1).** Publish `terminos`, `privacidad`, `envios` and `devoluciones` **and then** set `LEGAL_REQUIRE_PUBLISHED=true` (exact string `true`; read per request, but as a process env var changing it in production means restarting the service). With the flag off (default) a required document that has no version in force is **not required and nothing is recorded for it**: the backend logs a WARN (at most one per minute per document) and the `Orders.termsVersion`/`shippingVersion`/`returnsVersion` columns stay NULL. With it on, register / checkout / `POST /me/consent` answer 503 `LEGAL_NOT_PUBLISHED` instead of proceeding without terms. The age declaration is required in both modes (anything but `ageDeclared: true` is 400).
-- **Frontend order of deployment.** Registration and, once the four documents are published, checkout reject requests that do not carry `acceptedTermsVersion` / `acceptedPrivacyVersion` / `ageDeclared` and `acceptedTermsVersion` / `acceptedShippingVersion` / `acceptedReturnsVersion` (Story 19.7). Deploy the 19.7 frontend before publishing the documents / enabling the flag, or registration is closed in the meantime (it already is for the missing `ageDeclared`).
-- **Rollback.** The columns/table are inert for the previous build; leave the migration applied. `Consent_Records` cannot be truncated by design.
+**Qué trae el epic.** Seis documentos legales administrables (`terminos`, `privacidad`, `cookies`, `envios`, `devoluciones`, `aviso-legal`) con borrador, versiones inmutables, historial, diff y bitácora; registro de aceptación en registro y checkout; re-aceptación; declaración de mayoría de edad solo en registro y re-aceptación; identidad del vendedor para el pie de página. El frontend no añade variables de entorno.
 
-### 12.2 Bounding the lock wait of migrations (Story 19.4a)
+**Migraciones (todas aditivas, sin pérdida de datos; se aplican con `prisma migrate deploy`, que `deploy/deploy.sh` ya ejecuta antes de reiniciar el servicio).** Las del epic son seis, no dos como decía la historia original: `20261101300000_add_legal_documents`, `20261102100000_freeze_legal_row_identity`, `20261102200000_enforce_legal_version_insert`, `20261102300000_harden_legal_effective_from`, `20261102400000_legal_draft_revision_monotonic` y `20261103100000_add_consent_records`. Solo la última toca una tabla caliente (`Orders`, cuatro columnas NULL nuevas: los pedidos históricos quedan con NULL). Las tablas de versiones, bitácora y `Consent_Records` quedan protegidas por triggers: `UPDATE`, `DELETE` y `TRUNCATE` fallan (la única excepción es el `SetNull` de la clave foránea y el borrado de filas ya huérfanas de `Consent_Records`).
 
-An `ALTER TABLE` waits for an exclusive lock and, while it waits, every later query on that table queues behind it (on `Orders`: checkout and order lookups stall). QA 19.4 measured the consent migration waiting 28.5 s with a `SELECT` on `Orders` blocked for 25 s although the file starts with `SET LOCAL lock_timeout = '10s'`.
+**Orden de despliegue.**
 
-- **Which migrations rely on that line:** exactly one, `20261103100000_add_consent_records` (`grep -rn lock_timeout prisma/migrations`). It is already applied in dev and its checksum must not change, so it is left as is: on a database where it is still pending, it does **not** bound the wait.
-- **Verified on a database clone** (an `Orders` read lock held for 25-40 s, a probe `ALTER TABLE "Orders" ADD COLUMN`):
+1. Desplegar el **backend** (migraciones incluidas) con `LEGAL_REQUIRE_PUBLISHED=false` y `CHECKOUT_REQUIRE_SHIPPING` como esté (ver 12.4). `deploy/deploy.sh` **no corre ningún seed**.
+2. Desplegar el **frontend** del epic (casillas de aceptación, modal de re-aceptación, páginas legales, banner de cookies). Hay que hacerlo antes de abrir al público: sin las casillas, el registro devuelve 400 `CONSENT_REQUIRED` (la declaración de edad se exige siempre) y, cuando los documentos estén publicados, también el checkout.
+3. Sembrar los borradores con **`pnpm seed:legal`**, en el servidor, desde el directorio de la aplicación y con el entorno cargado (en producción el `.env` vive fuera del árbol de git y solo systemd lo lee):
 
-  | Mechanism | Result |
+   ```bash
+   cd /opt/212cc/production/app            # o la ruta real del clon
+   set -a; source /opt/212cc/production/shared/.env; set +a
+   pnpm seed:legal
+   ```
+
+   Imprime una línea `Legal drafts: terminos=CREATED privacidad=CREATED ...`. Es idempotente: una segunda ejecución imprime `SKIPPED_...` en cada documento y no cambia nada; nunca publica ni toca un documento que ya tiene borrador o versión. **No uses `pnpm prisma db seed` ni `pnpm prisma:seed` en producción:** ese es el seed completo de desarrollo y, además de los borradores, inserta el catálogo de prueba (31 productos con ids fijos), un usuario admin de desarrollo, contenido de la Home y agencias de envío. (`seed:legal` usa `tsx`, que es dependencia de desarrollo: está instalada porque `deploy.sh` ejecuta `pnpm install --frozen-lockfile` sin `--prod`.)
+4. Comprobar: `curl -s https://<DOMINIO>/api/v1/legal | head -c 600` lista seis documentos, todos `IN_PREPARATION`, y las páginas `/terminos`, `/privacidad`, etc. del sitio muestran «en preparación» y `noindex`. Todavía **no** se publica nada.
+
+**Cómo funciona por dentro (solo si hay que depurar).**
+
+- *Worker de Markdown.* `LegalMarkdownService` nunca analiza Markdown en el event loop. Tras un prefiltro O(n), el análisis va a un pool acotado de `worker_thread` (`src/legal/legal-markdown-pool.ts`): máximo 2 hilos, 16 trabajos en cola (más: 503 `LEGAL_MARKDOWN_BUSY` al instante), 3 s de plazo duro por análisis (400 `LEGAL_MARKDOWN_INVALID` con `details.reason` = `TIMEOUT`, que significa que el servidor no alcanzó, no que el texto esté mal) y 192 MB por hilo. El worker es el archivo `src/legal/legal-markdown.worker.mjs`, que `nest build` copia a `dist/legal/`: si falta `dist/legal/legal-markdown.worker.mjs` tras un build, toda validación responde «demasiado complejo». Importa `unified`, `remark-parse`, `remark-gfm` y `mdast-util-to-string`, que son dependencias de producción.
+- *Lectura pública.* `GET /legal/...` obtiene el índice (toc) de una caché por contenido (SHA-256, 256 entradas); si no se alcanza a analizar, el índice es `[]` y el cuerpo se sirve igual.
+- *Guarda de BD.* Un trigger BEFORE INSERT en `Legal_Document_Versions` toma un lock por documento, rechaza cualquier `versionNumber` distinto de `max + 1` (SQLSTATE 23000) y pone `publishedAt` con el reloj de la BD. Que el rol de la aplicación no pueda hacer `DISABLE TRIGGER` es trabajo del Epic 20 (Story 20.1): hoy el rol de la app es el propietario de las tablas y un DBA sí puede desactivarlos.
+- *Consentimiento.* Con la variable apagada, un documento requerido sin versión vigente **no** se exige ni se registra (el backend avisa con un WARN, a lo sumo uno por minuto y documento, y `Orders.termsVersion`/`shippingVersion`/`returnsVersion` quedan NULL). `POST /me/consent` exige solo lo pendiente. La declaración de edad se graba con la versión de Términos vigente (0 si no hay).
+
+### 12.2 La migración se queda esperando (Story 19.4a)
+
+Un `ALTER TABLE` espera un lock exclusivo y, mientras espera, todas las consultas posteriores sobre esa tabla se encolan detrás (en `Orders`: checkout y consultas de pedido se detienen). QA midió la migración de consentimiento esperando 28,5 s con un `SELECT` sobre `Orders` bloqueado 25 s, aunque el archivo empieza con `SET LOCAL lock_timeout = '10s'`.
+
+- **Solo una migración depende de esa línea:** `20261103100000_add_consent_records` (`grep -rn lock_timeout prisma/migrations`). Ya está aplicada en desarrollo y su checksum no puede cambiar, así que se dejó como está: en una base donde siga pendiente, **no** acota la espera.
+- **Verificado sobre un clon de la base** (lock de lectura sobre `Orders` retenido 25-40 s y un `ALTER TABLE "Orders" ADD COLUMN` de prueba):
+
+  | Mecanismo | Resultado |
   |---|---|
-  | `SET LOCAL lock_timeout = '10s'` as the first line of `migration.sql` | **no effect**: waited until the lock was released (38 s) |
-  | `PGOPTIONS='-c lock_timeout=10s' pnpm prisma migrate deploy` | **no effect**: waited until the lock was released (23 s and 38 s). The Prisma schema engine does not read `PGOPTIONS` |
-  | `options` parameter in the connection string: `DATABASE_URL='postgresql://...?schema=public&options=-c%20lock_timeout%3D10000'` | **works**: fails after ~10 s with SQLSTATE `55P03` |
-  | session-level `SET lock_timeout = '10s';` (without `LOCAL`) as the first line of a new migration | **works**: fails after ~10 s with `55P03` |
+  | `SET LOCAL lock_timeout = '10s'` como primera línea de `migration.sql` | **sin efecto**: esperó hasta que se liberó el lock (38 s) |
+  | `PGOPTIONS='-c lock_timeout=10s' pnpm prisma migrate deploy` | **sin efecto** (23 s y 38 s): el motor de Prisma no lee `PGOPTIONS` |
+  | parámetro `options` en la cadena de conexión: `DATABASE_URL='postgresql://...?schema=public&options=-c%20lock_timeout%3D10000'` | **funciona**: falla a los ~10 s con SQLSTATE `55P03` |
+  | `SET lock_timeout = '10s';` de sesión (sin `LOCAL`) como primera línea de una migración nueva | **funciona**: falla a los ~10 s con `55P03` |
 
-- **`deploy/deploy.sh` applies it** (the only place `prisma migrate deploy` runs in CI/CD): it appends `options=-c lock_timeout=<ms>` to the `DATABASE_URL` seen by the migration command only (the service keeps its own), default `MIGRATE_LOCK_TIMEOUT_MS=10000`. If the wait expires the script stops **before restarting the service** (the previous build keeps running). It refuses to run if `DATABASE_URL` already has an `options` parameter. Tested against the clone with and without `?schema=public` in the URL; **not** run on a real VPS (see "Verification status").
-- **Manual run** (outside `deploy.sh`): use the connection string form above, not `PGOPTIONS`.
-- **New migrations:** start any DDL on a hot table (`Orders`, `Products`, `Order_Items`...) with a session-level `SET lock_timeout = '10s';` (not `SET LOCAL`).
-- **If the wait expires** (or any other statement fails) the migration is recorded as failed and Prisma refuses further deploys (`P3009`). **Do not just run `resolve --rolled-back` and retry**: see §12.3. Migrations are **not** atomic (verified below), so earlier statements may have been committed.
+- **`deploy/deploy.sh` lo aplica** (es el único sitio donde corre `prisma migrate deploy` en CI/CD): añade `options=-c lock_timeout=<ms>` a la `DATABASE_URL` que ve **solo** el comando de migración (por defecto `MIGRATE_LOCK_TIMEOUT_MS=10000`). Si la espera vence, el script se detiene **antes de reiniciar el servicio** (sigue corriendo la versión anterior). Se niega a correr si `DATABASE_URL` ya trae un parámetro `options`. Probado contra el clon con y sin `?schema=public`; **no** se ha ejecutado en un VPS real (ver «Verification status»).
+- **Salida del script:** muestra la salida de Prisma filtrada: se tachan las URL y la línea `Datasource ...` (que trae usuario, host y puerto de la base). Es un filtro de mejor esfuerzo, **no** una garantía de que nunca aparezca otro dato de conexión en otra línea; no pegues esa salida en lugares públicos sin mirarla.
+- **Ejecución manual** (fuera de `deploy.sh`): usa la cadena con `options`, no `PGOPTIONS`.
+- **Migraciones nuevas:** empieza cualquier DDL sobre una tabla caliente (`Orders`, `Products`, `Order_Items`...) con `SET lock_timeout = '10s';` de sesión (no `SET LOCAL`).
+- **Si la espera vence** (o cualquier otra sentencia falla) la migración queda registrada como fallida y Prisma se niega a seguir (`P3009`). **No basta con `resolve --rolled-back` y reintentar:** sigue 12.3. Las migraciones **no** son atómicas.
 
-### 12.3 Recovering from a failed migration (verified on a database clone)
+### 12.3 Una migración falló: guía de recuperación (verificada sobre un clon)
 
-Observed on a clone, `prisma migrate deploy` does **not** wrap a `migration.sql` in a transaction: statements that precede the failing one stay committed (three probes: a lock timeout, `SELECT 1/0` and `ALTER` of a missing table, each after a `CREATE TYPE`, all left the type). When statement N fails (e.g. the `ALTER TABLE "Orders"` gives up with `55P03`), statement N is rolled back, but statements 1..N-1 **stay committed**. `migrate resolve --rolled-back` only edits the `_prisma_migrations` row; it does not undo anything. If you retry without cleaning up, the first statement fails again with `42710 type "..." already exists` (or `42P07 relation ... already exists`). So the order is: **identify, clean up, resolve, confirm, retry.**
+`prisma migrate deploy` **no** envuelve un `migration.sql` en una transacción: si la sentencia N falla, la N se revierte pero las sentencias 1..N-1 **quedan confirmadas** (tres pruebas: un lock timeout, `SELECT 1/0` y un `ALTER` de una tabla inexistente, cada una tras un `CREATE TYPE`; todas dejaron el tipo). `migrate resolve --rolled-back` solo edita la fila de `_prisma_migrations`; no deshace nada. Si reintentas sin limpiar, la primera sentencia vuelve a fallar con `42710 type "..." already exists` (o `42P07 relation ... already exists`). El orden es: **identificar, limpiar, resolver, confirmar, reintentar.**
 
-Run from the app directory with `DATABASE_URL` pointing at the affected database (`set -a; source /opt/212cc/<env>/shared/.env; set +a`; do not paste it anywhere). `psql` does not accept the `?schema=public` suffix, hence `${DATABASE_URL%%\?*}`. Procedure, with the exact case of `20261103100000_add_consent_records` failing on its `ALTER TABLE "Orders"`:
+**Prepara la sesión** (en el servidor, como el usuario del servicio, desde el directorio de la aplicación). La cadena de conexión se carga en el entorno de esta sesión; no la imprimas ni la pegues en ningún sitio:
 
-1. **Confirm what failed.** `pnpm prisma migrate status` names the failed migration (`The failed migration(s) ...`). Keep its name in `MIG=`.
-2. **Find what it left behind.** Open `prisma/migrations/$MIG/migration.sql`: every object created by a statement **before** the one that failed exists now; the failed statement and the ones after it do not. The failed statement is the first one that takes a lock on a busy table (`ALTER TABLE`, `CREATE INDEX`, `ADD CONSTRAINT`) or the one Prisma's error names. For this migration the statements before the `ALTER TABLE "Orders"` are the two `CREATE TYPE`, so the leftovers are exactly the types `"ConsentType"` and `"ConsentContext"`; the table `"Consent_Records"`, its indexes, constraints, functions, triggers and the four `"Orders"` columns do **not** exist. Verify instead of assuming:
+```bash
+cd /opt/212cc/production/app                 # o la ruta real del clon
+set -a; source /opt/212cc/production/shared/.env; set +a
+```
+
+`psql` puede no estar instalado en el servidor (el VPS solo necesita Node; el cliente viene con el paquete `postgresql-client`). Hay dos formas, elige una:
+
+- **Con `psql`** (si `command -v psql` lo encuentra). `psql` no acepta el sufijo `?schema=public`, de ahí `${DATABASE_URL%%\?*}`:
+
+  ```bash
+  q() { psql "${DATABASE_URL%%\?*}" -At -c "$1"; }
+  ```
+- **Sin `psql`**, con Node, que ya está y trae el módulo `pg` (dependencia de la aplicación; el comando va desde el directorio de la aplicación):
+
+  ```bash
+  q() { node --input-type=module -e 'import pg from "pg"; const c = new pg.Client({ connectionString: process.env.DATABASE_URL.split("?")[0] }); await c.connect(); const r = await c.query(process.argv[1]); for (const row of r.rows ?? []) console.log(Object.values(row).join("|")); await c.end();' "$1"; }
+  ```
+
+A partir de aquí todo usa `q '<SQL>'`. Prisma también puede ejecutar SQL sin `psql` (`echo '<SQL>' | pnpm prisma db execute --stdin`), pero no imprime filas: sirve para los `DROP` del paso 3, no para las comprobaciones.
+
+1. **Identifica qué falló y guárdalo en `MIG`.** Con un comando, sin copiarlo a mano (la migración fallida es la que tiene `finished_at` y `rolled_back_at` vacíos):
 
    ```bash
-   psql "${DATABASE_URL%%\?*}" -c "SELECT typname FROM pg_type WHERE typname IN ('ConsentType','ConsentContext')"
-   psql "${DATABASE_URL%%\?*}" -c "SELECT to_regclass('\"Consent_Records\"') AS consent_records"
-   psql "${DATABASE_URL%%\?*}" -c "\d \"Orders\"" | grep -E 'termsVersion|termsAcceptedAt|shippingVersion|returnsVersion'
+   MIG=$(q 'SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL ORDER BY started_at DESC LIMIT 1')
+   echo "$MIG"
    ```
 
-   Expected: two rows (the types), `consent_records` empty, no `Orders` columns. If more exists than the statements before the failure explain, stop and ask: do not drop anything you cannot trace to this file.
-3. **Drop only those leftovers** (they hold no data: nothing references them yet; no `CASCADE`):
+   Debe imprimir un solo nombre (por ejemplo `20261103100000_add_consent_records`). Si no imprime nada, no hay migración fallida registrada y esta guía no aplica; si el nombre no es el que esperas, detente. Contrástalo con `pnpm prisma migrate status` (lista `The failed migration(s)`).
+2. **Averigua qué dejó a medias.** Abre `prisma/migrations/$MIG/migration.sql`: todo objeto creado por una sentencia **anterior** a la que falló existe ahora; la sentencia que falló y las siguientes no. La que falló es la primera que toma un lock sobre una tabla ocupada (`ALTER TABLE`, `CREATE INDEX`, `ADD CONSTRAINT`) o la que nombra el error de Prisma.
+3. **Limpia, pero este paso vale SOLO si el fallo fue en el `ALTER TABLE "Orders"` de `20261103100000_add_consent_records`.** En ese caso concreto las sentencias previas son los dos `CREATE TYPE`, así que los restos son exactamente los tipos `"ConsentType"` y `"ConsentContext"`; la tabla `"Consent_Records"`, sus índices, restricciones, funciones, triggers y las cuatro columnas de `"Orders"` **no** existen. Compruébalo en vez de suponerlo:
 
    ```bash
-   psql "${DATABASE_URL%%\?*}" -c 'DROP TYPE "ConsentContext"; DROP TYPE "ConsentType";'
+   q "SELECT typname FROM pg_type WHERE typname IN ('ConsentType','ConsentContext') ORDER BY 1"
+   q "SELECT to_regclass('\"Consent_Records\"')"
+   q "SELECT column_name FROM information_schema.columns WHERE table_name = 'Orders' AND column_name IN ('termsVersion','termsAcceptedAt','shippingVersion','returnsVersion')"
    ```
-4. **Mark it rolled back:** `pnpm prisma migrate resolve --rolled-back "$MIG"`.
-5. **Confirm with `pnpm prisma migrate status`:** it must say `Following migration have not yet been applied: <MIG>` and must **not** list a failed migration. If it still reports the failure, step 4 did not take.
-6. **Retry outside peak hours** (low traffic, no long reports or batch jobs): re-run the deploy (`deploy/deploy.sh <env> <ref>`) or `pnpm prisma migrate deploy` with the `options=-c%20lock_timeout%3D10000` URL of §12.2. Afterwards `pnpm prisma migrate status` must end with `Database schema is up to date!`. If the retry fails again (e.g. the long transaction is still there), the migration is again recorded as failed with the same leftovers: repeat from step 2.
 
-Never mark a migration `--applied` unless you have checked that **every** object of the file exists. A `P3009` raised by a deploy that waited for no lock (the previous failure is still recorded) needs the same procedure; `deploy.sh` says which of the three cases happened (lock wait `55P03`, `P3009`, `42710`/`42P07`) and never prints the connection string.
+   Esperado: dos filas (los tipos), la segunda consulta vacía, la tercera sin filas. Si todo coincide, borra solo esos restos (no contienen datos, nada los referencia todavía, sin `CASCADE`):
 
-**Safety net for future migrations (verified on the clone with throw-away migrations; none of this edits an applied migration).** Prisma accepts an explicit `BEGIN;` ... `COMMIT;` written in the file, and then the statements between them are atomic.
+   ```bash
+   echo 'DROP TYPE "ConsentContext"; DROP TYPE "ConsentType";' | pnpm prisma db execute --stdin
+   ```
 
-| `migration.sql` shape (lock held on `"Orders"` by another session, `lock_timeout` 10 s) | After the failure |
+   **Si el fallo fue en otra migración, o en otra sentencia, o si hay más objetos de los que explican las sentencias anteriores: no ejecutes ese `DROP`.** Haz el paso 2 con el archivo de *esa* migración, identifica sus objetos con consultas parecidas (`pg_type`, `to_regclass`, `information_schema`, `pg_trigger`, `pg_proc`) y borra solo lo que puedas rastrear hasta ese archivo. Si algo no se puede rastrear, detente y pregunta: no borres nada que no sepas de dónde salió. Si el fallo fue en la **primera** sentencia, no queda nada que limpiar.
+4. **Márcala como revertida:** `pnpm prisma migrate resolve --rolled-back "$MIG"`.
+5. **Confirma con `pnpm prisma migrate status`:** debe decir `Following migration have not yet been applied: <MIG>` y **no** listar una migración fallida. Si todavía informa el fallo, el paso 4 no surtió efecto.
+6. **Reintenta fuera de hora punta** (poco tráfico, sin informes largos ni procesos por lotes): vuelve a lanzar el despliegue (`deploy/deploy.sh <entorno> <ref>`) o `pnpm prisma migrate deploy` con la cadena `options=-c%20lock_timeout%3D10000` de 12.2. Al final `pnpm prisma migrate status` debe terminar con `Database schema is up to date!`. Si falla otra vez (p. ej. la transacción larga sigue ahí), la migración queda de nuevo como fallida con los mismos restos: repite desde el paso 1.
+
+Nunca marques una migración `--applied` sin haber comprobado que **todos** los objetos del archivo existen. Un `P3009` que sale de un despliegue que no esperó ningún lock (el fallo anterior sigue registrado) necesita el mismo procedimiento; `deploy.sh` dice cuál de los casos ocurrió (espera de lock `55P03`, `P3009`, violación única `23505`, objeto ya existente `42710`/`42P07`) y filtra lo que imprime según 12.2.
+
+**Red de seguridad para migraciones futuras** (verificada sobre el clon con migraciones desechables; nada de esto edita una migración ya aplicada). Prisma acepta un `BEGIN;` ... `COMMIT;` escrito en el archivo, y entonces lo de en medio es atómico.
+
+| Forma de `migration.sql` (lock retenido sobre `"Orders"` por otra sesión, `lock_timeout` 10 s) | Tras el fallo |
 |---|---|
-| `CREATE TYPE ...;` then `ALTER TABLE "Orders" ...;` (what 19.4 did) | `55P03` after 10 s; **the type stays** (needs §12.3 cleanup) |
-| `ALTER TABLE "Orders" ...;` **first**, nothing before it | `55P03`; nothing left (the failed statement is the first one) |
-| `BEGIN; LOCK TABLE "Orders" IN ACCESS EXCLUSIVE MODE; CREATE TYPE ...; ALTER TABLE "Orders" ...; COMMIT;` | fails after 10 s; **nothing left**; just `resolve --rolled-back` and retry. Without a holder it applies normally |
-| `BEGIN; CREATE TYPE ...; SELECT 1/0; COMMIT;` | nothing left |
-| `CREATE TYPE ...;` **then** `BEGIN; ...; COMMIT;` | results were inconsistent between probes (a failing `SELECT 1/0` left the type, a lock timeout did not): do not rely on it, put `BEGIN;` on the **first line** |
+| `CREATE TYPE ...;` y luego `ALTER TABLE "Orders" ...;` (lo que hizo 19.4) | `55P03` a los 10 s; **el tipo se queda** (necesita la limpieza de arriba) |
+| `ALTER TABLE "Orders" ...;` **primero**, nada antes | `55P03`; no queda nada |
+| `BEGIN; LOCK TABLE "Orders" IN ACCESS EXCLUSIVE MODE; CREATE TYPE ...; ALTER TABLE "Orders" ...; COMMIT;` | falla a los 10 s; **no queda nada**; basta `resolve --rolled-back` y reintentar. Sin holder se aplica normal |
+| `BEGIN; CREATE TYPE ...; SELECT 1/0; COMMIT;` | no queda nada |
+| `CREATE TYPE ...;` **y luego** `BEGIN; ...; COMMIT;` | resultados inconsistentes entre pruebas: no te apoyes en esto; `BEGIN;` va en la **primera línea** |
 
-Rules for new migrations that `ALTER` a large or hot table:
+Reglas para migraciones nuevas que alteren una tabla grande o caliente: (1) envuelve el archivo en `BEGIN;` ... `COMMIT;` y toma el lock **primero** (`LOCK TABLE "<tabla>" IN ACCESS EXCLUSIVE MODE;`); (2) si no cabe una transacción (`CREATE INDEX CONCURRENTLY`, `ALTER TYPE ... ADD VALUE`), que el `ALTER` arriesgado sea la **primera** sentencia y una por migración; (3) cuando una sentencia falla dentro de la transacción del propio archivo, Prisma informa `current transaction is aborted, commands ignored until end of transaction block` en vez de `55P03` (el error original solo está en el log de Postgres; `deploy.sh` reconoce ese mensaje); (4) revisión de cada migración nueva: «si falla la sentencia N, ¿qué dejan las 1..N-1?».
 
-1. Wrap the whole file in `BEGIN;` ... `COMMIT;` and take the lock **first**: `LOCK TABLE "<hot table>" IN ACCESS EXCLUSIVE MODE;` (the lock wait is then the first thing that can fail, bounded by the `lock_timeout` of §12.2, and a failure rolls back everything).
-2. If a transaction is not possible (e.g. `CREATE INDEX CONCURRENTLY`, `ALTER TYPE ... ADD VALUE`), make the risky `ALTER` the **first** statement of the file, so a failure leaves nothing behind, and keep the file to one such statement per migration.
-3. Caveat: when a statement fails inside the file's own transaction, Prisma reports `current transaction is aborted, commands ignored until end of transaction block` instead of `55P03`; the original error is only in the Postgres log. `deploy.sh` recognises that message and says so.
-4. Review check for every new migration: "if statement N fails, what do statements 1..N-1 leave behind?"
+### 12.4 Antes de abrir al público: dos variables del backend
+
+Ambas se leen en cada petición (no se validan al arrancar), pero son variables de entorno del proceso: cambiarlas en producción exige editar `/opt/212cc/production/shared/.env` y **reiniciar el servicio** (`sudo systemctl restart 212cc-backend-production.service`). Solo vale el texto exacto `true` (`TRUE`, `1`, `yes` o ` true ` **no** activan).
+
+**`LEGAL_REQUIRE_PUBLISHED=true`** (por defecto `false`). Ponla **solo cuando** los cuatro documentos con aceptación (`terminos`, `privacidad`, `envios`, `devoluciones`) estén publicados con una versión vigente. Qué pasa en cada caso:
+
+| Variable | Documento requerido sin versión vigente | Documentos publicados |
+|---|---|---|
+| `false` (por defecto) | **No se exige ni se registra** su aceptación; se vende sin esos términos (el backend avisa con un WARN y `Orders.termsVersion`/`shippingVersion`/`returnsVersion` quedan NULL). Aceptable en desarrollo y pruebas; **un error grave en producción**. | Se exigen y se registran las casillas de los documentos que sí tienen versión vigente. |
+| `true` | Registro, checkout y `POST /me/consent` responden **503 `LEGAL_NOT_PUBLISHED`** (`details.documents` dice cuáles): la tienda no puede vender ni dar de alta cuentas hasta publicarlos. No existe retiro de documentos, solo versiones nuevas: no se puede volver a ese estado por accidente. | Funciona normal: cada cuenta y cada pedido guarda las versiones aceptadas. |
+
+La declaración de mayoría de edad se exige siempre, con la variable en `true` o `false`. `cookies` y `aviso-legal` no tienen casilla y no bloquean nada. Para activar: publica los cuatro (admin → Legal; cada uno exige haber reemplazado todos los `[[PLACEHOLDERS]]` y quitado el aviso de plantilla), comprueba `curl -s https://<DOMINIO>/api/v1/legal/current-versions` (deben aparecer los cuatro), pon la variable, reinicia, y haz un registro y una compra de prueba. Para desactivar en una emergencia: `false` y reiniciar (las ventas continúan sin exigir aceptación: úsalo solo mientras se corrige).
+
+**`CHECKOUT_REQUIRE_SHIPPING=true`** (por defecto `false`). Decisión de Angel: con ella la cédula del comprador es **obligatoria en las facturas**; con `false` el checkout acepta también la dirección plana antigua (sin agencia ni cédula) y entonces la cédula no es obligatoria, lo que contradice lo que dicen los Términos, Envíos y Privacidad. Con `true`, la dirección plana se rechaza con 400 `SHIPPING_REQUIRED`: actívala **después** de desplegar el frontend del Epic 17 (que ya envía `customerAddressId` o `shippingAgencyId` + `deliveryMode` + `recipientIdDoc`) y de verificar una compra real en ese formato; ver §10.1. Para volver atrás: `false` y reiniciar.
+
+### 12.5 Checklist de lanzamiento
+
+Marca cada punto solo cuando lo hayas comprobado tú. Los textos sembrados son **plantillas orientativas, no asesoría jurídica** (A64): ningún documento sale sin revisión de un abogado venezolano.
+
+**A. Identidad del vendedor y placeholders**
+
+- [ ] Admin → Legal → Identidad: razón social, RIF, domicilio fiscal, registro mercantil, correo, teléfono y horario completos (alimentan el pie de página y el Aviso Legal). Sin esos datos el pie de página omite la línea.
+- [ ] Reemplazar **todos** los placeholders `[[...]]` de los seis documentos (la publicación se bloquea mientras quede uno, y también mientras quede el aviso «Plantilla — revisar con un abogado antes de publicar»). Los de plazos y datos del negocio: `[[PLAZO_DESPACHO]]`, `[[PLAZO_TRANSITO_ESTIMADO]]`, `[[PLAZO_RECLAMO]]`, `[[PLAZO_RESPUESTA_RECLAMO]]`, `[[PLAZO_REEMBOLSO]]`, `[[POLITICA_DE_REENVIO]]`, `[[COSTO_DE_ENVIO_Y_QUIEN_LO_PAGA]]`, `[[LISTA_DE_AGENCIAS]]`, `[[HOSTING]]`, `[[PROVEEDOR_CORREO]]`, `[[FUENTE_TASA_BS]]`, `[[CONTADOR_O_IMPRENTA]]`, `[[PLAZO_CONSERVACION_*]]`, `[[PLAZO_RESPUESTA_DERECHOS]]`, `[[CIUDAD_JURISDICCION]]`, `[[FECHA_VERSION]]`.
+- [ ] Revisión de los seis textos por un abogado venezolano (los `[[REVISAR_*]]` y `[[CONFIRMAR_CON_ABOGADO*]]` son sus puntos).
+
+**B. Marcadores `CONFIRMAR_*` / `VERIFICAR_*`: qué se puede confirmar hoy y qué no.** Un marcador se quita del texto **solo si lo que afirma es cierto**. Los que dependen del Epic 20 **no se pueden confirmar todavía** (no están implementados); si se publican antes, el texto debe seguir sin afirmarlos.
+
+*Dependen de stories ya hechas: se pueden verificar y confirmar hoy.*
+
+- [ ] `CONFIRMAR_REGISTRO_DE_ACEPTACION_IMPLEMENTADO` (19.4): cada registro y cada compra graban `Consent_Records`; prueba con una cuenta y un pedido de prueba y mira `GET /api/v1/admin/legal/consents`.
+- [ ] `CONFIRMAR_DECLARACION_DE_MAYORIA_DE_EDAD_IMPLEMENTADA` (19.4 y 19.7): casilla de edad en registro y en la re-aceptación (no en el checkout).
+- [ ] `CONFIRMAR_CHECKOUT_REQUIRE_SHIPPING_ACTIVO_PARA_CEDULA_OBLIGATORIA`: solo es cierto con `CHECKOUT_REQUIRE_SHIPPING=true` (12.4).
+- [ ] `CONFIRMAR_NO_HAY_RETIRO_EN_TIENDA`: el backend ya rechaza `pickup` (`PICKUP_NOT_SUPPORTED`); confirma que el negocio tampoco ofrece retiro.
+- [ ] `VERIFICAR_CLAVES_DE_ALMACENAMIENTO_LOCAL_CONTRA_EL_SITIO_PUBLICADO` y `VERIFICAR_NOMBRES_Y_DURACIONES_CONTRA_EL_SITIO_PUBLICADO` (19.8): compara el texto de Cookies con lo que de verdad guarda el sitio publicado (cookie de preferencias `212_cookie_prefs`, 1 año; sesión, carrito) mirando el navegador en producción.
+
+*Dependen del negocio, el contador o el abogado (no del código):* `CONFIRMAR_PRODUCTOS_ORIGINALES_CON_EL_DUENO`, `CONFIRMAR_UBICACION_DE_PROVEEDORES`, `CONFIRMAR_QUIEN_PAGA`, `CONFIRMAR_IVA_E_IGTF_CON_CONTADOR`, `CONFIRMAR_METODO_DE_FACTURACION_CON_CONTADOR`, `CONFIRMAR_METODOS_DE_PAGO_VIGENTES`, `CONFIRMAR_CRITERIO_DE_TASA_EN_REEMBOLSOS`, `CONFIRMAR_CON_ABOGADO_QUE_NO_REQUIERE_CONSENTIMIENTO` y `CONFIRMAR_CON_ABOGADO`.
+
+*Dependen del Epic 20 (Stories 20.2 a 20.9): NO confirmar todavía.*
+
+- [ ] `CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA` (20.2, 20.3, 20.4, 20.9): el Epic 20 aún no está implementado: la cédula no se cifra en la base y la consulta de pedido la devuelve completa (sin enmascarar).
+- [ ] `CONFIRMAR_CEDULA_EN_ALMACENAMIENTO_LOCAL_DEL_NAVEGADOR` (20.9): la libreta del frontend guarda la cédula en `localStorage` en claro (sin story que lo corrija todavía fuera del 20.9).
+- [ ] `CONFIRMAR_RETENCION_FISCAL_DE_CEDULA_IMPLEMENTADA` (20.6 y 20.8) y `CONFIRMAR_REGISTRO_DE_CONSULTAS_DE_CEDULA_IMPLEMENTADO` (20.4, 20.5 y 20.7): todavía no existen.
+- [ ] `CONFIRMAR_BORRADO_DE_SESIONES_VENCIDAS_IMPLEMENTADO` y `CONFIRMAR_BORRADO_DE_CARRITOS_Y_LISTAS_ANONIMOS_VENCIDOS_IMPLEMENTADO` (20.8): el job de retención de 20.8 todavía no existe; `privacidad` §7 debe alinearse con 20.8 (sesión vencida se elimina a los 7 días; IP y agente se anulan a los 90 días).
+
+*Sin implementación prevista en ningún epic:* `CONFIRMAR_SEGUIMIENTO_VISIBLE_AL_CLIENTE` (`envios` §6). El frontend no muestra la guía de envío al cliente ni deja cargarla desde el admin (solo existe `PATCH /admin/orders/:id/tracking`). No lo confirmes; o se implementa, o el texto no debe prometerlo.
+
+**C. Publicar y activar**
+
+- [ ] Publicar `terminos`, `privacidad`, `envios` y `devoluciones` (los cuatro con aceptación) y además `cookies` y `aviso-legal`. Usa vigencia «ahora» solo si el servidor y el sitio están listos: una vigencia lejana congela el documento hasta esa fecha.
+- [ ] Solo entonces: `LEGAL_REQUIRE_PUBLISHED=true` y reiniciar (12.4); `CHECKOUT_REQUIRE_SHIPPING=true` y reiniciar (12.4).
+- [ ] Probar en producción: registro (con las casillas), compra con cédula, modal de re-aceptación con una cuenta antigua, `/terminos`… con versión, fecha e índice, banner de cookies (Rechazar deja la analítica apagada).
+- [ ] `POST /me/consent` y las rutas legales públicas responden 200; `GET /api/v1/legal` lista seis `PUBLISHED`.
+
+**D. Credenciales**
+
+- [ ] **Rotar antes de lanzar toda credencial real que haya estado alguna vez en un `.env` de desarrollo** (o que haya pasado por `/tmp`, el chat o una copia de seguridad del equipo): claves de Stripe y su secreto de webhook, `TCGAPI_KEY`, SMTP, contraseñas de base de datos y de los usuarios admin, y los secretos de sesión (`ADMIN_AUTH_SECRET`, `CUSTOMER_AUTH_SECRET`, `COOKIE_SECRET`; rotar estos cierra todas las sesiones). Genera valores nuevos con `openssl rand -hex 32` y ponlos solo en los `.env` de `/opt/212cc/<entorno>/shared/`.
+
+### 12.6 Riesgos del epic (R1 a R7) y lectura legal pendiente
+
+- **R1.** Desplegar sin documentos publicados con `LEGAL_REQUIRE_PUBLISHED=false` vende sin términos aceptados. Mitigación: 12.4 y 12.5-C.
+- **R2.** El registro no es atómico: la cuenta se crea y la aceptación se graba en una transacción corta aparte, con borrado compensatorio de la cuenta si falla (A77). Una caída entre ambos pasos puede dejar una cuenta sin registro de aceptación: el modal de re-aceptación la detecta como «pendiente».
+- **R3.** El trigger de `Consent_Records` permite borrar evidencia de cuentas o pedidos ya eliminados (filas huérfanas); se revisa con la retención del Epic 20.
+- **R4.** `remark`/`react-markdown` son ESM: el build de Nest y el de Next ya los empaquetan (verificado con `pnpm build` en ambos).
+- **R5.** El frontend cachea las páginas legales hasta 5 minutos (ISR): una versión con vigencia futura aparece por expiración natural, no al instante (publicar y guardar identidad sí invalidan la caché).
+- **R6.** Con `LEGAL_REQUIRE_PUBLISHED=true` el 503 `LEGAL_NOT_PUBLISHED` bloquea ventas si faltara un documento; como no existe retiro de documentos, solo ocurriría por restaurar una base anterior.
+- **R7.** Las plantillas sembradas no son asesoría jurídica (A64); el seed solo crea borradores y la publicación se bloquea mientras haya placeholders o el aviso de plantilla.
+- **Lectura legal pendiente (A72).** El beacon de vistas de producto es agregado y anónimo (sin cookies ni identificadores) y se considera fuera del régimen de consentimiento; el frontend no lo envía si el navegador emite Global Privacy Control o Do Not Track, y se declara en Cookies y Privacidad. **Un abogado debe confirmar esta lectura**; hasta entonces es una suposición del equipo.
+
+### 12.7 Volver atrás
+
+Las columnas y tablas nuevas son inertes para la compilación anterior: despliega la versión anterior (§5) y deja las migraciones aplicadas. `Consent_Records` no se puede truncar por diseño, y las versiones y la bitácora tampoco. Antes de volver atrás pon `LEGAL_REQUIRE_PUBLISHED=false` y `CHECKOUT_REQUIRE_SHIPPING=false` si estaban en `true`.

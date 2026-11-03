@@ -457,13 +457,19 @@ describe('validate(): bounded error response (QA C)', () => {
     expect(JSON.stringify(res).length).toBeLessThan(20_000);
   }, 20_000);
 
-  it('a normal rejection keeps the format: issues only, no omitted', async () => {
+  it('a normal rejection keeps the format: issues and the cause (Story 19.9), no omitted', async () => {
     const svc = make();
     const res = await body(
       svc.validate('<script>x</script>\n\n![a](https://x.y/z.png)'),
     );
     expect(res?.details?.issues.length).toBeGreaterThan(0);
-    expect(Object.keys(res?.details ?? {})).toEqual(['issues']);
+    expect(Object.keys(res?.details ?? {}).sort()).toEqual([
+      'issues',
+      'reason',
+    ]);
+    expect((res?.details as { reason?: string }).reason).toBe(
+      'FORBIDDEN_CONSTRUCTS',
+    );
   });
 });
 

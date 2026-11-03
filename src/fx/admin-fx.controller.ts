@@ -79,7 +79,7 @@ export class AdminFxController {
   @ApiResponse({
     status: HttpStatus.CONFLICT,
     description:
-      'FX_SETTINGS_BUSY: the FX advisory lock / settings row stayed locked by another change or refresh for 25 s (database lock_timeout); retry.',
+      'FX_SETTINGS_BUSY: the PUT could not take the FX advisory lock / settings row within its 45 s TOTAL budget (lock waits, provider read and refresh share it; each lock wait is bounded by the database lock_timeout, at most 25 s); retry.',
   })
   updateSettings(
     @Body(strictBody(UpdateFxSettingsDto))
@@ -127,7 +127,7 @@ export class AdminFxController {
   @ApiResponse({
     status: HttpStatus.CONFLICT,
     description:
-      'FX_NO_REJECTED_READING | FX_SETTINGS_BUSY (the settings row stayed locked for 25 s; retry)',
+      "FX_NO_REJECTED_READING | FX_SETTINGS_BUSY (the advisory lock and the settings row together stayed locked past this call's 25 s lock budget; retry)",
   })
   @ApiResponse({
     status: HttpStatus.UNPROCESSABLE_ENTITY,

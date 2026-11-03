@@ -115,10 +115,14 @@ case "$DATABASE_URL" in
   *) MIGRATE_URL_SEP='?' ;;
 esac
 # The output is captured (not streamed) so that (1) the failure can be told
-# apart and explained truthfully and (2) no connection string or credential is
-# ever printed: every URL-looking string is redacted before anything is shown.
+# apart and explained truthfully and (2) what is shown is filtered first:
+# every URL-looking string and Prisma's "Datasource ..." line (which names
+# the database user, host and port) are redacted. This is best effort, not a
+# guarantee: any other line Prisma or Postgres prints is shown as is.
 redact() {
-  sed -E 's#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]"'"'"']+#<redacted-url>#g'
+  sed -E \
+    -e 's#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]"'"'"']+#<redacted-url>#g' \
+    -e 's#^(Datasource ).*#\1<redacted>#'
 }
 MIGRATE_OUT="$(mktemp)"
 trap 'rm -f "$MIGRATE_OUT"' EXIT
@@ -133,7 +137,10 @@ else
   elif grep -q 'P3009' "$MIGRATE_OUT"; then
     why="a previous migration is recorded as failed (P3009), so Prisma refuses to apply anything else; this run did not wait for any lock"
     todo="run 'pnpm prisma migrate status' and follow docs/deployment.md section 12.3: clean up what the failed migration left half-created, then 'pnpm prisma migrate resolve --rolled-back <migration_name>'"
-  elif grep -Eq '42710|42P07|already exists' "$MIGRATE_OUT"; then
+  elif grep -Eq '23505|unique constraint' "$MIGRATE_OUT"; then
+    why="a statement of the migration violated a unique constraint (23505, e.g. data that already holds duplicates); this is NOT a lock wait and NOT a leftover object"
+    todo="see the (redacted) Prisma output above, fix the data, then follow docs/deployment.md section 12.3 if a migration is recorded as failed"
+  elif grep -Eq '42710|42P07|(type|relation|index|constraint|column|trigger|function|schema|sequence|table|extension) "[^"]+"( (of|for) relation "[^"]+")? already exists' "$MIGRATE_OUT"; then
     why="an object the migration creates already exists (42710/42P07), typically left half-created by an earlier failed attempt; this is NOT a lock wait"
     todo="follow docs/deployment.md section 12.3: drop the leftover objects of that migration, check with 'pnpm prisma migrate status', then retry"
   elif grep -q 'current transaction is aborted' "$MIGRATE_OUT"; then

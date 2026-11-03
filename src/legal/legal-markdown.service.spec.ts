@@ -37,6 +37,8 @@ describe('LegalMarkdownService.validate (XSS corpus)', () => {
       expect(body?.statusCode).toBe(400);
       expect(body?.errorCode).toBe('LEGAL_MARKDOWN_INVALID');
       expect(body?.details.issues.length).toBeGreaterThan(0);
+      // Story 19.9: a rejected construct is never reported as TIMEOUT
+      expect((body?.details as { reason?: string }).reason).not.toBe('TIMEOUT');
       for (const i of body?.details.issues ?? []) {
         expect(i.line).toBeGreaterThanOrEqual(1);
         expect(i.reason.length).toBeGreaterThan(3);
@@ -50,6 +52,15 @@ describe('LegalMarkdownService.validate (XSS corpus)', () => {
       expect(await issuesOf(md)).toBeNull();
     },
   );
+
+  it('details.reason: FORBIDDEN_CONSTRUCTS for raw HTML, TOO_COMPLEX for the size limit (Story 19.9)', async () => {
+    const r = async (md: string) =>
+      (await issuesOf(md))?.details as unknown as { reason?: string };
+    expect((await r('<script>alert(1)</script>')).reason).toBe(
+      'FORBIDDEN_CONSTRUCTS',
+    );
+    expect((await r('x'.repeat(300_000))).reason).toBe('TOO_COMPLEX');
+  });
 
   it('reports the real 1-based line of each issue', async () => {
     const body = await issuesOf(
@@ -318,7 +329,10 @@ describe('validate(): a TIMEOUT does not blame the document (Story 19.3b)', () =
         statusCode: number;
         errorCode: string;
         message: string;
-        details: { issues: { line: number; reason: string }[] };
+        details: {
+          issues: { line: number; reason: string }[];
+          reason: string;
+        };
       };
     }
     return null;
@@ -331,6 +345,8 @@ describe('validate(): a TIMEOUT does not blame the document (Story 19.3b)', () =
     expect(b?.message).toMatch(/server could not analyze/i);
     expect(b?.message).toMatch(/try again/i);
     expect(b?.message).not.toMatch(/too large or too complex/);
+    // Story 19.9: the client tells the cases apart by this field, not by text.
+    expect(b?.details.reason).toBe('TIMEOUT');
     expect(b?.details.issues).toHaveLength(1);
     expect(b?.details.issues[0].reason).toMatch(/could not analyze it in time/);
     expect(b?.details.issues[0].reason).toMatch(/Try again/);
@@ -342,5 +358,6 @@ describe('validate(): a TIMEOUT does not blame the document (Story 19.3b)', () =
     const b = await bodyOf(failing('FAILED'));
     expect(b?.statusCode).toBe(400);
     expect(b?.message).toBe('The Markdown is too large or too complex.');
+    expect(b?.details.reason).toBe('TOO_COMPLEX');
   });
 });

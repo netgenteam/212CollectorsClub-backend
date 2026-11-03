@@ -262,7 +262,7 @@ export class LegalAdminController {
   @ApiResponse({
     status: HttpStatus.BAD_REQUEST,
     description:
-      'LEGAL_MARKDOWN_INVALID (details.issues[{line,reason}]) | validation',
+      'LEGAL_MARKDOWN_INVALID (details.issues[{line,reason}], details.omitted, details.reason: TIMEOUT | TOO_COMPLEX | FORBIDDEN_CONSTRUCTS; TIMEOUT means the server could not analyze the text in time, not that the text is wrong) | validation',
   })
   @ApiResponse(UNAUTH)
   @ApiResponse({
@@ -318,7 +318,7 @@ export class LegalAdminController {
   @ApiResponse({
     status: HttpStatus.BAD_REQUEST,
     description:
-      'LEGAL_EFFECTIVE_FROM_INVALID | LEGAL_MARKDOWN_INVALID | validation (changeSummary < 10 chars)',
+      'LEGAL_EFFECTIVE_FROM_INVALID | LEGAL_MARKDOWN_INVALID (details.reason: TIMEOUT | TOO_COMPLEX | FORBIDDEN_CONSTRUCTS) | validation (changeSummary < 10 chars)',
   })
   @ApiResponse(UNAUTH)
   @ApiResponse({

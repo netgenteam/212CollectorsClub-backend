@@ -1169,24 +1169,52 @@ describe(
           .set('Cookie', c.s)
           .send(body as object);
       /**
-       * An account WITHOUT an AGE_DECLARATION (legacy account): the API alone
-       * cannot produce one (register always records it), so the row is removed
-       * in ONE transaction that also disables and re-enables the append-only
-       * trigger (DDL is transactional: a crash re-enables it).
+       * A legacy account WITHOUT an AGE_DECLARATION: the API cannot produce one
+       * (register always records it), so the Customer is created directly
+       * (no registration) with an argon2id credential, plus the TERMS / PRIVACY
+       * acceptance rows (plain INSERTs, which the append-only trigger allows)
+       * for the versions in force. No e2e disables an immutability trigger.
        */
-      const withoutAge = async (c: { id: string }) => {
-        await prisma.$transaction(async (tx) => {
-          await tx.$executeRawUnsafe(
-            `ALTER TABLE "Consent_Records" DISABLE TRIGGER "Consent_Records_immutable"`,
-          );
-          await tx.$executeRawUnsafe(
-            `DELETE FROM "Consent_Records" WHERE "customerId" = $1::uuid AND "type" = 'AGE_DECLARATION'`,
-            c.id,
-          );
-          await tx.$executeRawUnsafe(
-            `ALTER TABLE "Consent_Records" ENABLE TRIGGER "Consent_Records_immutable"`,
-          );
+      const legacyCustomer = async (k: string) => {
+        const email = emailOf(k);
+        emails.push(email);
+        const id = randomUUID();
+        await prisma.customer.create({
+          data: {
+            id,
+            email,
+            name: 'Cns Legacy',
+            emailVerified: true,
+            customeraccounts: {
+              create: {
+                accountId: id,
+                providerId: 'credential',
+                password: await argon2.hash(PASSWORD, {
+                  type: argon2.argon2id,
+                }),
+              },
+            },
+          },
         });
+        for (const [key, slug, type] of [
+          ['terms', 'e2e-terminos', 'TERMS'],
+          ['privacy', 'e2e-privacidad', 'PRIVACY'],
+        ] as const) {
+          const version = seeded.current[key];
+          if (!version) continue;
+          await sql(
+            `INSERT INTO "Consent_Records" ("id", "customerId", "type", "documentVersionId", "version", "context")
+             SELECT gen_random_uuid(), $1::uuid, $2::"ConsentType", v."id", v."versionNumber", 'REGISTER'::"ConsentContext"
+             FROM "Legal_Document_Versions" v JOIN "Legal_Documents" d ON d."id" = v."documentId"
+             WHERE d."slug" = $3 AND v."versionNumber" = $4`,
+            [id, type, slug, version],
+          );
+        }
+        const res = await request(server())
+          .post('/api/v1/auth/login')
+          .send({ email, password: PASSWORD })
+          .expect(200);
+        return { email, id, s: cookieOf(res, 'cc_session') };
       };
       const ageRows = async (id: string) =>
         (await consentsOf({ customerId: id })).filter(
@@ -1208,10 +1236,8 @@ describe(
           ],
           privacy: [{ versionNumber: 1, effectiveFrom: '-3 days' }],
         });
-        const a = await customer('d2-a');
-        const b = await customer('d2-b');
-        await withoutAge(a);
-        await withoutAge(b);
+        const a = await legacyCustomer('d2-a');
+        const b = await legacyCustomer('d2-b');
         const status = await request(server())
           .get('/api/v1/me/consent-status')
           .set('Cookie', a.s)
@@ -1257,14 +1283,13 @@ describe(
           terms: [{ versionNumber: 1, effectiveFrom: '-3 days' }],
           privacy: [{ versionNumber: 1, effectiveFrom: '-3 days' }],
         });
-        const c = await customer('d2-c');
+        const c = await legacyCustomer('d2-c');
         await seeded.addVersion('terms', {
           versionNumber: 2,
           effectiveFrom: '-2 days',
           isSubstantial: true,
           changeSummary: 'terminos nuevos',
         });
-        await withoutAge(c);
         await reaccept(c, {
           acceptedTermsVersion: 2,
           ageDeclared: true,
@@ -1281,8 +1306,7 @@ describe(
         // can only be re-seeded once no account still holds evidence on it.
         await reset();
         seeded = await seedConsentDocs(sql, {});
-        const d = await customer('d2-d', { ageDeclared: true });
-        await withoutAge(d);
+        const d = await legacyCustomer('d2-d');
         await reaccept(d, { ageDeclared: true }).expect(200);
         const zero = await ageRows(d.id);
         expect(zero).toHaveLength(1);

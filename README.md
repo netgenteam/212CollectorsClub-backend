@@ -55,7 +55,8 @@ must never contain committed secrets.
 | `pnpm prisma:generate` | Regenerate the Prisma client (also runs on `postinstall`) |
 | `pnpm prisma:migrate` | `prisma migrate dev` (local dev only) |
 | `pnpm prisma:deploy` | `prisma migrate deploy` (CI/CD — never run automatically at app boot) |
-| `pnpm prisma:seed` | Runs `prisma/seed.ts` (mock catalog data), via `tsx` |
+| `pnpm prisma:seed` | Runs `prisma/seed.ts` (mock catalog data, dev admin, landing, agencies and the legal drafts), via `tsx`. **Development only** |
+| `pnpm seed:legal` | Runs `prisma/seed-legal.ts`: ONLY the six legal drafts, idempotent; the one to run in production (`docs/deployment.md` §12.1) |
 
 ## Project structure
 

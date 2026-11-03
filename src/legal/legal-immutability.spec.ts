@@ -57,4 +57,24 @@ describe('legal sources never mutate versions or the audit log', () => {
       );
     }
   });
+
+  it('no e2e or test helper disables an immutability trigger (Story 19.9)', () => {
+    const TESTS = resolve(SRC, '..', 'test');
+    const walkTests = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+        e.isDirectory()
+          ? walkTests(join(dir, e.name))
+          : e.name.endsWith('.ts')
+            ? [join(dir, e.name)]
+            : [],
+      );
+    const DISABLE =
+      /DISABLE\s+(ALL\s+|USER\s+)?TRIGGER|session_replication_role/i;
+    expect(DISABLE.test('ALTER TABLE "T" disable   trigger "x"')).toBe(true);
+    expect(DISABLE.test("SET session_replication_role = 'replica'")).toBe(true);
+    const offenders = walkTests(TESTS).filter((f) =>
+      DISABLE.test(readFileSync(f, 'utf8')),
+    );
+    expect(offenders).toEqual([]);
+  });
 });

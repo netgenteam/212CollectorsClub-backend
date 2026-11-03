@@ -651,7 +651,19 @@ export class LegalMarkdownService implements OnModuleDestroy {
           : tooComplex
             ? 'The Markdown is too large or too complex.'
             : 'The Markdown contains forbidden constructs.',
-        capIssues(issues),
+        // Story 19.9: `reason` is the machine-readable cause (additive, the
+        // client must not guess it from `message`/`issues[].reason` text):
+        // TIMEOUT = the server could not analyze it in time (not the text's fault),
+        // TOO_COMPLEX = size/shape limits or a worker crash, FORBIDDEN_CONSTRUCTS
+        // = the text has constructs that are not allowed.
+        {
+          ...capIssues(issues),
+          reason: timedOut
+            ? 'TIMEOUT'
+            : tooComplex
+              ? 'TOO_COMPLEX'
+              : 'FORBIDDEN_CONSTRUCTS',
+        },
       );
     }
     this.remember(createHash('sha256').update(md).digest('base64'), toc);
