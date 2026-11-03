@@ -7,6 +7,7 @@ import {
   type OnModuleDestroy,
 } from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
+import { LEGAL_TEMPLATE_NOTICE } from './legal-placeholders.js';
 import {
   DEFAULT_POOL_OPTIONS,
   MarkdownWorkerPool,
@@ -379,7 +380,17 @@ export const MAX_REPORTED_ISSUES = 50;
 
 type TocEntryCache = { toc: LegalTocEntry[]; expiresAt?: number };
 
-type Analysis = { issues: LegalMarkdownIssue[]; toc: LegalTocEntry[] };
+/** Story 19.3a: a residual marker or template notice in the visible text. */
+export interface LegalResidual {
+  token: string;
+  line: number;
+}
+
+type Analysis = {
+  issues: LegalMarkdownIssue[];
+  toc: LegalTocEntry[];
+  residuals: LegalResidual[];
+};
 
 /**
  * Story 19.1 (AD-90, FR-109): server-side Markdown validation on the AST
@@ -445,6 +456,7 @@ export class LegalMarkdownService implements OnModuleDestroy {
   private interpret(facts: MarkdownFact[]): Analysis {
     const issues: LegalMarkdownIssue[] = [];
     const toc: LegalTocEntry[] = [];
+    const residuals: LegalResidual[] = [];
     const ids = new HeadingIds();
     for (const f of facts) {
       switch (f[0]) {
@@ -472,6 +484,12 @@ export class LegalMarkdownService implements OnModuleDestroy {
           }
           break;
         }
+        case 'residual':
+          residuals.push({
+            token: f[1] === 'notice' ? LEGAL_TEMPLATE_NOTICE : f[2],
+            line: f[3],
+          });
+          break;
         case 'h':
           toc.push({
             depth: f[1],
@@ -481,7 +499,7 @@ export class LegalMarkdownService implements OnModuleDestroy {
           break;
       }
     }
-    return { issues, toc };
+    return { issues, toc, residuals };
   }
 
   /**
@@ -594,10 +612,13 @@ export class LegalMarkdownService implements OnModuleDestroy {
    * worker with a hard deadline (400 on timeout/crash), and when every worker
    * and the queue are taken it answers 503 `LEGAL_MARKDOWN_BUSY` at once.
    */
-  async validate(md: string): Promise<{ toc: LegalTocEntry[] }> {
+  async validate(
+    md: string,
+  ): Promise<{ toc: LegalTocEntry[]; residuals: LegalResidual[] }> {
     let issues: LegalMarkdownIssue[];
     let tooComplex = true;
     let toc: LegalTocEntry[] | undefined;
+    let residuals: LegalResidual[] = [];
     try {
       const r = await this.analyze(md);
       if ('pre' in r) {
@@ -605,6 +626,7 @@ export class LegalMarkdownService implements OnModuleDestroy {
       } else {
         issues = r.result.issues;
         toc = r.result.toc;
+        residuals = r.result.residuals;
         tooComplex = false;
       }
     } catch (e) {
@@ -631,6 +653,6 @@ export class LegalMarkdownService implements OnModuleDestroy {
       );
     }
     this.remember(createHash('sha256').update(md).digest('base64'), toc);
-    return { toc };
+    return { toc, residuals };
   }
 }

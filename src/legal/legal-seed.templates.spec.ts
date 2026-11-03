@@ -167,10 +167,19 @@ describe('legal seed templates (Story 19.3)', () => {
   const E = '[[CONFIRMAR_DECLARACION_DE_MAYORIA_DE_EDAD_IMPLEMENTADA]]';
   const O = '[[CONFIRMAR_PRODUCTOS_ORIGINALES_CON_EL_DUENO]]';
   const L = '[[CONFIRMAR_CEDULA_EN_ALMACENAMIENTO_LOCAL_DEL_NAVEGADOR]]';
+  // Story 19.3a: the cédula is only mandatory when CHECKOUT_REQUIRE_SHIPPING
+  // is on (false by default); no storefront component shows the tracking number.
+  const R =
+    '[[CONFIRMAR_CHECKOUT_REQUIRE_SHIPPING_ACTIVO_PARA_CEDULA_OBLIGATORIA]]';
+  const G = '[[CONFIRMAR_SEGUIMIENTO_VISIBLE_AL_CLIENTE]]';
   const claims: [string, RegExp, string][] = [
     ['terminos', /se guarda cifrado, se muestra enmascarado/, C],
     ['envios', /se guarda cifrada y se muestra enmascarada/, C],
-    ['privacidad', /\(obligatorio para facturar y despachar\)/, C],
+    ['privacidad', /\(obligatorio para facturar y despachar/, C],
+    ['privacidad', /obligatorio para facturar y despachar/, R],
+    ['terminos', /obligatorio para completar la compra/, R],
+    ['envios', /Es obligatoria /, R],
+    ['envios', /registramos la agencia y el número de guía/, G],
     ['privacidad', /Se guarda \*\*cifrado\*\* en los pedidos/, C],
     ['privacidad', /cifrado de la cédula/, C],
     ['terminos', /el sistema guarda la versión de estos términos/, A],
@@ -186,7 +195,7 @@ describe('legal seed templates (Story 19.3)', () => {
     ],
     [
       'privacidad',
-      /se eliminan al cerrar sesión y, si la sesión vence/,
+      /la sesión vencida se elimina 7 días después de vencer/,
       '[[CONFIRMAR_BORRADO_DE_SESIONES_VENCIDAS_IMPLEMENTADO]]',
     ],
     [
@@ -220,6 +229,13 @@ describe('legal seed templates (Story 19.3)', () => {
     expect(templates.cookies).toContain('`212_cart_images`');
     expect(templates.cookies).toContain('`212_saved_products`');
     expect(templates.privacidad).toMatch(/sin cifrar/);
+  });
+
+  it('Story 19.3a: removed claims stay removed', () => {
+    expect(templates.envios).not.toMatch(/verás un enlace/);
+    expect(templates.devoluciones).not.toMatch(/48 a 72/);
+    expect(templates.privacidad).not.toMatch(/mientras mantengas la cuenta/);
+    expect(templates.privacidad).toMatch(/90 días de creada la sesión/);
   });
 
   it('envios: does not promise a status e-mail (none is sent today)', () => {

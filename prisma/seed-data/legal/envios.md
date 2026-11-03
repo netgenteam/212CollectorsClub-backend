@@ -14,7 +14,7 @@ Despachamos mediante agencias de encomienda nacionales ([[LISTA_DE_AGENCIAS]]; h
 
 ## 3. Datos necesarios y por qué pedimos la cédula
 
-Necesitamos el nombre y teléfono de quien recibe, la dirección o la oficina de destino y la **cédula de quien recibe**: las agencias la exigen para entregar y evita que el paquete llegue a un tercero. Es obligatoria; se guarda cifrada y se muestra enmascarada (ver [Privacidad](/privacidad)). [[CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA]] Un dato erróneo puede impedir la entrega: revísalo antes de pagar.
+Necesitamos el nombre y teléfono de quien recibe, la dirección o la oficina de destino y la **cédula de quien recibe**: las agencias la exigen para entregar y evita que el paquete llegue a un tercero. Es obligatoria [[CONFIRMAR_CHECKOUT_REQUIRE_SHIPPING_ACTIVO_PARA_CEDULA_OBLIGATORIA]]; se guarda cifrada y se muestra enmascarada (ver [Privacidad](/privacidad)). [[CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA]] Un dato erróneo puede impedir la entrega: revísalo antes de pagar.
 
 ## 4. Plazos
 
@@ -28,7 +28,7 @@ El costo del envío es: [[COSTO_DE_ENVIO_Y_QUIEN_LO_PAGA]] (por ejemplo, prepaga
 
 ## 6. Seguimiento
 
-Puedes consultar el estado de tu pedido desde la consulta de pedidos del sitio. Cuando despachamos, registramos la agencia y el número de guía en tu pedido; si la agencia lo permite, verás un enlace para rastrearlo.
+Puedes consultar el estado de tu pedido desde la consulta de pedidos del sitio. Cuando despachamos, registramos la agencia y el número de guía en tu pedido. [[CONFIRMAR_SEGUIMIENTO_VISIBLE_AL_CLIENTE]]
 
 ## 7. Riesgo de transporte y seguro
 

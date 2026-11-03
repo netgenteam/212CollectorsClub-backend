@@ -70,7 +70,7 @@ describe('LegalMarkdownService.validate (XSS corpus)', () => {
   });
 
   it('handles an empty document', async () => {
-    expect(await svc.validate('')).toEqual({ toc: [] });
+    expect(await svc.validate('')).toEqual({ toc: [], residuals: [] });
   });
 });
 

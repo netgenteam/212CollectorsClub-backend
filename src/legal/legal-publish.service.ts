@@ -10,7 +10,10 @@ import {
   type LegalActor,
 } from './legal-admin.common.js';
 import { LegalAuditService } from './legal-audit.service.js';
-import { LegalMarkdownService } from './legal-markdown.service.js';
+import {
+  LegalMarkdownService,
+  type LegalResidual,
+} from './legal-markdown.service.js';
 import {
   detectPlaceholders,
   findTemplateNotice,
@@ -74,8 +77,10 @@ export class LegalPublishService {
     if (seen.revision !== dto.expectedRevision) {
       throw legalDraftStale(seen.revision);
     }
-    await this.markdown.validate(seen.bodyMd); // 400 / 503, outside any lock
-    this.assertNoPlaceholders(seen.bodyMd);
+    // 400 / 503, outside any lock. `residuals` (Story 19.3a) are computed on
+    // the AST text in the worker; the locked draft below is byte-identical.
+    const { residuals } = await this.markdown.validate(seen.bodyMd);
+    this.assertNoPlaceholders(seen.bodyMd, residuals);
 
     return legalTx(this.prisma, async (tx, budget) => {
       // (1) serializes publishers of the same document.
@@ -94,7 +99,7 @@ export class LegalPublishService {
       // validation: it was not validated, treat it as stale.
       if (draft.bodyMd !== seen.bodyMd) throw legalDraftStale(draft.revision);
       // (3) placeholders again, on the locked draft.
-      this.assertNoPlaceholders(draft.bodyMd);
+      this.assertNoPlaceholders(draft.bodyMd, residuals);
 
       // effectiveFrom against the DATABASE clock (A81, monotonic).
       const [chk] = await tx.$queryRaw<
@@ -164,13 +169,28 @@ export class LegalPublishService {
     });
   }
 
-  private assertNoPlaceholders(bodyMd: string): void {
+  private assertNoPlaceholders(
+    bodyMd: string,
+    residuals: LegalResidual[] = [],
+  ): void {
     const items = detectPlaceholders(bodyMd);
     // The seeded "Plantilla — revisar…" notice is a blocker on its own: it
     // reuses this 422 (same shape) so removing only its token is not enough.
     const noticeLine = findTemplateNotice(bodyMd);
     if (noticeLine !== null) {
       items.push({ token: LEGAL_TEMPLATE_NOTICE, line: noticeLine });
+    }
+    // Story 19.3a: whatever is left of a marker or of the notice in the text
+    // the public will read (normalized AST text), however it was disguised.
+    // Same 422 and shape; an item already reported on the raw text is not
+    // repeated (same token and line; the notice is reported once).
+    for (const r of residuals) {
+      const dup = items.some((i) =>
+        r.token === LEGAL_TEMPLATE_NOTICE
+          ? i.token === r.token
+          : i.token === r.token && i.line === r.line,
+      );
+      if (!dup) items.push(r);
     }
     if (items.length === 0) return;
     throw new ApiException(

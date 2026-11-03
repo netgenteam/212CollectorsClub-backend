@@ -642,9 +642,66 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
       await post(`/${slug}/draft/discard`).expect(204);
     });
 
+    it('Story 19.3a: a residue of a marker or of the template notice never publishes (normalized text), a realistic text does', async () => {
+      const slug = docs.plh.slug;
+      const Z = '\u200B';
+      const vectors = [
+        '[[rif]]',
+        '[[ RIF ]]',
+        '[[RIF ]]',
+        '[[RIF]',
+        '[[Rif]]',
+        '[[X]]',
+        '[[1ABC]]',
+        `[[${'A'.repeat(81)}]]`,
+        'texto [[ suelto',
+        '[[RAZON-SOCIAL]]',
+        '[[RAZON.SOCIAL]]',
+        '[[**RIF**]]',
+        `[[R${Z}IF]]`,
+        '[[\u00A0RIF\u00A0]]',
+        '\uFF3B\uFF3BRIF\uFF3D\uFF3D',
+        '[[RI\nF]]',
+        '&#91;&#91;RIF]]',
+        '\\[\\[RIF]]',
+        'Plantilla -- revisar con un abogado antes de publicar',
+        'Plantilla\u2014revisar con un abogado antes de publicar',
+        `Plantilla \u2014${Z} revisar con un abogado antes de publicar`,
+        'Plan\u00ADtilla \u2014 revisar con un abogado antes de publicar',
+        'Plantilla &mdash; revisar con un abogado antes de publicar',
+        'Plantilla &#8212; revisar con un abogado antes de publicar',
+        '> Plantilla \u2014 revisar con un\n> abogado antes de publicar',
+        'Plantilla [\u2014](https://e.test) revisar con un abogado antes de publicar',
+        '| Plantilla \u2014 revisar | con un abogado |\n|---|---|\n| antes de | publicar |',
+        'Pl\u0430ntilla \u2014 revisar con un abogado antes de publicar',
+        'Plantilla \uFF0D revisar con un abogado antes de publicar',
+      ];
+      let rev = 0;
+      for (const v of vectors) {
+        const d = await createDraft(slug, `## Datos\n\n${v}\n`);
+        rev = d.revision;
+        const r = await publish(slug, { effectiveFrom: await inMs(60_000) });
+        expect([v, r.status]).toEqual([v, 422]);
+        expect(errOf(r).errorCode).toBe('LEGAL_PLACEHOLDERS_PENDING');
+        const items = (errOf(r).details as { items: { line: number }[] }).items;
+        expect(items.length).toBeGreaterThanOrEqual(1);
+        expect(items[0].line).toBe(3);
+        await post(`/${slug}/draft/discard`).expect(204);
+      }
+      expect(rev).toBeGreaterThan(0);
+      expect((await versionRows(docs.plh.id))[0].n).toBe(0);
+
+      // Harmless brackets and links, and "plantilla"/"abogado" alone, publish.
+      await createDraft(
+        slug,
+        '## Aviso\n\nVer [1], [a][b] y [texto](https://e.test). Usamos una plantilla de correo; puedes revisar con un abogado tus derechos.\n\n[b]: https://e.test\n',
+      );
+      await publish(slug, { effectiveFrom: await inMs(60_000) }).expect(201);
+    });
+
     it('publishes v1, v2 (v1 stays intact), monotonic effectiveFrom, history, audit and public reads', async () => {
       const slug = docs.pub.slug;
-      const body1 = '## Alcance\n\nPrimera version [[x]] del texto.\n';
+      const body1 = '## Alcance\n\nPrimera version del texto.\n';
       await createDraft(slug, body1);
       const eff1 = await inMs(1_200);
       const res1 = await publish(slug, {

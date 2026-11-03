@@ -5,7 +5,9 @@ export type MarkdownFact =
   | ['html', number]
   | ['image', number]
   | ['url', 'link' | 'definition', string, string, number]
-  | ['h', 2 | 3, string, number];
+  | ['h', 2 | 3, string, number]
+  /** Story 19.3a: leftover `[[`/`]]` or template notice in the visible text. */
+  | ['residual', 'marker' | 'notice', string, number];
 
 export type PoolFailureKind =
   /** Hard deadline expired: the worker was terminated. */

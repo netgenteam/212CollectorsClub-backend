@@ -18,7 +18,12 @@ describe('detectPlaceholders', () => {
     ]);
   });
 
-  it('lower-case or malformed tokens do not count (no false positives)', () => {
+  // Story 19.3a DECISION: `detectPlaceholders` stays strict on purpose: it
+  // counts only well-formed KNOWN-style tokens (the `PUT draft` counter).
+  // That `[[Rif]]`, `[[ RIF ]]` or `[[RIF]` are "not placeholders" here does
+  // NOT make them publishable: `publish` also rejects any `[[`/`]]` left in
+  // the normalized visible text (see legal-residual.spec.ts and the e2e).
+  it('lower-case or malformed tokens are not COUNTED as tokens (publish still rejects them, 19.3a)', () => {
     expect(
       detectPlaceholders('[[x]] [[Rif]] [[A]] [[1ABC]] [RIF] [[ RIF ]] [[RIF]'),
     ).toEqual([]);

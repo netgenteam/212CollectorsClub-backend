@@ -18,25 +18,62 @@
 //   ['html', line] | ['image', line]
 //   ['url', 'link'|'definition', url, written, line]   (written: source text of a link, '' otherwise)
 //   ['h', depth(2|3), text, line]
+//   ['residual', 'marker'|'notice', token, line]   (Story 19.3a, see legal-residual.core.mjs)
 import { parentPort } from 'node:worker_threads';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
 import { toString as nodeToString } from 'mdast-util-to-string';
 import { diffMarkdown } from './legal-diff.core.mjs';
+import { findResiduals } from './legal-residual.core.mjs';
 
 const MAX_WRITTEN = 2100;
+
+// Story 19.3a: node types that are inline (everything else starts a block and
+// separates the visible text pieces collected for the residual check).
+const PHRASING = new Set([
+  'text',
+  'emphasis',
+  'strong',
+  'delete',
+  'inlineCode',
+  'link',
+  'linkReference',
+  'image',
+  'imageReference',
+  'break',
+  'html',
+  'footnoteReference',
+]);
 
 function analyze(md) {
   const root = unified().use(remarkParse).use(remarkGfm).parse(md);
   const facts = [];
+  // Visible text of the document as the public will read it (what the AST
+  // keeps: entities decoded, `\\[` unescaped, no `>` prefixes, no emphasis /
+  // link syntax), as [text, firstLine] pieces in document order.
+  const pieces = [];
   // Iterative pre-order walk: a deep AST cannot overflow the stack.
   const stack = [root];
   while (stack.length > 0) {
     const node = stack.pop();
     const line = node.position?.start.line ?? 1;
+    if (node !== root && !PHRASING.has(node.type)) pieces.push(['\n', line]);
     switch (node.type) {
+      case 'text':
+      case 'inlineCode':
+        pieces.push([node.value, line]);
+        break;
+      case 'code': {
+        const c = md.charAt(node.position?.start.offset ?? 0);
+        pieces.push([node.value, line + (c === '`' || c === '~' ? 1 : 0)]);
+        break;
+      }
+      case 'break':
+        pieces.push(['\n', line]);
+        break;
       case 'html':
+        pieces.push([node.value, line]);
         facts.push(['html', line]);
         break;
       case 'image':
@@ -67,6 +104,7 @@ function analyze(md) {
       }
     }
   }
+  for (const r of findResiduals(pieces)) facts.push(['residual', ...r]);
   return facts;
 }
 

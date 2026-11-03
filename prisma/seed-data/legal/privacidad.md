@@ -11,7 +11,7 @@ El responsable del tratamiento es **[[RAZON_SOCIAL]]**, RIF **[[RIF]]**, domicil
 ## 2. Qué datos recopilamos
 
 - **Cuenta:** nombre, correo electrónico y contraseña (la contraseña se guarda con un algoritmo de hash, nunca en claro).
-- **Compra y envío:** nombre y teléfono del destinatario, dirección, agencia de envío, y número de **cédula o RIF** del comprador y/o del destinatario (obligatorio para facturar y despachar). [[CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA]]
+- **Compra y envío:** nombre y teléfono del destinatario, dirección, agencia de envío, y número de **cédula o RIF** del comprador y/o del destinatario (obligatorio para facturar y despachar [[CONFIRMAR_CHECKOUT_REQUIRE_SHIPPING_ACTIVO_PARA_CEDULA_OBLIGATORIA]]). [[CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA]]
 - **Pago:** datos del pedido y, si pagas por Pago Móvil, el **comprobante** que subas. Si pagas con tarjeta, los datos de la tarjeta los recibe Stripe; la Tienda no los guarda.
 - **Sesión:** dirección IP y agente de usuario (navegador) asociados a tu sesión iniciada, por seguridad.
 - **Contacto:** los mensajes que nos envías por el formulario.
@@ -45,9 +45,10 @@ El número de cédula o RIF es obligatorio en la factura y en el despacho. Se gu
 
 ## 7. Cuánto tiempo los conservamos
 
-- Cuenta y libreta de direcciones: mientras mantengas la cuenta.
+- Cuenta: mientras la mantengas.
+- Libreta de direcciones, productos guardados y miniaturas del carrito: viven solo en el almacenamiento local de tu navegador (sección 2), no en nuestros servidores; permanecen hasta que los borres desde tu navegador.
 - Pedidos y datos de factura: durante el plazo fiscal indicado arriba.
-- Sesiones (IP y agente): mientras dure la sesión; se eliminan al cerrar sesión y, si la sesión vence sin cerrarla, al vencer. [[CONFIRMAR_BORRADO_DE_SESIONES_VENCIDAS_IMPLEMENTADO]]
+- Sesiones (IP y agente): la sesión vencida se elimina 7 días después de vencer, y la IP y el agente de usuario se anulan a los 90 días de creada la sesión (una sesión todavía activa no se toca). [[CONFIRMAR_BORRADO_DE_SESIONES_VENCIDAS_IMPLEMENTADO]]
 - Mensajes de contacto: [[PLAZO_CONSERVACION_CONTACTO]].
 - Carritos y listas de deseos anónimos: el identificador que los asocia a tu navegador dura 30 días con renovación; los registros vencidos se eliminan. [[CONFIRMAR_BORRADO_DE_CARRITOS_Y_LISTAS_ANONIMOS_VENCIDOS_IMPLEMENTADO]]
 - Comprobantes de pago: [[PLAZO_CONSERVACION_COMPROBANTES]].

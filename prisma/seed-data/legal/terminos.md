@@ -56,7 +56,7 @@ Se rigen por la política de [Devoluciones](/devoluciones), que forma parte de e
 
 ## 11. Facturación y datos de la cédula
 
-Para emitir la factura y despachar a nombre de quien recibe se solicita el número de cédula o RIF del comprador y/o del destinatario. Ese dato es obligatorio para completar la compra; se guarda cifrado, se muestra enmascarado y se conserva mientras lo exija la normativa fiscal. [[CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA]] Más detalles en la [Política de Privacidad](/privacidad). [[CONFIRMAR_METODO_DE_FACTURACION_CON_CONTADOR]]
+Para emitir la factura y despachar a nombre de quien recibe se solicita el número de cédula o RIF del comprador y/o del destinatario. Ese dato es obligatorio para completar la compra [[CONFIRMAR_CHECKOUT_REQUIRE_SHIPPING_ACTIVO_PARA_CEDULA_OBLIGATORIA]]; se guarda cifrado, se muestra enmascarado y se conserva mientras lo exija la normativa fiscal. [[CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA]] Más detalles en la [Política de Privacidad](/privacidad). [[CONFIRMAR_METODO_DE_FACTURACION_CON_CONTADOR]]
 
 ## 12. Propiedad intelectual y no afiliación
 

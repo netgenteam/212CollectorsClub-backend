@@ -23,7 +23,7 @@ Esto no limita los derechos irrenunciables que la ley venezolana te reconozca co
 
 ## 3. Plazo para reclamar
 
-Debes avisarnos dentro de **[[PLAZO_RECLAMO]]** desde que recibes el pedido (referencia habitual: 48 a 72 horas), escribiendo a [[EMAIL_CONTACTO]] con tu número de pedido, fotos del producto y del empaque y, preferiblemente, un video de la apertura del paquete.
+Debes avisarnos dentro de **[[PLAZO_RECLAMO]]** desde que recibes el pedido, escribiendo a [[EMAIL_CONTACTO]] con tu número de pedido, fotos del producto y del empaque y, preferiblemente, un video de la apertura del paquete.
 
 ## 4. Proceso
 
