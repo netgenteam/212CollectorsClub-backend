@@ -1,4 +1,4 @@
-> **Plantilla — revisar con un abogado antes de publicar.** Borrador orientativo, no es asesoría jurídica. Venezuela no tiene una ley específica de cookies; se usan estándares internacionales como referencia. Reemplaza cada marcador `[[...]]`, verifica la tabla contra el sitio publicado y elimina este bloque. [[ELIMINAR_AVISO_DE_PLANTILLA]]
+> **Plantilla — revisar con un abogado antes de publicar.** Borrador orientativo, no es asesoría jurídica. Venezuela no tiene una ley específica de cookies; se usan estándares internacionales como referencia. Reemplaza cada marcador entre dobles corchetes, verifica la tabla contra el sitio publicado y elimina este bloque. [[ELIMINAR_AVISO_DE_PLANTILLA]]
 
 ## Política de Cookies
 
@@ -22,6 +22,18 @@ Necesarias para que el sitio funcione: mantener tu sesión, tu carrito y tu list
 | `212_cookie_prefs` | Guarda tu elección sobre cookies y la versión de esta política | 1 año |
 
 [[VERIFICAR_NOMBRES_Y_DURACIONES_CONTRA_EL_SITIO_PUBLICADO]] Las cookies de la zona de administración solo las usa el personal de la Tienda.
+
+### Almacenamiento local del navegador (no son cookies)
+
+Además de las cookies, el sitio usa `localStorage`, que guarda datos solo en tu dispositivo y no se envía automáticamente al servidor:
+
+| Clave | Contenido |
+|---|---|
+| `212_cart_images` | Miniaturas de los productos de tu carrito |
+| `212_saved_products` | Identificadores de los productos de tu lista de deseos |
+| `212_customer_addresses_*` | Tu libreta de direcciones: nombre, teléfono, dirección y la cédula del destinatario **sin cifrar** |
+
+Puedes borrarlo desde la configuración de tu navegador. [[CONFIRMAR_CEDULA_EN_ALMACENAMIENTO_LOCAL_DEL_NAVEGADOR]] [[VERIFICAR_CLAVES_DE_ALMACENAMIENTO_LOCAL_CONTRA_EL_SITIO_PUBLICADO]]
 
 ### Analíticas (desactivadas por defecto)
 

@@ -1,4 +1,4 @@
-> **Plantilla — revisar con un abogado antes de publicar.** Borrador orientativo, no es asesoría jurídica. Reemplaza cada marcador `[[...]]` con datos reales, revisa cada afirmación contra la operación real de la tienda y elimina este bloque. [[ELIMINAR_AVISO_DE_PLANTILLA]]
+> **Plantilla — revisar con un abogado antes de publicar.** Borrador orientativo, no es asesoría jurídica. Reemplaza cada marcador entre dobles corchetes con datos reales, revisa cada afirmación contra la operación real de la tienda y elimina este bloque. [[ELIMINAR_AVISO_DE_PLANTILLA]]
 
 ## Términos y Condiciones de Venta
 
@@ -10,11 +10,11 @@ Esta tienda en línea, «212 Collectors Club», es operada por **[[RAZON_SOCIAL]
 
 ## 2. Objeto y aceptación
 
-Estos términos regulan la compra de productos coleccionables (cartas sueltas, cartas gradadas, producto sellado y accesorios) a través del sitio web de la Tienda. Al registrarte o al finalizar una compra marcas la casilla de aceptación; el sistema guarda la versión de estos términos que aceptaste y la fecha y hora de aceptación como prueba. Si no estás de acuerdo, no uses el sitio para comprar.
+Estos términos regulan la compra de productos coleccionables (cartas sueltas, cartas gradadas, producto sellado y accesorios) a través del sitio web de la Tienda. Al registrarte o al finalizar una compra marcas la casilla de aceptación; el sistema guarda la versión de estos términos que aceptaste y la fecha y hora de aceptación como prueba. [[CONFIRMAR_REGISTRO_DE_ACEPTACION_IMPLEMENTADO]] Si no estás de acuerdo, no uses el sitio para comprar.
 
 ## 3. Capacidad y menores de edad
 
-Para obligarte contractualmente necesitas ser mayor de 18 años. Las personas menores de edad solo pueden comprar con la autorización y supervisión de su representante legal, quien es el responsable de la compra. Al registrarte o comprar declaras ser mayor de 18 años o contar con esa autorización; el sistema no verifica la edad ni solicita fecha de nacimiento, por lo que la declaración es tu responsabilidad.
+Para obligarte contractualmente necesitas ser mayor de 18 años. Las personas menores de edad solo pueden comprar con la autorización y supervisión de su representante legal, quien es el responsable de la compra. Al registrarte o comprar declaras ser mayor de 18 años o contar con esa autorización; el sistema no verifica la edad ni solicita fecha de nacimiento, por lo que la declaración es tu responsabilidad. [[CONFIRMAR_DECLARACION_DE_MAYORIA_DE_EDAD_IMPLEMENTADA]]
 
 La Tienda se reserva el derecho de cancelar, antes del despacho, los pedidos que sospeche realizados por un menor de edad sin autorización de su representante legal, y de reembolsar lo pagado por el mismo medio de pago. La navegación del sitio y el simulador de sobres están abiertos a todo público.
 
@@ -27,7 +27,7 @@ Puedes comprar con una cuenta o como invitado. Eres responsable de la veracidad 
 - Describimos el estado de cada producto (sellado, carta suelta, carta gradada y su empresa certificadora, edición, idioma) con la mayor exactitud posible. Las fotografías y las imágenes de cartas sirven como referencia para identificar el producto.
 - La graduación de cartas es realizada por terceros certificadores; la Tienda no la modifica.
 - Los productos de preventa indican su fecha estimada de lanzamiento, que puede variar por causas del proveedor.
-- Solo vendemos producto que creemos original. Si dudas de la autenticidad de un artículo, escríbenos ([[EMAIL_CONTACTO]]).
+- Solo vendemos producto que creemos original. [[CONFIRMAR_PRODUCTOS_ORIGINALES_CON_EL_DUENO]] Si dudas de la autenticidad de un artículo, escríbenos ([[EMAIL_CONTACTO]]).
 
 ## 6. Precios y moneda
 
@@ -56,7 +56,7 @@ Se rigen por la política de [Devoluciones](/devoluciones), que forma parte de e
 
 ## 11. Facturación y datos de la cédula
 
-Para emitir la factura y despachar a nombre de quien recibe se solicita el número de cédula o RIF del comprador y/o del destinatario. Ese dato es obligatorio para completar la compra; se guarda cifrado, se muestra enmascarado y se conserva mientras lo exija la normativa fiscal. Más detalles en la [Política de Privacidad](/privacidad). [[CONFIRMAR_METODO_DE_FACTURACION_CON_CONTADOR]]
+Para emitir la factura y despachar a nombre de quien recibe se solicita el número de cédula o RIF del comprador y/o del destinatario. Ese dato es obligatorio para completar la compra; se guarda cifrado, se muestra enmascarado y se conserva mientras lo exija la normativa fiscal. [[CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA]] Más detalles en la [Política de Privacidad](/privacidad). [[CONFIRMAR_METODO_DE_FACTURACION_CON_CONTADOR]]
 
 ## 12. Propiedad intelectual y no afiliación
 
@@ -76,7 +76,7 @@ En la medida permitida por la ley, la Tienda no responde por daños indirectos n
 
 ## 16. Modificaciones
 
-Podemos modificar estos términos publicando una nueva versión con su fecha. Los cambios sustanciales pueden requerir que los aceptes de nuevo para seguir comprando. Cada pedido se rige por la versión que aceptaste al comprar.
+Podemos modificar estos términos publicando una nueva versión con su fecha. Los cambios sustanciales pueden requerir que los aceptes de nuevo para seguir comprando. Cada pedido se rige por la versión que aceptaste al comprar. [[CONFIRMAR_REGISTRO_DE_ACEPTACION_IMPLEMENTADO]]
 
 ## 17. Ley aplicable y jurisdicción
 

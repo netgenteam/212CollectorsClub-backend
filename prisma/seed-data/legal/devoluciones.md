@@ -1,4 +1,4 @@
-> **Plantilla — revisar con un abogado antes de publicar.** Borrador orientativo, no es asesoría jurídica. Venezuela no tiene un derecho de retracto genérico que se pueda dar por confirmado; esta política es una decisión comercial de la Tienda. Define los plazos reales, reemplaza cada marcador `[[...]]` y elimina este bloque. [[ELIMINAR_AVISO_DE_PLANTILLA]]
+> **Plantilla — revisar con un abogado antes de publicar.** Borrador orientativo, no es asesoría jurídica. Venezuela no tiene un derecho de retracto genérico que se pueda dar por confirmado; esta política es una decisión comercial de la Tienda. Define los plazos reales, reemplaza cada marcador entre dobles corchetes y elimina este bloque. [[ELIMINAR_AVISO_DE_PLANTILLA]]
 
 ## Política de Devoluciones, Reembolsos y Garantía
 

@@ -17,6 +17,11 @@ import {
 } from './../src/legal/legal-seed.service.js';
 import { LEGAL_SLUGS } from './../src/legal/legal-slugs.js';
 import {
+  detectPlaceholders,
+  findTemplateNotice,
+  LEGAL_TEMPLATE_NOTICE,
+} from './../src/legal/legal-placeholders.js';
+import {
   createSandboxDocument,
   insertSandboxDraft,
   insertSandboxVersion,
@@ -337,5 +342,61 @@ describe('Legal seed (e2e, Story 19.3)', () => {
       expect(['SKIPPED_HAS_DRAFT', 'SKIPPED_HAS_VERSION']).toContain(r.outcome);
     }
     expect(await realLegalFingerprint(sql)).toBe(before);
+  });
+
+  it('G: a seeded template with EVERY [[TOKEN]] filled in and only the notice token removed still answers 422 (the template notice cannot be published)', async () => {
+    for (const t of real) {
+      const gslug = `e2e-${TAG}g-${t.slug}`;
+      const doc = await createSandboxDocument(sql, `${TAG}g-${t.slug}`);
+      const filled = t.bodyMd
+        .replace(' [[ELIMINAR_AVISO_DE_PLANTILLA]]', '')
+        .replace(/\[\[[^\]]+\]\]/g, 'dato real');
+      expect(detectPlaceholders(filled)).toHaveLength(0);
+      expect(filled).toContain(LEGAL_TEMPLATE_NOTICE);
+      await insertSandboxDraft(sql, doc.id, filled);
+      const res = await request(http())
+        .post(`/api/v1/admin/legal/${gslug}/publish`)
+        .set({ Authorization: `Bearer ${token}` })
+        .send({
+          changeSummary: 'Publicar con el aviso de plantilla',
+          isSubstantial: false,
+          expectedRevision: 1,
+          effectiveFrom: new Date(Date.now() + 60_000).toISOString(),
+        });
+      expect([t.slug, res.status]).toEqual([t.slug, 422]);
+      const body = res.body as {
+        errorCode: string;
+        details: { items: { token: string; line: number }[]; total: number };
+      };
+      expect(body.errorCode).toBe('LEGAL_PLACEHOLDERS_PENDING');
+      expect(body.details.total).toBe(1);
+      expect(body.details.items).toEqual([
+        { token: LEGAL_TEMPLATE_NOTICE, line: 1 },
+      ]);
+      const [{ n }] = await sql(
+        `SELECT count(*)::int AS n FROM "Legal_Document_Versions" WHERE "documentId" = $1::uuid`,
+        [doc.id],
+      );
+      expect(n).toBe(0);
+
+      // without the phrase (rewritten notice) the same draft does publish: the guard is exactly the phrase
+      const clean = filled.replace(/^>.*\n/, '');
+      expect(findTemplateNotice(clean)).toBeNull();
+      await request(http())
+        .put(`/api/v1/admin/legal/${gslug}/draft`)
+        .set({ Authorization: `Bearer ${token}` })
+        .send({ bodyMd: clean, baseRevision: 1 })
+        .expect(200);
+      await request(http())
+        .post(`/api/v1/admin/legal/${gslug}/publish`)
+        .set({ Authorization: `Bearer ${token}` })
+        .send({
+          changeSummary: 'Publicado sin aviso',
+          isSubstantial: false,
+          expectedRevision: 2,
+          effectiveFrom: new Date(Date.now() + 60_000).toISOString(),
+        })
+        .expect(201);
+    }
   });
 });

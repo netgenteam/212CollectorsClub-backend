@@ -11,7 +11,11 @@ import {
 } from './legal-admin.common.js';
 import { LegalAuditService } from './legal-audit.service.js';
 import { LegalMarkdownService } from './legal-markdown.service.js';
-import { detectPlaceholders } from './legal-placeholders.js';
+import {
+  detectPlaceholders,
+  findTemplateNotice,
+  LEGAL_TEMPLATE_NOTICE,
+} from './legal-placeholders.js';
 
 /** An effectiveFrom further than this ahead would freeze the monotonic rule for ever (versions are immutable). */
 export const MAX_EFFECTIVE_AHEAD_DAYS = 366;
@@ -162,6 +166,12 @@ export class LegalPublishService {
 
   private assertNoPlaceholders(bodyMd: string): void {
     const items = detectPlaceholders(bodyMd);
+    // The seeded "Plantilla — revisar…" notice is a blocker on its own: it
+    // reuses this 422 (same shape) so removing only its token is not enough.
+    const noticeLine = findTemplateNotice(bodyMd);
+    if (noticeLine !== null) {
+      items.push({ token: LEGAL_TEMPLATE_NOTICE, line: noticeLine });
+    }
     if (items.length === 0) return;
     throw new ApiException(
       HttpStatus.UNPROCESSABLE_ENTITY,

@@ -1,4 +1,4 @@
-> **Plantilla — revisar con un abogado antes de publicar.** Borrador orientativo, no es asesoría jurídica. Completa los datos del titular con información real (no se inventan datos), reemplaza cada marcador `[[...]]` y elimina este bloque. [[ELIMINAR_AVISO_DE_PLANTILLA]]
+> **Plantilla — revisar con un abogado antes de publicar.** Borrador orientativo, no es asesoría jurídica. Completa los datos del titular con información real (no se inventan datos), reemplaza cada marcador entre dobles corchetes y elimina este bloque. [[ELIMINAR_AVISO_DE_PLANTILLA]]
 
 ## Aviso Legal
 
@@ -22,9 +22,9 @@ Versión del borrador: [[FECHA_VERSION]].
 
 ## 3. Propiedad intelectual y no afiliación
 
-Pokémon y marcas relacionadas son propiedad de sus titulares. 212 Collectors Club es un revendedor independiente y **no está afiliado, patrocinado ni respaldado por Nintendo, Creatures, GAME FREAK, The Pokémon Company, Wizards of the Coast, Konami** ni por ningún otro titular de marcas de los juegos que vende. Magic: The Gathering es marca de Wizards of the Coast y Yu-Gi-Oh! es marca de Konami. Los nombres, logotipos e imágenes de cartas se usan únicamente para identificar el producto que se vende. Los productos que ofrecemos son originales de fabricantes; no vendemos falsificaciones.
+Pokémon y marcas relacionadas son propiedad de sus titulares. 212 Collectors Club es un revendedor independiente y **no está afiliado, patrocinado ni respaldado por Nintendo, Creatures, GAME FREAK, The Pokémon Company, Wizards of the Coast, Konami** ni por ningún otro titular de marcas de los juegos que vende. Magic: The Gathering es marca de Wizards of the Coast y Yu-Gi-Oh! es marca de Konami. Los nombres, logotipos e imágenes de cartas se usan únicamente para identificar el producto que se vende. Los productos que ofrecemos son originales de fabricantes; no vendemos falsificaciones. [[CONFIRMAR_PRODUCTOS_ORIGINALES_CON_EL_DUENO]]
 
-[[CREDITOS_DE_PROVEEDOR_DE_DATOS_DE_CARTAS_SI_SU_LICENCIA_LO_EXIGE]]
+[[CREDITOS_DEL_PROVEEDOR_DE_DATOS_DE_CARTAS_SI_LA_LICENCIA_LO_EXIGE]]
 
 Los textos, el diseño y los logotipos propios de la Tienda están protegidos y no pueden reproducirse sin autorización.
 

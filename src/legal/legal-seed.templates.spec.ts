@@ -148,4 +148,90 @@ describe('legal seed templates (Story 19.3)', () => {
     expect(b).toMatch(/plazo que exija la normativa fiscal/);
     expect(b).toMatch(/Stripe/);
   });
+
+  it.each([...LEGAL_SLUGS])(
+    '%s: every `[[` is a detected placeholder (grep parity; no token escapes the detector)',
+    (slug) => {
+      const raw = (templates[slug].match(/\[\[/g) ?? []).length;
+      expect(detectPlaceholders(templates[slug])).toHaveLength(raw);
+    },
+  );
+
+  /**
+   * Claims about features that are NOT implemented yet (or owner facts) must
+   * carry their own marker in the same line (paragraph / bullet / table row).
+   * Marker -> story that makes the claim true.
+   */
+  const C = '[[CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA]]';
+  const A = '[[CONFIRMAR_REGISTRO_DE_ACEPTACION_IMPLEMENTADO]]';
+  const E = '[[CONFIRMAR_DECLARACION_DE_MAYORIA_DE_EDAD_IMPLEMENTADA]]';
+  const O = '[[CONFIRMAR_PRODUCTOS_ORIGINALES_CON_EL_DUENO]]';
+  const L = '[[CONFIRMAR_CEDULA_EN_ALMACENAMIENTO_LOCAL_DEL_NAVEGADOR]]';
+  const claims: [string, RegExp, string][] = [
+    ['terminos', /se guarda cifrado, se muestra enmascarado/, C],
+    ['envios', /se guarda cifrada y se muestra enmascarada/, C],
+    ['privacidad', /\(obligatorio para facturar y despachar\)/, C],
+    ['privacidad', /Se guarda \*\*cifrado\*\* en los pedidos/, C],
+    ['privacidad', /cifrado de la cédula/, C],
+    ['terminos', /el sistema guarda la versión de estos términos/, A],
+    ['terminos', /Cada pedido se rige por la versión que aceptaste/, A],
+    ['privacidad', /\*\*Aceptaciones:\*\*/, A],
+    ['privacidad', /Probar tu aceptación de los términos/, A],
+    ['terminos', /Al registrarte o comprar declaras ser mayor/, E],
+    ['privacidad', /tu declaración de mayoría de edad/, E],
+    [
+      'privacidad',
+      /quedando registro de cada consulta/,
+      '[[CONFIRMAR_REGISTRO_DE_CONSULTAS_DE_CEDULA_IMPLEMENTADO]]',
+    ],
+    [
+      'privacidad',
+      /se eliminan al cerrar sesión y, si la sesión vence/,
+      '[[CONFIRMAR_BORRADO_DE_SESIONES_VENCIDAS_IMPLEMENTADO]]',
+    ],
+    [
+      'privacidad',
+      /Carritos y listas de deseos anónimos/,
+      '[[CONFIRMAR_BORRADO_DE_CARRITOS_Y_LISTAS_ANONIMOS_VENCIDOS_IMPLEMENTADO]]',
+    ],
+    [
+      'aviso-legal',
+      /originales de fabricantes; no vendemos falsificaciones/,
+      O,
+    ],
+    ['terminos', /Solo vendemos producto que creemos original/, O],
+    ['privacidad', /Almacenamiento local de tu navegador/, L],
+    ['cookies', /Puedes borrarlo desde la configuración/, L],
+  ];
+  it.each(claims)(
+    '%s: the claim /%s/ carries %s on its own line',
+    (slug, claim, marker) => {
+      const lines = templates[slug].split('\n').filter((l) => claim.test(l));
+      expect(lines.length).toBeGreaterThanOrEqual(1);
+      for (const l of lines) expect(l).toContain(marker);
+    },
+  );
+
+  it('cookies/privacidad do not hide the local storage of the cédula', () => {
+    for (const slug of ['cookies', 'privacidad']) {
+      expect(templates[slug]).toContain('localStorage');
+    }
+    expect(templates.cookies).toContain('`212_customer_addresses_*`');
+    expect(templates.cookies).toContain('`212_cart_images`');
+    expect(templates.cookies).toContain('`212_saved_products`');
+    expect(templates.privacidad).toMatch(/sin cifrar/);
+  });
+
+  it('envios: does not promise a status e-mail (none is sent today)', () => {
+    expect(templates.envios).not.toMatch(/avisaremos por correo/i);
+    expect(templates.envios).not.toMatch(/por correo del cambio de estado/i);
+  });
+
+  it('every marker fits the detector length', () => {
+    for (const slug of LEGAL_SLUGS) {
+      for (const p of detectPlaceholders(templates[slug])) {
+        expect(p.token.length - 4).toBeLessThanOrEqual(80);
+      }
+    }
+  });
 });
