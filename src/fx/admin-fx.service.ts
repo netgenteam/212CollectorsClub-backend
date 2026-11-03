@@ -36,6 +36,17 @@ import type { FxRejectReason } from './fx-validation.js';
  * Enforced by the database (`lock_timeout`), below Nginx's 60 s.
  */
 export const FX_LOCK_BUDGET_MS = 25_000;
+/**
+ * Story 19.4a: TOTAL budget of one PUT /admin/fx/settings (lock 1 + provider
+ * read + lock 2 + post-commit refresh share it). A PUT that aborts with
+ * NEEDS_READING used to add lock 1 (<= 25 s) + a provider read (5 s with retry
+ * = 10.5 s) + lock 2 (<= 25 s): measured 55.5-60.1 s, and Nginx cuts at 60 s.
+ * Whatever is left is passed to each phase; when it does not suffice the answer
+ * is 409 `FX_SETTINGS_BUSY` with >= 13 s of margin against Nginx.
+ */
+export const FX_PUT_BUDGET_MS = 45_000;
+/** Below this much remaining budget a lock wait is not worth starting. */
+const MIN_LOCK_WAIT_MS = 1_000;
 
 const LIVE_SOURCES = ['BCV_USD', 'BCV_EUR', 'PARALELO_USD'] as const;
 const HOUR_MS = 3600 * 1000;
@@ -102,6 +113,9 @@ export class AdminFxService {
     // the locked decision needs a reading we do not have (another PUT changed
     // the source meanwhile), the tx is abandoned (lock released), the reading
     // is fetched and the decision is repeated ONCE; never a 200 without effect.
+    // Monotonic clock (the WSL2 wall clock steps backwards).
+    const deadline = performance.now() + FX_PUT_BUDGET_MS;
+    const left = () => deadline - performance.now();
     let reading: FxProviderResult | undefined;
     if (dto.source !== 'MANUAL') {
       const pre = await this.prisma.fxRateSetting.findUnique({
@@ -109,21 +123,23 @@ export class AdminFxService {
         select: { source: true },
       });
       if (pre && pre.source !== dto.source) {
-        reading = await this.refresher.fetchReading(dto.source);
+        reading = await this.readWithin(dto.source, left());
       }
     }
 
-    let outcome = await this.applySettings(dto, adminUserId, reading);
+    let outcome = await this.applySettings(dto, adminUserId, reading, left());
     if (outcome === 'NEEDS_READING') {
-      reading = await this.refresher.fetchReading(dto.source);
-      outcome = await this.applySettings(dto, adminUserId, reading);
+      reading = await this.readWithin(dto.source, left());
+      outcome = await this.applySettings(dto, adminUserId, reading, left());
       if (outcome === 'NEEDS_READING') this.busy();
     }
 
     let { refresh, stale } = outcome;
     if (outcome.needsRefresh) {
       try {
-        refresh = (await this.refresher.refresh(dto.source)).status;
+        // Already committed: what is left of the budget bounds this refresh.
+        const r = await this.within(this.refresher.refresh(dto.source), left());
+        refresh = r ? r.status : 'FAILED';
       } catch {
         refresh = 'FAILED';
       }
@@ -155,8 +171,12 @@ export class AdminFxService {
     dto: UpdateFxSettingsDto,
     adminUserId: string,
     reading: FxProviderResult | undefined,
+    remainingMs: number,
   ): Promise<SettingsOutcome | 'NEEDS_READING'> {
     const manual = dto.manualVesPerUsd;
+    // Lock waits get at most what is left of the whole PUT's budget.
+    const lockBudgetMs = Math.min(FX_LOCK_BUDGET_MS, Math.floor(remainingMs));
+    if (lockBudgetMs < MIN_LOCK_WAIT_MS) this.busy();
     try {
       return await this.withLockBudget<SettingsOutcome>(async (tx, budget) => {
         // Same lock as FxRefreshService (blocking here: the cron just waits us).
@@ -302,7 +322,7 @@ export class AdminFxService {
           // Same live source: no pair risk; refresh after the commit as before.
           needsRefresh: dto.source !== 'MANUAL' && !changed,
         };
-      });
+      }, lockBudgetMs);
     } catch (err) {
       if (err instanceof NeedsReadingSignal) return 'NEEDS_READING';
       throw err;
@@ -461,17 +481,45 @@ export class AdminFxService {
    */
   private async withLockBudget<T>(
     run: (tx: Prisma.TransactionClient, budget: LockBudget) => Promise<T>,
+    budgetMs: number = FX_LOCK_BUDGET_MS,
   ): Promise<T> {
     try {
       return await this.prisma.$transaction(async (tx) => {
-        const budget = new LockBudget(tx, FX_LOCK_BUDGET_MS);
+        const budget = new LockBudget(tx, budgetMs);
         await budget.arm();
         return run(tx, budget);
-      }, lockedTxOptions(FX_LOCK_BUDGET_MS));
+      }, lockedTxOptions(budgetMs));
     } catch (err) {
       if (isLockWaitExpired(err)) this.busy();
       throw err;
     }
+  }
+
+  /** Resolves with `p`, or `undefined` once `ms` have passed (p keeps running, ignored). */
+  private async within<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+    if (ms <= 0) return undefined;
+    p.catch(() => undefined); // a late rejection after the timeout must not be unhandled
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        p,
+        new Promise<undefined>((r) => {
+          timer = setTimeout(() => r(undefined), ms);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Provider read bounded by the PUT's remaining budget; out of time = 409 busy. */
+  private async readWithin(
+    source: FxRateSource,
+    ms: number,
+  ): Promise<FxProviderResult> {
+    const r = await this.within(this.refresher.fetchReading(source), ms);
+    if (!r) this.busy();
+    return r;
   }
 
   private busy(): never {

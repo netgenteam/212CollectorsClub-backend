@@ -10,7 +10,7 @@ export class ReacceptConsentDto {
   @ApiPropertyOptional({
     example: 3,
     description:
-      'Version of `terminos` in force. Required only while `terminos` is pending for the account; optional otherwise (if sent it must still be the one in force, and nothing is recorded for a non-pending document).',
+      'Version of `terminos` in force. Required only while `terminos` is pending for the account; optional otherwise (omitted and `null` are the same; if sent it must still be the one in force, else 409, and nothing is recorded for a non-pending document).',
   })
   @IsOptional()
   @IsInt()
@@ -20,7 +20,7 @@ export class ReacceptConsentDto {
   @ApiPropertyOptional({
     example: 2,
     description:
-      'Version of `privacidad` in force. Required only while `privacidad` is pending for the account; optional otherwise (same rules as `acceptedTermsVersion`).',
+      'Version of `privacidad` in force. Required only while `privacidad` is pending for the account; optional otherwise (same rules as `acceptedTermsVersion`, `null` included).',
   })
   @IsOptional()
   @IsInt()
@@ -29,7 +29,7 @@ export class ReacceptConsentDto {
 
   @ApiPropertyOptional({
     description:
-      'Must be `true` while `ageDeclarationPending` (the customer has no AGE_DECLARATION yet); ignored otherwise. A non-boolean value ("true", 1) is 400 CONSENT_REQUIRED, not the generic validation error.',
+      'Must be `true` while `ageDeclarationPending` (the customer has no AGE_DECLARATION yet); ignored otherwise (whatever its value). A non-boolean value ("true", 1) is 400 CONSENT_REQUIRED, not the generic validation error.',
   })
   // No @IsBoolean (QA 19.4a): see RegisterCustomerDto.ageDeclared.
   @IsOptional()

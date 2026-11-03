@@ -19,7 +19,10 @@ import {
   CustomerAuthGuard,
   type RequestWithCustomer,
 } from '../common/customer-auth.guard.js';
-import { strictBody } from '../customer-auth/strict-body.pipe.js';
+import {
+  requireObjectBody,
+  strictBody,
+} from '../customer-auth/strict-body.pipe.js';
 import { ConsentService } from './consent.service.js';
 import {
   ConsentStatusResponseDto,
@@ -57,14 +60,14 @@ export class MeConsentController {
   @ApiOperation({
     summary: 'Re-accept the current Terms and Privacy Policy',
     description:
-      'Requires the version (read from the DB as the one in force) of each document PENDING for this account (see consent-status) and records a RE_ACCEPT row for exactly those; a version of a non-pending document is optional: if sent it must be the one in force (else 409) and nothing is recorded for it. Nothing is ever recorded beyond what is pending and sent (plus AGE_DECLARATION if the customer has none; `ageDeclared: true` is then required). Repeating it is a no-op. Returns the new consent status.',
+      'Requires the version (read from the DB as the one in force) of each document PENDING for this account (see consent-status) and records a RE_ACCEPT row for exactly those; a version of a non-pending document is optional (omitted and `null` are the same): if sent it must be the one in force (else 409) and nothing is recorded for it. Nothing is ever recorded beyond what is pending and sent (plus AGE_DECLARATION if the customer has none; `ageDeclared: true` is then required). Repeating it is a no-op. Returns the new consent status.',
   })
   @ApiBody({ type: ReacceptConsentDto })
   @ApiResponse({ status: 200, type: ConsentStatusResponseDto })
   @ApiResponse({
     status: 400,
     description:
-      'errorCode CONSENT_REQUIRED (details.missing[]: the pending document(s) whose version was not sent: acceptedTermsVersion / acceptedPrivacyVersion, and ageDeclared when the age declaration is pending; nothing is recorded) or invalid/unknown field.',
+      'errorCode CONSENT_REQUIRED (details.missing[]: the pending document(s) whose version was not sent: acceptedTermsVersion / acceptedPrivacyVersion, and ageDeclared when the age declaration is pending; nothing is recorded) or invalid/unknown field, or a body that is not a JSON object (an array, for instance; an empty body counts as `{}`).',
   })
   @ApiResponse({
     status: 401,
@@ -82,7 +85,8 @@ export class MeConsentController {
   })
   reaccept(
     @Req() req: RequestWithCustomer,
-    @Body(strictBody(ReacceptConsentDto)) dto: Readonly<ReacceptConsentDto>,
+    @Body(requireObjectBody, strictBody(ReacceptConsentDto))
+    dto: Readonly<ReacceptConsentDto>,
   ): Promise<ConsentStatusResponseDto> {
     return this.consent.reaccept((req.customer as { id: string }).id, {
       terms: dto.acceptedTermsVersion,

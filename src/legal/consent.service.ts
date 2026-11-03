@@ -353,9 +353,10 @@ export class ConsentService {
         // required; a version for a non-pending document is optional. If it is
         // sent it is still validated (409 when it is not the one in force) but
         // never recorded: this call never writes more than pending AND sent.
+        // `null` is the same as omitted (19.4a): the contract says optional.
         const sentVersions: Record<'terms' | 'privacy', unknown> = {
-          terms: sent.terms,
-          privacy: sent.privacy,
+          terms: sent.terms ?? undefined,
+          privacy: sent.privacy ?? undefined,
         };
         const required: Partial<Record<ConsentKey, unknown>> = {};
         for (const k of ['terms', 'privacy'] as const) {
@@ -363,11 +364,19 @@ export class ConsentService {
             required[k] = sentVersions[k];
           }
         }
-        const accepted = await this.assertAccepted(
+        const checked = await this.assertAccepted(
           tx,
           required,
           hasAge ? undefined : { declared: sent.ageDeclared },
         );
+        // Story 19.4a D2 (PRD §20): the age declaration is tied to the Terms
+        // version in force, read from THIS transaction, even when Terms were not
+        // pending / not sent (`checked` only knows the documents that were
+        // required). `keys` below still limits the TERMS row to a pending Terms.
+        const accepted: AcceptedConsents =
+          hasAge || checked.versions.terms
+            ? checked
+            : await this.withTermsInForce(tx, checked);
         const keys: ConsentKey[] = (['terms', 'privacy'] as const).filter(
           (k) => accepted.versions[k] && pending.has(CONSENT_SLUG[k]),
         );
@@ -390,6 +399,27 @@ export class ConsentService {
       }
       throw e;
     }
+  }
+
+  /** Adds the Terms version in force (DB clock, caller's transaction) when there is one. */
+  private async withTermsInForce(
+    db: ConsentDb,
+    accepted: AcceptedConsents,
+  ): Promise<AcceptedConsents> {
+    const rows = await db.$queryRaw<{ id: string; versionNumber: number }[]>`
+      SELECT v."id", v."versionNumber"
+      FROM "Legal_Documents" d
+      JOIN "Legal_Document_Versions" v ON v."documentId" = d."id"
+      WHERE d."slug" = ${this.slugs.terms} AND v."effectiveFrom" <= now()
+      ORDER BY v."versionNumber" DESC LIMIT 1`;
+    if (rows.length === 0) return accepted;
+    return {
+      ...accepted,
+      versions: {
+        ...accepted.versions,
+        terms: { versionId: rows[0].id, versionNumber: rows[0].versionNumber },
+      },
+    };
   }
 
   /** `GET /admin/legal/consents`: newest first, capped; ids and versions only. */

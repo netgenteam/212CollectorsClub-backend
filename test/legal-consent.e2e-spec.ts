@@ -1157,6 +1157,193 @@ describe(
       });
     });
 
+    describe('Story 19.4a D2: the age declaration of POST /me/consent carries the Terms version in force', () => {
+      const reset = async () => {
+        await prisma.customer.deleteMany({ where: { email: { in: emails } } });
+      };
+      beforeAll(reset);
+      afterEach(reset);
+      const reaccept = (c: { s: string }, body: unknown) =>
+        request(server())
+          .post('/api/v1/me/consent')
+          .set('Cookie', c.s)
+          .send(body as object);
+      /**
+       * An account WITHOUT an AGE_DECLARATION (legacy account): the API alone
+       * cannot produce one (register always records it), so the row is removed
+       * in ONE transaction that also disables and re-enables the append-only
+       * trigger (DDL is transactional: a crash re-enables it).
+       */
+      const withoutAge = async (c: { id: string }) => {
+        await prisma.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(
+            `ALTER TABLE "Consent_Records" DISABLE TRIGGER "Consent_Records_immutable"`,
+          );
+          await tx.$executeRawUnsafe(
+            `DELETE FROM "Consent_Records" WHERE "customerId" = $1::uuid AND "type" = 'AGE_DECLARATION'`,
+            c.id,
+          );
+          await tx.$executeRawUnsafe(
+            `ALTER TABLE "Consent_Records" ENABLE TRIGGER "Consent_Records_immutable"`,
+          );
+        });
+      };
+      const ageRows = async (id: string) =>
+        (await consentsOf({ customerId: id })).filter(
+          (r) => r.type === 'AGE_DECLARATION',
+        );
+      const termsV2Id = async () =>
+        (
+          await sql(
+            `SELECT v."id" FROM "Legal_Document_Versions" v JOIN "Legal_Documents" d ON d."id" = v."documentId"
+             WHERE d."slug" = 'e2e-terminos' AND v."versionNumber" = 2`,
+          )
+        )[0].id as string;
+
+      it('no pending documents, Terms v2 in force: {ageDeclared:true} records AGE_DECLARATION with version 2 and the v2 documentVersionId (not 0), with or without a privacy version', async () => {
+        seeded = await seedConsentDocs(sql, {
+          terms: [
+            { versionNumber: 1, effectiveFrom: '-3 days' },
+            { versionNumber: 2, effectiveFrom: '-2 days' },
+          ],
+          privacy: [{ versionNumber: 1, effectiveFrom: '-3 days' }],
+        });
+        const a = await customer('d2-a');
+        const b = await customer('d2-b');
+        await withoutAge(a);
+        await withoutAge(b);
+        const status = await request(server())
+          .get('/api/v1/me/consent-status')
+          .set('Cookie', a.s)
+          .expect(200);
+        expect(status.body).toEqual({
+          pending: [],
+          ageDeclarationPending: true,
+        });
+        const v2 = await termsV2Id();
+
+        await reaccept(a, { ageDeclared: true }).expect(200);
+        const ra = await ageRows(a.id);
+        expect(ra.map((r) => [r.version, r.context])).toEqual([
+          [2, 'RE_ACCEPT'],
+        ]);
+        expect(ra[0].documentVersionId).toBe(v2);
+        // only the age row: no TERMS / PRIVACY row for a non-pending document
+        expect(
+          (await consentsOf({ customerId: a.id })).filter(
+            (r) => r.context === 'RE_ACCEPT',
+          ),
+        ).toHaveLength(1);
+
+        await reaccept(b, {
+          acceptedPrivacyVersion: 1,
+          ageDeclared: true,
+        }).expect(200);
+        const rb = await ageRows(b.id);
+        expect(rb.map((r) => r.version)).toEqual([2]);
+        expect(rb[0].documentVersionId).toBe(v2);
+        expect(
+          (await consentsOf({ customerId: b.id })).filter(
+            (r) => r.context === 'RE_ACCEPT',
+          ),
+        ).toHaveLength(1);
+        // repeat: idempotent (age already declared)
+        await reaccept(a, { ageDeclared: true }).expect(200);
+        expect(await ageRows(a.id)).toHaveLength(1);
+      });
+
+      it('Terms pending: TERMS and AGE_DECLARATION share the version in force; and version 0 without a document only when no Terms is in force', async () => {
+        seeded = await seedConsentDocs(sql, {
+          terms: [{ versionNumber: 1, effectiveFrom: '-3 days' }],
+          privacy: [{ versionNumber: 1, effectiveFrom: '-3 days' }],
+        });
+        const c = await customer('d2-c');
+        await seeded.addVersion('terms', {
+          versionNumber: 2,
+          effectiveFrom: '-2 days',
+          isSubstantial: true,
+          changeSummary: 'terminos nuevos',
+        });
+        await withoutAge(c);
+        await reaccept(c, {
+          acceptedTermsVersion: 2,
+          ageDeclared: true,
+        }).expect(200);
+        const rows = await consentsOf({ customerId: c.id });
+        const re = rows.filter((r) => r.context === 'RE_ACCEPT');
+        expect(re.map((r) => `${r.type}:${r.version}`).sort()).toEqual([
+          'AGE_DECLARATION:2',
+          'TERMS:2',
+        ]);
+        expect(new Set(re.map((r) => r.documentVersionId)).size).toBe(1);
+
+        // Version 0 only when there is no Terms in force at all. The sandbox
+        // can only be re-seeded once no account still holds evidence on it.
+        await reset();
+        seeded = await seedConsentDocs(sql, {});
+        const d = await customer('d2-d', { ageDeclared: true });
+        await withoutAge(d);
+        await reaccept(d, { ageDeclared: true }).expect(200);
+        const zero = await ageRows(d.id);
+        expect(zero).toHaveLength(1);
+        expect(zero[0]).toMatchObject({
+          version: 0,
+          documentVersionId: null,
+          context: 'RE_ACCEPT',
+        });
+      });
+    });
+
+    describe('Story 19.4a: odd bodies of POST /me/consent', () => {
+      const reset = async () => {
+        await prisma.customer.deleteMany({ where: { email: { in: emails } } });
+      };
+      beforeAll(reset);
+      afterEach(reset);
+
+      it('[] is 400 (not a JSON object); {} and an empty body are a harmless no-op; null equals omitted (optional per document, missing when pending)', async () => {
+        seeded = await seedConsentDocs(sql, {
+          terms: [
+            { versionNumber: 1, effectiveFrom: '-3 days' },
+            { versionNumber: 2, effectiveFrom: '-2 days', isSubstantial: true },
+          ],
+          privacy: [{ versionNumber: 1, effectiveFrom: '-3 days' }],
+        });
+        const c = await customer('odd-a');
+        const post = (body?: unknown) =>
+          request(server())
+            .post('/api/v1/me/consent')
+            .set('Cookie', c.s)
+            .send(body as object);
+        const before = (await consentsOf({ customerId: c.id })).length;
+        await post([]).expect(400);
+        await post([{ ageDeclared: true }]).expect(400);
+        await post('x').expect(400);
+        // The customer registered at terms 2: nothing is pending.
+        await post({}).expect(200);
+        await post().expect(200);
+        // null is the same as omitted for a non-pending document...
+        await post({
+          acceptedTermsVersion: null,
+          acceptedPrivacyVersion: null,
+        }).expect(200);
+        expect((await consentsOf({ customerId: c.id })).length).toBe(before);
+        // ...and for a pending one it is "missing", exactly like omitting it.
+        await seeded.addVersion('privacy', {
+          versionNumber: 2,
+          effectiveFrom: '-1 minutes',
+          isSubstantial: true,
+          changeSummary: 'nueva',
+        });
+        const res = await post({ acceptedPrivacyVersion: null }).expect(400);
+        expect((res.body as Err).errorCode).toBe('CONSENT_REQUIRED');
+        expect((res.body as Err).details?.missing).toEqual([
+          'acceptedPrivacyVersion',
+        ]);
+        expect((await consentsOf({ customerId: c.id })).length).toBe(before);
+      });
+    });
+
     describe('AC10 Swagger', () => {
       it('documents the new errorCodes on register, checkout, /me/consent and the admin list', async () => {
         const doc = (await request(server()).get('/api/docs-json').expect(200))

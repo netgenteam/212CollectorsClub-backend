@@ -114,8 +114,36 @@ case "$DATABASE_URL" in
   *\?*) MIGRATE_URL_SEP='&' ;;
   *) MIGRATE_URL_SEP='?' ;;
 esac
-if ! DATABASE_URL="${DATABASE_URL}${MIGRATE_URL_SEP}options=-c%20lock_timeout%3D${MIGRATE_LOCK_TIMEOUT_MS}" pnpm prisma:deploy; then
-  fail "prisma migrate deploy failed (a lock wait over ${MIGRATE_LOCK_TIMEOUT_MS} ms counts as failure: SQLSTATE 55P03). The service was NOT restarted. If it was the lock wait, run 'pnpm prisma migrate resolve --rolled-back <migration_name>' and deploy again outside peak hours (docs/deployment.md §12.2)."
+# The output is captured (not streamed) so that (1) the failure can be told
+# apart and explained truthfully and (2) no connection string or credential is
+# ever printed: every URL-looking string is redacted before anything is shown.
+redact() {
+  sed -E 's#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]"'"'"']+#<redacted-url>#g'
+}
+MIGRATE_OUT="$(mktemp)"
+trap 'rm -f "$MIGRATE_OUT"' EXIT
+if DATABASE_URL="${DATABASE_URL}${MIGRATE_URL_SEP}options=-c%20lock_timeout%3D${MIGRATE_LOCK_TIMEOUT_MS}" pnpm prisma:deploy >"$MIGRATE_OUT" 2>&1; then
+  redact <"$MIGRATE_OUT"
+else
+  redact <"$MIGRATE_OUT" >&2
+  # Classify by what Prisma/Postgres actually reported, never assume a cause.
+  if grep -Eq '55P03|lock timeout|lock_not_available' "$MIGRATE_OUT"; then
+    why="the migration waited for a table lock longer than ${MIGRATE_LOCK_TIMEOUT_MS} ms (SQLSTATE 55P03)"
+    todo="a failed migration is now recorded: follow docs/deployment.md section 12.3 (clean up the objects the migration left half-created, THEN 'pnpm prisma migrate resolve --rolled-back <migration_name>', then deploy again outside peak hours)"
+  elif grep -q 'P3009' "$MIGRATE_OUT"; then
+    why="a previous migration is recorded as failed (P3009), so Prisma refuses to apply anything else; this run did not wait for any lock"
+    todo="run 'pnpm prisma migrate status' and follow docs/deployment.md section 12.3: clean up what the failed migration left half-created, then 'pnpm prisma migrate resolve --rolled-back <migration_name>'"
+  elif grep -Eq '42710|42P07|already exists' "$MIGRATE_OUT"; then
+    why="an object the migration creates already exists (42710/42P07), typically left half-created by an earlier failed attempt; this is NOT a lock wait"
+    todo="follow docs/deployment.md section 12.3: drop the leftover objects of that migration, check with 'pnpm prisma migrate status', then retry"
+  elif grep -q 'current transaction is aborted' "$MIGRATE_OUT"; then
+    why="a statement inside the migration's own BEGIN/COMMIT failed; Prisma does not report the original error in that mode (a lock wait is the usual cause: look for it in the Postgres log). The transaction was rolled back, so nothing is left half-applied"
+    todo="'pnpm prisma migrate resolve --rolled-back <migration_name>' (no object cleanup needed, docs/deployment.md section 12.3), then deploy again outside peak hours"
+  else
+    why="prisma migrate deploy failed for a reason other than a lock wait; see the (redacted) Prisma output above"
+    todo="fix the cause shown above; if a migration is recorded as failed, see docs/deployment.md section 12.3"
+  fi
+  fail "prisma migrate deploy failed: ${why}. The service was NOT restarted (the previous build keeps running). Next: ${todo}."
 fi
 
 log "restarting $SERVICE_NAME"

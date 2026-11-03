@@ -1,4 +1,5 @@
-import { ValidationPipe } from '@nestjs/common';
+import { BadRequestException, ValidationPipe } from '@nestjs/common';
+import type { PipeTransform } from '@nestjs/common';
 import type { Type } from '@nestjs/common';
 
 /**
@@ -15,3 +16,18 @@ export function strictBody(dto: Type<unknown>): ValidationPipe {
     forbidNonWhitelisted: true,
   });
 }
+
+/**
+ * Story 19.4a: the body must be a JSON object. An array / string / number is
+ * 400 (it would otherwise validate as "no fields" and answer 200 with no
+ * effect); an empty body is read as `{}`. Place it BEFORE `strictBody(...)`.
+ */
+export const requireObjectBody: PipeTransform<unknown, object> = {
+  transform(value: unknown): object {
+    if (value === undefined || value === null) return {};
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      throw new BadRequestException('The request body must be a JSON object.');
+    }
+    return value;
+  },
+};

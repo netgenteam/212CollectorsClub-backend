@@ -26,22 +26,34 @@ export class FakeFxProvider implements FxProvider {
   /** Global override (`succeed`/`fail`/...); null = per-source fixtures. */
   private result: FxProviderResult | null = null;
   private bySource = new Map<FxProviderSource, FxProviderResult>();
+  /** Simulated provider latency (ms) applied to every read; 0 = immediate. */
+  private delayMs = 0;
 
   private ok(rate = FAKE_FX_DEFAULT_RATE, at = FAKE_FX_DEFAULT_DATE) {
     return { ok: true, reading: { rate, providerUpdatedAt: at } } as const;
   }
 
-  fetchRate(source: FxProviderSource): Promise<FxProviderResult> {
+  async fetchRate(source: FxProviderSource): Promise<FxProviderResult> {
     this.calls.push(source);
-    return Promise.resolve(
+    if (this.delayMs > 0) {
+      await new Promise((r) => setTimeout(r, this.delayMs));
+    }
+    return (
       this.bySource.get(source) ??
-        this.result ??
-        this.ok(FAKE_FX_FIXTURES[source]),
+      this.result ??
+      this.ok(FAKE_FX_FIXTURES[source])
     );
+  }
+
+  /** Story 19.4a: every read takes `ms` (e.g. 10_500 = 5 s timeout + retry + 5 s). */
+  slow(ms: number): this {
+    this.delayMs = ms;
+    return this;
   }
 
   reset(): this {
     this.calls = [];
+    this.delayMs = 0;
     this.result = null;
     this.bySource.clear();
     return this;

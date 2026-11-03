@@ -769,7 +769,7 @@ Existing published vitrinas have no `mode`; the backend treats that as `MANUAL` 
 
 **Concurrent refreshes.** Only one refresh runs at a time (advisory lock): the others get 409 `FX_REFRESH_IN_PROGRESS` or no-op. Same for the ranking: a second `POST /admin/vitrina/recompute` gets 409 `RECOMPUTE_IN_PROGRESS`. Retry after a few seconds.
 
-**`FX_SETTINGS_BUSY`.** `PUT /admin/fx/settings` / `POST /admin/fx/accept-rejected` could not get the FX advisory lock (`fx:refresh`) or the `Fx_Rate_Settings` row lock within 25 s (`SET LOCAL lock_timeout`; the transaction rolls back, nothing is written or audited). Usually a refresh or another change is stuck: retry; if it persists look for a long transaction in `pg_stat_activity` (`wait_event_type = 'Lock'`) and `pg_locks`.
+**`FX_SETTINGS_BUSY`.** `PUT /admin/fx/settings` / `POST /admin/fx/accept-rejected` could not get the FX advisory lock (`fx:refresh`) or the `Fx_Rate_Settings` row lock within 25 s (`SET LOCAL lock_timeout`; the transaction rolls back, nothing is written or audited). Usually a refresh or another change is stuck: retry; if it persists look for a long transaction in `pg_stat_activity` (`wait_event_type = 'Lock'`) and `pg_locks`. Since Story 19.4a the WHOLE `PUT /admin/fx/settings` (lock, provider read, second lock, post-commit refresh) shares one 45 s budget (`FX_PUT_BUDGET_MS`): a PUT that had to release the lock to read the provider and then waits again answers 409 at ~45 s instead of ~60 s (Nginx cut-off); measured worst case 45.0 s (`pnpm test:perf`, `test/fx-put-budget.perf.spec.ts`).
 
 **`VITRINA_BUSY`.** `PUT /admin/vitrina/algorithm` waited 25 s for the settings lock held by a running recompute. Retry; if it persists look for a stuck transaction (`pg_stat_activity`).
 
@@ -855,5 +855,48 @@ An `ALTER TABLE` waits for an exclusive lock and, while it waits, every later qu
 - **`deploy/deploy.sh` applies it** (the only place `prisma migrate deploy` runs in CI/CD): it appends `options=-c lock_timeout=<ms>` to the `DATABASE_URL` seen by the migration command only (the service keeps its own), default `MIGRATE_LOCK_TIMEOUT_MS=10000`. If the wait expires the script stops **before restarting the service** (the previous build keeps running). It refuses to run if `DATABASE_URL` already has an `options` parameter. Tested against the clone with and without `?schema=public` in the URL; **not** run on a real VPS (see "Verification status").
 - **Manual run** (outside `deploy.sh`): use the connection string form above, not `PGOPTIONS`.
 - **New migrations:** start any DDL on a hot table (`Orders`, `Products`, `Order_Items`...) with a session-level `SET lock_timeout = '10s';` (not `SET LOCAL`).
-- **If the wait expires** the migration is recorded as failed and Prisma refuses further deploys (`P3009`). The failed statement was rolled back, so: `pnpm prisma migrate resolve --rolled-back <migration_name>`, then **retry outside peak hours** (low traffic, no long reports or batch jobs running). Never mark it `--applied` without checking that its changes exist.
+- **If the wait expires** (or any other statement fails) the migration is recorded as failed and Prisma refuses further deploys (`P3009`). **Do not just run `resolve --rolled-back` and retry**: see §12.3. Migrations are **not** atomic (verified below), so earlier statements may have been committed.
 
+### 12.3 Recovering from a failed migration (verified on a database clone)
+
+Observed on a clone, `prisma migrate deploy` does **not** wrap a `migration.sql` in a transaction: statements that precede the failing one stay committed (three probes: a lock timeout, `SELECT 1/0` and `ALTER` of a missing table, each after a `CREATE TYPE`, all left the type). When statement N fails (e.g. the `ALTER TABLE "Orders"` gives up with `55P03`), statement N is rolled back, but statements 1..N-1 **stay committed**. `migrate resolve --rolled-back` only edits the `_prisma_migrations` row; it does not undo anything. If you retry without cleaning up, the first statement fails again with `42710 type "..." already exists` (or `42P07 relation ... already exists`). So the order is: **identify, clean up, resolve, confirm, retry.**
+
+Run from the app directory with `DATABASE_URL` pointing at the affected database (`set -a; source /opt/212cc/<env>/shared/.env; set +a`; do not paste it anywhere). `psql` does not accept the `?schema=public` suffix, hence `${DATABASE_URL%%\?*}`. Procedure, with the exact case of `20261103100000_add_consent_records` failing on its `ALTER TABLE "Orders"`:
+
+1. **Confirm what failed.** `pnpm prisma migrate status` names the failed migration (`The failed migration(s) ...`). Keep its name in `MIG=`.
+2. **Find what it left behind.** Open `prisma/migrations/$MIG/migration.sql`: every object created by a statement **before** the one that failed exists now; the failed statement and the ones after it do not. The failed statement is the first one that takes a lock on a busy table (`ALTER TABLE`, `CREATE INDEX`, `ADD CONSTRAINT`) or the one Prisma's error names. For this migration the statements before the `ALTER TABLE "Orders"` are the two `CREATE TYPE`, so the leftovers are exactly the types `"ConsentType"` and `"ConsentContext"`; the table `"Consent_Records"`, its indexes, constraints, functions, triggers and the four `"Orders"` columns do **not** exist. Verify instead of assuming:
+
+   ```bash
+   psql "${DATABASE_URL%%\?*}" -c "SELECT typname FROM pg_type WHERE typname IN ('ConsentType','ConsentContext')"
+   psql "${DATABASE_URL%%\?*}" -c "SELECT to_regclass('\"Consent_Records\"') AS consent_records"
+   psql "${DATABASE_URL%%\?*}" -c "\d \"Orders\"" | grep -E 'termsVersion|termsAcceptedAt|shippingVersion|returnsVersion'
+   ```
+
+   Expected: two rows (the types), `consent_records` empty, no `Orders` columns. If more exists than the statements before the failure explain, stop and ask: do not drop anything you cannot trace to this file.
+3. **Drop only those leftovers** (they hold no data: nothing references them yet; no `CASCADE`):
+
+   ```bash
+   psql "${DATABASE_URL%%\?*}" -c 'DROP TYPE "ConsentContext"; DROP TYPE "ConsentType";'
+   ```
+4. **Mark it rolled back:** `pnpm prisma migrate resolve --rolled-back "$MIG"`.
+5. **Confirm with `pnpm prisma migrate status`:** it must say `Following migration have not yet been applied: <MIG>` and must **not** list a failed migration. If it still reports the failure, step 4 did not take.
+6. **Retry outside peak hours** (low traffic, no long reports or batch jobs): re-run the deploy (`deploy/deploy.sh <env> <ref>`) or `pnpm prisma migrate deploy` with the `options=-c%20lock_timeout%3D10000` URL of §12.2. Afterwards `pnpm prisma migrate status` must end with `Database schema is up to date!`. If the retry fails again (e.g. the long transaction is still there), the migration is again recorded as failed with the same leftovers: repeat from step 2.
+
+Never mark a migration `--applied` unless you have checked that **every** object of the file exists. A `P3009` raised by a deploy that waited for no lock (the previous failure is still recorded) needs the same procedure; `deploy.sh` says which of the three cases happened (lock wait `55P03`, `P3009`, `42710`/`42P07`) and never prints the connection string.
+
+**Safety net for future migrations (verified on the clone with throw-away migrations; none of this edits an applied migration).** Prisma accepts an explicit `BEGIN;` ... `COMMIT;` written in the file, and then the statements between them are atomic.
+
+| `migration.sql` shape (lock held on `"Orders"` by another session, `lock_timeout` 10 s) | After the failure |
+|---|---|
+| `CREATE TYPE ...;` then `ALTER TABLE "Orders" ...;` (what 19.4 did) | `55P03` after 10 s; **the type stays** (needs §12.3 cleanup) |
+| `ALTER TABLE "Orders" ...;` **first**, nothing before it | `55P03`; nothing left (the failed statement is the first one) |
+| `BEGIN; LOCK TABLE "Orders" IN ACCESS EXCLUSIVE MODE; CREATE TYPE ...; ALTER TABLE "Orders" ...; COMMIT;` | fails after 10 s; **nothing left**; just `resolve --rolled-back` and retry. Without a holder it applies normally |
+| `BEGIN; CREATE TYPE ...; SELECT 1/0; COMMIT;` | nothing left |
+| `CREATE TYPE ...;` **then** `BEGIN; ...; COMMIT;` | results were inconsistent between probes (a failing `SELECT 1/0` left the type, a lock timeout did not): do not rely on it, put `BEGIN;` on the **first line** |
+
+Rules for new migrations that `ALTER` a large or hot table:
+
+1. Wrap the whole file in `BEGIN;` ... `COMMIT;` and take the lock **first**: `LOCK TABLE "<hot table>" IN ACCESS EXCLUSIVE MODE;` (the lock wait is then the first thing that can fail, bounded by the `lock_timeout` of §12.2, and a failure rolls back everything).
+2. If a transaction is not possible (e.g. `CREATE INDEX CONCURRENTLY`, `ALTER TYPE ... ADD VALUE`), make the risky `ALTER` the **first** statement of the file, so a failure leaves nothing behind, and keep the file to one such statement per migration.
+3. Caveat: when a statement fails inside the file's own transaction, Prisma reports `current transaction is aborted, commands ignored until end of transaction block` instead of `55P03`; the original error is only in the Postgres log. `deploy.sh` recognises that message and says so.
+4. Review check for every new migration: "if statement N fails, what do statements 1..N-1 leave behind?"
