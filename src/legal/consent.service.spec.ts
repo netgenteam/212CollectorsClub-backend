@@ -1,5 +1,10 @@
 import { ApiException } from '../common/api-exception.js';
-import { ConsentService, consentSlugs } from './consent.service.js';
+import { Logger } from '@nestjs/common';
+import {
+  ConsentService,
+  consentSlugPrefixIgnored,
+  consentSlugs,
+} from './consent.service.js';
 
 const NOW = new Date('2026-11-03T12:00:00.000Z');
 type Row = {
@@ -287,25 +292,96 @@ describe('ConsentService.recordConsents', () => {
 });
 
 describe('consentSlugs', () => {
-  it('real slugs by default; the e2e- prefix only outside production and only exactly "e2e-"', () => {
-    expect(consentSlugs({})).toEqual({
-      terms: 'terminos',
-      privacy: 'privacidad',
-      shipping: 'envios',
-      returns: 'devoluciones',
-    });
-    expect(consentSlugs({ LEGAL_CONSENT_SLUG_PREFIX: 'e2e-' }).terms).toBe(
-      'e2e-terminos',
-    );
+  const real = {
+    terms: 'terminos',
+    privacy: 'privacidad',
+    shipping: 'envios',
+    returns: 'devoluciones',
+  };
+  const sandbox = {
+    terms: 'e2e-terminos',
+    privacy: 'e2e-privacidad',
+    shipping: 'e2e-envios',
+    returns: 'e2e-devoluciones',
+  };
+
+  it('real slugs without the variable', () => {
+    expect(consentSlugs({})).toEqual(real);
+    expect(consentSlugs({ NODE_ENV: 'test' })).toEqual(real);
+  });
+
+  it('the e2e- prefix applies ONLY with NODE_ENV=test (positive list)', () => {
     expect(
-      consentSlugs({
-        NODE_ENV: 'production',
+      consentSlugs({ NODE_ENV: 'test', LEGAL_CONSENT_SLUG_PREFIX: 'e2e-' }),
+    ).toEqual(sandbox);
+  });
+
+  it.each(['production', 'staging', 'development', '', 'Test', 'e2e'])(
+    'is ignored with NODE_ENV=%j',
+    (nodeEnv) => {
+      expect(
+        consentSlugs({
+          NODE_ENV: nodeEnv,
+          LEGAL_CONSENT_SLUG_PREFIX: 'e2e-',
+        }),
+      ).toEqual(real);
+    },
+  );
+
+  it('is ignored with NODE_ENV unset', () => {
+    expect(consentSlugs({ LEGAL_CONSENT_SLUG_PREFIX: 'e2e-' })).toEqual(real);
+  });
+
+  it('any prefix other than exactly "e2e-" is ignored, even in test', () => {
+    for (const p of ['x-', 'e2e', 'E2E-', ' e2e-', ''])
+      expect(
+        consentSlugs({ NODE_ENV: 'test', LEGAL_CONSENT_SLUG_PREFIX: p }),
+      ).toEqual(real);
+  });
+});
+
+describe('consentSlugPrefixIgnored (startup WARN trigger)', () => {
+  it('true only when the variable is present and not applied', () => {
+    expect(consentSlugPrefixIgnored({})).toBe(false);
+    expect(consentSlugPrefixIgnored({ NODE_ENV: 'staging' })).toBe(false);
+    expect(
+      consentSlugPrefixIgnored({
+        NODE_ENV: 'test',
         LEGAL_CONSENT_SLUG_PREFIX: 'e2e-',
-      }).terms,
-    ).toBe('terminos');
-    expect(consentSlugs({ LEGAL_CONSENT_SLUG_PREFIX: 'x-' }).terms).toBe(
-      'terminos',
-    );
+      }),
+    ).toBe(false);
+    for (const nodeEnv of ['production', 'staging', 'development', undefined])
+      expect(
+        consentSlugPrefixIgnored({
+          NODE_ENV: nodeEnv,
+          LEGAL_CONSENT_SLUG_PREFIX: 'e2e-',
+        }),
+      ).toBe(true);
+  });
+
+  it('the service warns at construction and does not apply the prefix', () => {
+    const prev = { ...process.env };
+    process.env.NODE_ENV = 'staging';
+    process.env.LEGAL_CONSENT_SLUG_PREFIX = 'e2e-';
+    const warn = vi
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    try {
+      const svc = new ConsentService({} as never, {} as never);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('LEGAL_CONSENT_SLUG_PREFIX'),
+      );
+      expect((svc as unknown as { slugs: { terms: string } }).slugs.terms).toBe(
+        'terminos',
+      );
+    } finally {
+      warn.mockRestore();
+      process.env.NODE_ENV = prev.NODE_ENV;
+      if (prev.LEGAL_CONSENT_SLUG_PREFIX === undefined)
+        delete process.env.LEGAL_CONSENT_SLUG_PREFIX;
+      else
+        process.env.LEGAL_CONSENT_SLUG_PREFIX = prev.LEGAL_CONSENT_SLUG_PREFIX;
+    }
   });
 });
 

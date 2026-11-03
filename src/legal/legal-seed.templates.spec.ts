@@ -186,7 +186,11 @@ describe('legal seed templates (Story 19.3)', () => {
     ['terminos', /Cada pedido se rige por la versión que aceptaste/, A],
     ['privacidad', /\*\*Aceptaciones:\*\*/, A],
     ['privacidad', /Probar tu aceptación de los términos/, A],
-    ['terminos', /Al registrarte o comprar declaras ser mayor/, E],
+    [
+      'terminos',
+      /Al registrarte, o al volver a aceptar los documentos cuando te lo pidamos, declaras ser mayor/,
+      E,
+    ],
     ['privacidad', /tu declaración de mayoría de edad/, E],
     [
       'privacidad',
@@ -236,6 +240,14 @@ describe('legal seed templates (Story 19.3)', () => {
     expect(templates.devoluciones).not.toMatch(/48 a 72/);
     expect(templates.privacidad).not.toMatch(/mientras mantengas la cuenta/);
     expect(templates.privacidad).toMatch(/90 días de creada la sesión/);
+  });
+
+  it('Story 19.4a: the age declaration is made at registration / re-acceptance (FR-116), not "al comprar"', () => {
+    for (const [slug, text] of Object.entries(templates)) {
+      expect(text, slug).not.toMatch(/registrarte o comprar/);
+      expect(text, slug).not.toMatch(/al comprar[^.]*mayor de 18/i);
+    }
+    expect(templates.terminos).toMatch(/Al registrarte, o al volver a aceptar/);
   });
 
   it('envios: does not promise a status e-mail (none is sent today)', () => {

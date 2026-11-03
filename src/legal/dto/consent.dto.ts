@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsInt, IsOptional, Min } from 'class-validator';
+import { IsInt, IsOptional, Min } from 'class-validator';
 
 /**
  * Story 19.4: version fields are optional AT THE DTO LEVEL on purpose: a
@@ -9,7 +9,8 @@ import { IsBoolean, IsInt, IsOptional, Min } from 'class-validator';
 export class ReacceptConsentDto {
   @ApiPropertyOptional({
     example: 3,
-    description: 'Version of `terminos` in force that the person accepts.',
+    description:
+      'Version of `terminos` in force. Required only while `terminos` is pending for the account; optional otherwise (if sent it must still be the one in force, and nothing is recorded for a non-pending document).',
   })
   @IsOptional()
   @IsInt()
@@ -18,7 +19,8 @@ export class ReacceptConsentDto {
 
   @ApiPropertyOptional({
     example: 2,
-    description: 'Version of `privacidad` in force that the person accepts.',
+    description:
+      'Version of `privacidad` in force. Required only while `privacidad` is pending for the account; optional otherwise (same rules as `acceptedTermsVersion`).',
   })
   @IsOptional()
   @IsInt()
@@ -27,10 +29,10 @@ export class ReacceptConsentDto {
 
   @ApiPropertyOptional({
     description:
-      'Must be `true` while `ageDeclarationPending` (the customer has no AGE_DECLARATION yet); ignored otherwise.',
+      'Must be `true` while `ageDeclarationPending` (the customer has no AGE_DECLARATION yet); ignored otherwise. A non-boolean value ("true", 1) is 400 CONSENT_REQUIRED, not the generic validation error.',
   })
+  // No @IsBoolean (QA 19.4a): see RegisterCustomerDto.ageDeclared.
   @IsOptional()
-  @IsBoolean()
   ageDeclared?: boolean;
 }
 

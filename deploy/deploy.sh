@@ -96,7 +96,27 @@ set -a
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 set +a
-pnpm prisma:deploy
+[ -n "${DATABASE_URL:-}" ] || fail "DATABASE_URL is missing in $ENV_FILE"
+
+# Bound the time the migration may WAIT for a table lock (default 10 s) so a
+# DDL never queues behind a long transaction and, in turn, blocks every query
+# on that table (docs/deployment.md §12.2). `SET LOCAL lock_timeout` inside a
+# migration file and `PGOPTIONS` are NOT honoured by `prisma migrate deploy`
+# (verified on a database clone, Story 19.4a); the `options` connection
+# parameter is. It is added to the CLI's DATABASE_URL only: the service keeps
+# its own, unmodified one.
+MIGRATE_LOCK_TIMEOUT_MS="${MIGRATE_LOCK_TIMEOUT_MS:-10000}"
+case "$MIGRATE_LOCK_TIMEOUT_MS" in
+  ''|*[!0-9]*) fail "MIGRATE_LOCK_TIMEOUT_MS must be a number of milliseconds (got '$MIGRATE_LOCK_TIMEOUT_MS')" ;;
+esac
+case "$DATABASE_URL" in
+  *options=*) fail "DATABASE_URL already carries an 'options' parameter; set lock_timeout there or remove it (docs/deployment.md §12.2)" ;;
+  *\?*) MIGRATE_URL_SEP='&' ;;
+  *) MIGRATE_URL_SEP='?' ;;
+esac
+if ! DATABASE_URL="${DATABASE_URL}${MIGRATE_URL_SEP}options=-c%20lock_timeout%3D${MIGRATE_LOCK_TIMEOUT_MS}" pnpm prisma:deploy; then
+  fail "prisma migrate deploy failed (a lock wait over ${MIGRATE_LOCK_TIMEOUT_MS} ms counts as failure: SQLSTATE 55P03). The service was NOT restarted. If it was the lock wait, run 'pnpm prisma migrate resolve --rolled-back <migration_name>' and deploy again outside peak hours (docs/deployment.md §12.2)."
+fi
 
 log "restarting $SERVICE_NAME"
 sudo /usr/bin/systemctl restart "$SERVICE_NAME"

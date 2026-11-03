@@ -57,16 +57,19 @@ const TYPE_OF: Record<ConsentKey, ConsentType> = {
 };
 
 /**
- * Physical slugs. Outside production `LEGAL_CONSENT_SLUG_PREFIX=e2e-` points
- * every lookup at the SANDBOX documents (`e2e-terminos`, ...) so tests never
- * need to publish (an immutable action) on a real document. Anything else is
- * ignored, and nothing is read in production.
+ * Physical slugs. `LEGAL_CONSENT_SLUG_PREFIX=e2e-` points every lookup at the
+ * SANDBOX documents (`e2e-terminos`, ...) so tests never need to publish (an
+ * immutable action) on a real document. Positive list (QA 19.4a): it is
+ * honoured ONLY with `NODE_ENV=test`; in any other environment (production,
+ * staging, development, or NODE_ENV unset) it is ignored, because honouring it
+ * there would shadow the real documents and let a registration through with no
+ * terms. Any prefix other than exactly `e2e-` is ignored too.
  */
 export function consentSlugs(
   env: NodeJS.ProcessEnv = process.env,
 ): Record<ConsentKey, string> {
   const prefix =
-    env.NODE_ENV !== 'production' && env.LEGAL_CONSENT_SLUG_PREFIX === 'e2e-'
+    env.NODE_ENV === 'test' && env.LEGAL_CONSENT_SLUG_PREFIX === 'e2e-'
       ? 'e2e-'
       : '';
   return {
@@ -75,6 +78,16 @@ export function consentSlugs(
     shipping: prefix + CONSENT_SLUG.shipping,
     returns: prefix + CONSENT_SLUG.returns,
   };
+}
+
+/** True when LEGAL_CONSENT_SLUG_PREFIX is set but `consentSlugs` will not apply it. */
+export function consentSlugPrefixIgnored(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return (
+    !!env.LEGAL_CONSENT_SLUG_PREFIX &&
+    consentSlugs(env).terms === CONSENT_SLUG.terms
+  );
 }
 
 export interface AcceptedVersion {
@@ -105,7 +118,13 @@ export class ConsentService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-  ) {}
+  ) {
+    if (consentSlugPrefixIgnored()) {
+      this.logger.warn(
+        'LEGAL_CONSENT_SLUG_PREFIX is set but ignored: it only applies with NODE_ENV=test. Remove it from this environment.',
+      );
+    }
+  }
 
   private get requirePublished(): boolean {
     return this.config.get<string>('LEGAL_REQUIRE_PUBLISHED') === 'true';
@@ -316,8 +335,8 @@ export class ConsentService {
   /**
    * `POST /me/consent`. One transaction, serialized per customer by an
    * advisory lock (a double click cannot write twice) with a bounded wait.
-   * Validates with `assertAccepted`, then records RE_ACCEPT only for what is
-   * not yet accepted at that version, so a repeat is a harmless no-op.
+   * Requires (`assertAccepted`) only the documents PENDING for the account;
+   * records RE_ACCEPT only for those, so a repeat is a harmless no-op.
    */
   async reaccept(
     customerId: string,
@@ -328,15 +347,29 @@ export class ConsentService {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'consent:' + customerId}, 0))`;
         const hasAge = await this.hasAge(tx, customerId);
+        const before = await this.statusIn(tx, customerId);
+        const pending = new Set(before.pending.map((p) => p.slug));
+        // QA 19.7 (story 19.4a #7): only what is PENDING for this account is
+        // required; a version for a non-pending document is optional. If it is
+        // sent it is still validated (409 when it is not the one in force) but
+        // never recorded: this call never writes more than pending AND sent.
+        const sentVersions: Record<'terms' | 'privacy', unknown> = {
+          terms: sent.terms,
+          privacy: sent.privacy,
+        };
+        const required: Partial<Record<ConsentKey, unknown>> = {};
+        for (const k of ['terms', 'privacy'] as const) {
+          if (pending.has(CONSENT_SLUG[k]) || sentVersions[k] !== undefined) {
+            required[k] = sentVersions[k];
+          }
+        }
         const accepted = await this.assertAccepted(
           tx,
-          { terms: sent.terms, privacy: sent.privacy },
+          required,
           hasAge ? undefined : { declared: sent.ageDeclared },
         );
-        const before = await this.statusIn(tx, customerId);
-        const stillPending = new Set(before.pending.map((p) => p.slug));
         const keys: ConsentKey[] = (['terms', 'privacy'] as const).filter(
-          (k) => accepted.versions[k] && stillPending.has(CONSENT_SLUG[k]),
+          (k) => accepted.versions[k] && pending.has(CONSENT_SLUG[k]),
         );
         await this.recordConsents(tx, {
           context: ConsentContext.RE_ACCEPT,

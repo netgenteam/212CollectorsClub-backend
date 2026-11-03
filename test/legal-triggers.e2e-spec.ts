@@ -132,6 +132,7 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
 
   it('real document: UPDATE, DELETE and TRUNCATE of versions/audit rows fail with integrity_constraint_violation (rolled back)', async () => {
     const results: Record<string, string> = {};
+    const messages: Record<string, string> = {};
     await prisma
       .$transaction(
         async (tx) => {
@@ -221,6 +222,7 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
               results[name] = 'SUCCEEDED';
             } catch (e) {
               results[name] = sqlstate(e);
+              messages[name] = (e as Error).message ?? '';
             }
             await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT attempt');
           }
@@ -252,6 +254,14 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
       const expected = name === 'version TRUNCATE' ? '0A000' : '23000';
       expect([name, code]).toEqual([name, expected]);
     }
+    // Story 19.4a: with the FK from Consent_Records the plain TRUNCATE of the
+    // versions is stopped by Postgres (0A000) before any trigger, so the
+    // CASCADE form is what keeps the versions' own BEFORE TRUNCATE trigger
+    // exercised: prove it is THAT trigger (and not the Consent_Records one)
+    // that rejects it.
+    expect(messages['version TRUNCATE CASCADE']).toContain(
+      'Legal_Document_Versions is immutable: TRUNCATE rejected',
+    );
     expect(Object.keys(results)).toHaveLength(17);
     // Nothing leaked out of the rolled-back transaction.
     expect(await realLegalFingerprint(sql)).toBe(fingerprint);

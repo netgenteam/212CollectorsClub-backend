@@ -330,6 +330,19 @@ describe(
           ageDeclared: false,
         }).expect(400);
         expect((noAge.body as Err).details?.missing).toEqual(['ageDeclared']);
+        // QA 19.4a: non-boolean forms of "true" are CONSENT_REQUIRED too, not the
+        // generic validation 400 (the contract of 19.7).
+        for (const bad of ['true', 1, 'yes', 0]) {
+          const r = await register(email, {
+            acceptedTermsVersion: 3,
+            acceptedPrivacyVersion: 1,
+            ageDeclared: bad,
+          }).expect(400);
+          expect((r.body as Err).errorCode, JSON.stringify(bad)).toBe(
+            'CONSENT_REQUIRED',
+          );
+          expect((r.body as Err).details?.missing).toEqual(['ageDeclared']);
+        }
         for (const terms of [2, 99]) {
           const stale = await register(email, {
             acceptedTermsVersion: terms,
@@ -691,8 +704,8 @@ describe(
         });
         const none = await reaccept(a, {}).expect(400);
         expect((none.body as Err).errorCode).toBe('CONSENT_REQUIRED');
+        // Story 19.4a #7: only what is pending (here privacy) is required.
         expect((none.body as Err).details?.missing).toEqual([
-          'acceptedTermsVersion',
           'acceptedPrivacyVersion',
         ]);
         const stale = await reaccept(a, {
@@ -1025,6 +1038,122 @@ describe(
         expect((rg.body as Err).errorCode).toBe('LEGAL_NOT_PUBLISHED');
         expect((rg.body as Err).details?.documents).toEqual(['privacidad']);
         expect(await counts()).toEqual(before);
+      });
+    });
+
+    describe('Story 19.4a #7: POST /me/consent only requires what is pending', () => {
+      const reset = async () => {
+        await prisma.customer.deleteMany({ where: { email: { in: emails } } });
+      };
+      beforeAll(reset);
+      afterEach(reset);
+      const status = (c: { s: string }) =>
+        request(server()).get('/api/v1/me/consent-status').set('Cookie', c.s);
+      const reaccept = (c: { s: string }, body: Record<string, unknown>) =>
+        request(server())
+          .post('/api/v1/me/consent')
+          .set('Cookie', c.s)
+          .send(body);
+      const reAccepts = async (id: string) =>
+        (await consentsOf({ customerId: id }))
+          .filter((r) => r.context === 'RE_ACCEPT')
+          .map((r) => `${r.type}:${r.version}`)
+          .sort();
+      const insertAccepted = (
+        customerId: string,
+        type: 'TERMS' | 'PRIVACY',
+        slug: string,
+        version: number,
+      ) =>
+        sql(
+          `INSERT INTO "Consent_Records" ("id","customerId","type","documentVersionId","version","context")
+           SELECT gen_random_uuid(), $1::uuid, $2::"ConsentType", v."id", v."versionNumber", 'RE_ACCEPT'::"ConsentContext"
+           FROM "Legal_Document_Versions" v JOIN "Legal_Documents" d ON d."id" = v."documentId"
+           WHERE d."slug" = $3 AND v."versionNumber" = $4`,
+          [customerId, type, slug, version],
+        );
+
+      it('two real sessions (yy: only terms pending; xx: only privacy pending): the modal of yy, sent with the cookie of xx, is 400 and records nothing; extras are never recorded; stale is 409; atomic and idempotent', async () => {
+        seeded = await seedConsentDocs(sql, {
+          terms: [{ versionNumber: 1, effectiveFrom: '-3 days' }],
+          privacy: [{ versionNumber: 1, effectiveFrom: '-3 days' }],
+        });
+        const yy = await customer('p7-yy');
+        const xx = await customer('p7-xx');
+        await seeded.addVersion('terms', {
+          versionNumber: 2,
+          effectiveFrom: '-2 days',
+          isSubstantial: true,
+          changeSummary: 'terminos nuevos',
+        });
+        await seeded.addVersion('privacy', {
+          versionNumber: 2,
+          effectiveFrom: '-2 days',
+          isSubstantial: true,
+          changeSummary: 'privacidad nueva',
+        });
+        // Histories that the API alone cannot produce (it requires every
+        // pending document at once): xx already accepted terms 2, yy privacy 2.
+        await insertAccepted(xx.id, 'TERMS', 'e2e-terminos', 2);
+        await insertAccepted(yy.id, 'PRIVACY', 'e2e-privacidad', 2);
+        const pendingOf = async (c: { s: string }) =>
+          (
+            (await status(c).expect(200)).body as {
+              pending: { slug: string }[];
+            }
+          ).pending.map((p) => p.slug);
+        expect(await pendingOf(yy)).toEqual(['terminos']);
+        expect(await pendingOf(xx)).toEqual(['privacidad']);
+        const xxBefore = await reAccepts(xx.id);
+        const yyBefore = await reAccepts(yy.id);
+
+        // The vector: the modal lists what yy has pending (terms 2) but the
+        // cookie is now xx's. privacy is pending for xx and was not sent.
+        const vec = await reaccept(xx, { acceptedTermsVersion: 2 }).expect(400);
+        expect((vec.body as Err).errorCode).toBe('CONSENT_REQUIRED');
+        expect((vec.body as Err).details?.missing).toEqual([
+          'acceptedPrivacyVersion',
+        ]);
+        expect(await reAccepts(xx.id)).toEqual(xxBefore);
+        expect(await pendingOf(xx)).toEqual(['privacidad']);
+
+        // Atomic: a stale pending version records nothing, even with a good one.
+        const stale = await reaccept(yy, {
+          acceptedTermsVersion: 2,
+          acceptedPrivacyVersion: 99,
+        }).expect(409);
+        expect((stale.body as Err).errorCode).toBe('CONSENT_VERSION_STALE');
+        const staleOwn = await reaccept(yy, { acceptedTermsVersion: 1 }).expect(
+          409,
+        );
+        expect((staleOwn.body as Err).errorCode).toBe('CONSENT_VERSION_STALE');
+        expect(await reAccepts(yy.id)).toEqual(yyBefore);
+
+        // yy: privacy is not pending, so it is optional. Sent and current: it is
+        // ignored (never recorded). Only pending AND sent is written.
+        const ok = await reaccept(yy, {
+          acceptedTermsVersion: 2,
+          acceptedPrivacyVersion: 2,
+        }).expect(200);
+        expect(ok.body).toEqual({ pending: [], ageDeclarationPending: false });
+        expect(await reAccepts(yy.id)).toEqual([...yyBefore, 'TERMS:2'].sort());
+        // repeat (with and without the extra): idempotent
+        await reaccept(yy, { acceptedTermsVersion: 2 }).expect(200);
+        await reaccept(yy, {
+          acceptedTermsVersion: 2,
+          acceptedPrivacyVersion: 2,
+        }).expect(200);
+        await reaccept(yy, {}).expect(200);
+        expect(await reAccepts(yy.id)).toEqual([...yyBefore, 'TERMS:2'].sort());
+
+        // xx: sending only what is pending works and records only that.
+        await reaccept(xx, { acceptedPrivacyVersion: 2 }).expect(200);
+        expect(await reAccepts(xx.id)).toEqual(
+          [...xxBefore, 'PRIVACY:2'].sort(),
+        );
+        expect(await pendingOf(xx)).toEqual([]);
+        // yy is untouched by xx's acceptance
+        expect(await reAccepts(yy.id)).toEqual([...yyBefore, 'TERMS:2'].sort());
       });
     });
 

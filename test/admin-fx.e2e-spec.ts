@@ -388,6 +388,64 @@ describe('Admin FX API (e2e, Story 18.2)', () => {
       expect(row.vesPerUsd.toFixed(4)).toBe('950.1000');
     });
 
+    it('QA 19.4: a PUT that queued behind another and finds the source changed under the lock still applies (no 200 without effect, audit per PUT)', async () => {
+      // source=BCV_USD, no snapshots (reset). Both PUTs read BCV_USD BEFORE the
+      // lock; the first one (MANUAL) wins it, so the second one (BCV_USD) must
+      // decide with the state read under the lock: MANUAL -> BCV_USD needs a reading.
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      let acquired!: () => void;
+      const gotLock = new Promise<void>((r) => (acquired = r));
+      const holder = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('fx:refresh', 0))`;
+        acquired();
+        await held;
+      });
+      const waiting = async (n: number) => {
+        for (let i = 0; i < 200; i++) {
+          const [{ c }] = await prisma.$queryRaw<{ c: number }[]>`
+            SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
+          if (c >= n) return;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        throw new Error(`fewer than ${n} PUTs waiting for the lock`);
+      };
+      await gotLock;
+      let first: Promise<request.Response>, second: Promise<request.Response>;
+      try {
+        first = put({ source: 'MANUAL', manualVesPerUsd: 500 }).then((r) => r);
+        await waiting(1);
+        second = put({ source: 'BCV_USD' }).then((r) => r);
+        await waiting(2);
+      } finally {
+        release();
+        await holder;
+      }
+      const [r1, r2] = await Promise.all([first, second]);
+      expect(r1.status).toBe(200);
+      expect(r2.status).toBe(200);
+      const b2 = r2.body as {
+        source: string;
+        sourceChanged: boolean;
+        refresh: string;
+      };
+      expect(b2.source).toBe('BCV_USD');
+      expect(b2.sourceChanged).toBe(true);
+      expect(b2.refresh).toBe('UPDATED');
+      expect((await setting()).source).toBe('BCV_USD');
+      expect((await setting()).vesPerUsd.toFixed(4)).toBe(
+        FAKE_FX_FIXTURES.BCV_USD.toFixed(4),
+      );
+      expect(await snaps()).toBe(1);
+      const rows = await prisma.fxSettingAudit.findMany({
+        orderBy: { createdAt: 'asc' },
+      });
+      expect(rows.map((r) => [r.fromSource, r.toSource])).toEqual([
+        ['BCV_USD', 'MANUAL'],
+        ['MANUAL', 'BCV_USD'],
+      ]);
+    });
+
     it('5 simultaneous PUTs => 5 coherent audit rows, chained, no 5xx (AC3)', async () => {
       const targets = [
         { source: 'BCV_EUR' },

@@ -833,7 +833,27 @@ Additive contract note: `PUT /admin/fx/settings` now also returns `hardStale` (b
 
 ### 12.1 Consent records and `LEGAL_REQUIRE_PUBLISHED` (Story 19.4)
 
-- **Migration** `20261103100000_add_consent_records` (additive: `Consent_Records`, two enums, four NULLable `Orders` columns; `SET LOCAL lock_timeout = '10s'` so it never queues behind a long transaction on `Orders`). Historical orders keep NULL. The table is append-only (triggers: UPDATE/DELETE/TRUNCATE rejected; the only accepted change is the FK `SetNull` cascade, and only orphaned rows can be deleted).
+- **Migration** `20261103100000_add_consent_records` (additive: `Consent_Records`, two enums, four NULLable `Orders` columns; it contains `SET LOCAL lock_timeout = '10s'`, which has NO effect under `prisma migrate deploy`; see §12.2). Historical orders keep NULL. The table is append-only (triggers: UPDATE/DELETE/TRUNCATE rejected; the only accepted change is the FK `SetNull` cascade, and only orphaned rows can be deleted).
 - **Launch checklist (R1).** Publish `terminos`, `privacidad`, `envios` and `devoluciones` **and then** set `LEGAL_REQUIRE_PUBLISHED=true` (exact string `true`; read per request, but as a process env var changing it in production means restarting the service). With the flag off (default) a required document that has no version in force is **not required and nothing is recorded for it**: the backend logs a WARN (at most one per minute per document) and the `Orders.termsVersion`/`shippingVersion`/`returnsVersion` columns stay NULL. With it on, register / checkout / `POST /me/consent` answer 503 `LEGAL_NOT_PUBLISHED` instead of proceeding without terms. The age declaration is required in both modes (anything but `ageDeclared: true` is 400).
 - **Frontend order of deployment.** Registration and, once the four documents are published, checkout reject requests that do not carry `acceptedTermsVersion` / `acceptedPrivacyVersion` / `ageDeclared` and `acceptedTermsVersion` / `acceptedShippingVersion` / `acceptedReturnsVersion` (Story 19.7). Deploy the 19.7 frontend before publishing the documents / enabling the flag, or registration is closed in the meantime (it already is for the missing `ageDeclared`).
 - **Rollback.** The columns/table are inert for the previous build; leave the migration applied. `Consent_Records` cannot be truncated by design.
+
+### 12.2 Bounding the lock wait of migrations (Story 19.4a)
+
+An `ALTER TABLE` waits for an exclusive lock and, while it waits, every later query on that table queues behind it (on `Orders`: checkout and order lookups stall). QA 19.4 measured the consent migration waiting 28.5 s with a `SELECT` on `Orders` blocked for 25 s although the file starts with `SET LOCAL lock_timeout = '10s'`.
+
+- **Which migrations rely on that line:** exactly one, `20261103100000_add_consent_records` (`grep -rn lock_timeout prisma/migrations`). It is already applied in dev and its checksum must not change, so it is left as is: on a database where it is still pending, it does **not** bound the wait.
+- **Verified on a database clone** (an `Orders` read lock held for 25-40 s, a probe `ALTER TABLE "Orders" ADD COLUMN`):
+
+  | Mechanism | Result |
+  |---|---|
+  | `SET LOCAL lock_timeout = '10s'` as the first line of `migration.sql` | **no effect**: waited until the lock was released (38 s) |
+  | `PGOPTIONS='-c lock_timeout=10s' pnpm prisma migrate deploy` | **no effect**: waited until the lock was released (23 s and 38 s). The Prisma schema engine does not read `PGOPTIONS` |
+  | `options` parameter in the connection string: `DATABASE_URL='postgresql://...?schema=public&options=-c%20lock_timeout%3D10000'` | **works**: fails after ~10 s with SQLSTATE `55P03` |
+  | session-level `SET lock_timeout = '10s';` (without `LOCAL`) as the first line of a new migration | **works**: fails after ~10 s with `55P03` |
+
+- **`deploy/deploy.sh` applies it** (the only place `prisma migrate deploy` runs in CI/CD): it appends `options=-c lock_timeout=<ms>` to the `DATABASE_URL` seen by the migration command only (the service keeps its own), default `MIGRATE_LOCK_TIMEOUT_MS=10000`. If the wait expires the script stops **before restarting the service** (the previous build keeps running). It refuses to run if `DATABASE_URL` already has an `options` parameter. Tested against the clone with and without `?schema=public` in the URL; **not** run on a real VPS (see "Verification status").
+- **Manual run** (outside `deploy.sh`): use the connection string form above, not `PGOPTIONS`.
+- **New migrations:** start any DDL on a hot table (`Orders`, `Products`, `Order_Items`...) with a session-level `SET lock_timeout = '10s';` (not `SET LOCAL`).
+- **If the wait expires** the migration is recorded as failed and Prisma refuses further deploys (`P3009`). The failed statement was rolled back, so: `pnpm prisma migrate resolve --rolled-back <migration_name>`, then **retry outside peak hours** (low traffic, no long reports or batch jobs running). Never mark it `--applied` without checking that its changes exist.
+

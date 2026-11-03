@@ -14,7 +14,7 @@ Estos términos regulan la compra de productos coleccionables (cartas sueltas, c
 
 ## 3. Capacidad y menores de edad
 
-Para obligarte contractualmente necesitas ser mayor de 18 años. Las personas menores de edad solo pueden comprar con la autorización y supervisión de su representante legal, quien es el responsable de la compra. Al registrarte o comprar declaras ser mayor de 18 años o contar con esa autorización; el sistema no verifica la edad ni solicita fecha de nacimiento, por lo que la declaración es tu responsabilidad. [[CONFIRMAR_DECLARACION_DE_MAYORIA_DE_EDAD_IMPLEMENTADA]]
+Para obligarte contractualmente necesitas ser mayor de 18 años. Las personas menores de edad solo pueden comprar con la autorización y supervisión de su representante legal, quien es el responsable de la compra. Al registrarte, o al volver a aceptar los documentos cuando te lo pidamos, declaras ser mayor de 18 años o contar con esa autorización; el sistema no verifica la edad ni solicita fecha de nacimiento, por lo que la declaración es tu responsabilidad. [[CONFIRMAR_DECLARACION_DE_MAYORIA_DE_EDAD_IMPLEMENTADA]]
 
 La Tienda se reserva el derecho de cancelar, antes del despacho, los pedidos que sospeche realizados por un menor de edad sin autorización de su representante legal, y de reembolsar lo pagado por el mismo medio de pago. La navegación del sitio y el simulador de sobres están abiertos a todo público.
 

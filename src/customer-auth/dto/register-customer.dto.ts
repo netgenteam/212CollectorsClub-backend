@@ -1,7 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
-  IsBoolean,
   IsEmail,
   IsInt,
   IsOptional,
@@ -58,9 +57,10 @@ export class RegisterCustomerDto {
 
   @ApiPropertyOptional({
     description:
-      "Story 19.4 (FR-116): declaration of being 18+ (or having a legal representative's authorization). Always required: anything other than `true` is 400 CONSENT_REQUIRED. Stored as a declaration; no birth date is asked.",
+      "Story 19.4 (FR-116): declaration of being 18+ (or having a legal representative's authorization). Always required: anything other than the boolean `true` (including the string true or the number 1) is 400 CONSENT_REQUIRED. Stored as a declaration; no birth date is asked.",
   })
+  // No @IsBoolean (QA 19.4a): a non-boolean must reach the service so the
+  // answer is CONSENT_REQUIRED, not the generic validation 400.
   @IsOptional()
-  @IsBoolean()
   ageDeclared?: boolean;
 }
