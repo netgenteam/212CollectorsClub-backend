@@ -1,3 +1,5 @@
+import { fakeAudit } from '../../test/helpers/fake-audit.js';
+import { AuditService } from '../audit/audit.service.js';
 import { makeTestCrypto } from '../../test/helpers/iddoc-test-crypto.js';
 import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
 import { createHash } from 'node:crypto';
@@ -126,6 +128,7 @@ describe('CheckoutService', () => {
         CheckoutService,
         { provide: PrismaService, useValue: prisma },
         { provide: STRIPE_CLIENT, useValue: stripeClient },
+        { provide: AuditService, useValue: fakeAudit(prisma) },
         { provide: ShippingValidationService, useValue: {} },
         { provide: IdDocCryptoService, useValue: makeTestCrypto() },
         {

@@ -5,6 +5,7 @@ import type {
   UpdateIdentityDto,
 } from './dto/legal-admin.dto.js';
 import { legalTx, type LegalActor } from './legal-admin.common.js';
+import { AuditService } from '../audit/audit.service.js';
 import { LegalAuditService } from './legal-audit.service.js';
 
 const FIELDS = [
@@ -33,6 +34,7 @@ export class SellerIdentityService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: LegalAuditService,
+    private readonly immutableAudit: AuditService,
   ) {}
 
   async get(): Promise<IdentityResponseDto> {
@@ -54,7 +56,7 @@ export class SellerIdentityService {
     dto: UpdateIdentityDto,
     actor: LegalActor,
   ): Promise<IdentityResponseDto> {
-    return legalTx(this.prisma, async (tx, budget) => {
+    return legalTx(this.immutableAudit, async (tx, budget, collector) => {
       await tx.$executeRaw`
         INSERT INTO "Seller_Identity_Settings" ("id", "updatedAt") VALUES ('default', now())
         ON CONFLICT ("id") DO NOTHING`;
@@ -79,12 +81,22 @@ export class SellerIdentityService {
             "fiscalAddress" = ${next.fiscalAddress}, "contactEmail" = ${next.contactEmail},
             "phone" = ${next.phone}, "updatedAt" = now(), "updatedById" = ${actor.id}::uuid
         WHERE "id" = 'default'`;
-      await this.audit.record(tx, {
-        documentId: null,
-        action: 'IDENTITY_UPDATED',
-        actor,
-        meta: { changedFields: changed },
-      });
+      // Story 20.5: SELLER_IDENTITY_UPDATED carries the before/after of the CHANGED fields.
+      // They are the seller's own public data (RIF, fiscal address, contact), allowed by the
+      // catalog for this action only; `Legal_Audit_Logs.meta` keeps the field names alone.
+      const pick = (row: IdentityRow) =>
+        Object.fromEntries(changed.map((f) => [f, row[f]]));
+      await this.audit.record(
+        tx,
+        {
+          documentId: null,
+          action: 'IDENTITY_UPDATED',
+          actor,
+          meta: { changedFields: changed },
+          event: { before: pick(cur), after: pick(next) },
+        },
+        collector,
+      );
       return toDto(next);
     });
   }

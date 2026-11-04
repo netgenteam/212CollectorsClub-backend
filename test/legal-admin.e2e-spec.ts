@@ -1,3 +1,4 @@
+import { AuditService } from './../src/audit/audit.service.js';
 import { randomUUID } from 'node:crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { VersioningType } from '@nestjs/common';
@@ -882,7 +883,7 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
 
     it('a rejected version INSERT (database guard) becomes a retryable 409, never a 500', async () => {
       await expect(
-        legalTx(prisma, (tx) =>
+        legalTx(new AuditService(prisma), (tx) =>
           tx.$executeRawUnsafe(
             `INSERT INTO "Legal_Document_Versions" ("id","documentId","versionNumber","bodyMd","changeSummary","isSubstantial","effectiveFrom")
              VALUES (gen_random_uuid(), $1::uuid, 9, 'x', 'resumen', false, now())`,
@@ -901,7 +902,7 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
         [docs.trg.id],
       );
       await expect(
-        legalTx(prisma, (tx) =>
+        legalTx(new AuditService(prisma), (tx) =>
           tx.legalDocumentVersion.create({
             data: {
               documentId: docs.trg.id,

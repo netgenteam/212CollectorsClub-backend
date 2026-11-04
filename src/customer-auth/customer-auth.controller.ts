@@ -89,7 +89,7 @@ export class CustomerAuthController {
   @ApiResponse({
     status: 503,
     description:
-      'errorCode LEGAL_NOT_PUBLISHED (Story 19.4): LEGAL_REQUIRE_PUBLISHED=true and a required document has no version in force.',
+      'errorCode LEGAL_NOT_PUBLISHED (Story 19.4): LEGAL_REQUIRE_PUBLISHED=true and a required document has no version in force; or AUDIT_UNAVAILABLE (Story 20.5): the CONSENT_RECORDED event could not be written, the new account was removed, retry.',
   })
   async register(
     @Body(strictBody(RegisterCustomerDto)) dto: Readonly<RegisterCustomerDto>,

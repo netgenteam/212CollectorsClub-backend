@@ -8,6 +8,9 @@ import {
   guardedOrderStatusTransition,
   OrderTransitionConflictError,
 } from '../common/order-status-transition.js';
+import { AuditService } from '../audit/audit.service.js';
+import type { AuditCollector } from '../audit/audit.service.js';
+import { payload, SYSTEM_ACTOR } from '../audit/audit-events.js';
 import type { StripeWebhookEvent } from './stripe-client.interface.js';
 import type { StripeWebhookOutcome } from './dto/stripe-webhook-ack.dto.js';
 
@@ -50,7 +53,10 @@ class StockDecrementConflictError extends Error {
 export class StripePaymentsService {
   private readonly logger = new Logger(StripePaymentsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   async handleEvent(event: StripeWebhookEvent): Promise<StripeWebhookOutcome> {
     const isPaid = PAID_TYPES.has(event.type);
@@ -67,8 +73,13 @@ export class StripePaymentsService {
     }
 
     try {
-      return await this.prisma.$transaction((tx) =>
-        this.process(tx, event, isPaid),
+      // Story 20.5: the audit event is flushed AFTER `process` (last statement, chain lock
+      // taken last: the Stripe_Webhook_Events unique-index wait, the Orders row and the
+      // Products rows are all earlier). A duplicate delivery returns 'duplicate' before
+      // anything is added, so it emits nothing and takes no chain lock. Nothing in here
+      // calls Stripe or any other network service.
+      return await this.audit.transaction((tx, audit) =>
+        this.process(tx, audit, event, isPaid),
       );
     } catch (err) {
       if (err instanceof StockDecrementConflictError) {
@@ -94,6 +105,7 @@ export class StripePaymentsService {
 
   private async process(
     tx: Prisma.TransactionClient,
+    audit: AuditCollector,
     event: StripeWebhookEvent,
     isPaid: boolean,
   ): Promise<StripeWebhookOutcome> {
@@ -208,6 +220,7 @@ export class StripePaymentsService {
         });
       }
       await record('paid', order.id);
+      this.addStateEvent(audit, event, order, OrderStatus.PAID);
       this.logger.log(`Order ${order.id} PAID via Stripe event ${event.id}.`);
       return 'paid';
     }
@@ -215,10 +228,41 @@ export class StripePaymentsService {
     // AD-50: the transition winner releases the holds (heldQty only).
     await releaseOrderHolds(tx, order.id);
     await record('failed', order.id);
+    this.addStateEvent(audit, event, order, OrderStatus.PAYMENT_FAILED);
     this.logger.log(
       `Order ${order.id} PAYMENT_FAILED via Stripe event ${event.id} (${event.type}).`,
     );
     return 'failed';
+  }
+
+  /**
+   * Story 20.5: `STRIPE_PAYMENT_STATE_CHANGED`, only for a REAL state change (the guarded
+   * transition won). Ids, states and the amount as a string; never the Stripe secret
+   * values, the customer email or the card data.
+   */
+  private addStateEvent(
+    audit: AuditCollector,
+    event: StripeWebhookEvent,
+    order: { id: string; totalUsd: Prisma.Decimal },
+    to: OrderStatus,
+  ): void {
+    audit.add({
+      ...SYSTEM_ACTOR,
+      action: 'STRIPE_PAYMENT_STATE_CHANGED',
+      entityType: 'Order',
+      entityId: order.id,
+      before: { status: OrderStatus.PAYMENT_PROCESSING },
+      after: payload({
+        orderId: order.id,
+        eventId: event.id,
+        eventType: event.type,
+        checkoutSessionId: event.sessionId ?? null,
+        paymentIntentId: event.paymentIntentId ?? null,
+        from: OrderStatus.PAYMENT_PROCESSING,
+        to,
+        amountUsd: order.totalUsd,
+      }),
+    });
   }
 
   /**

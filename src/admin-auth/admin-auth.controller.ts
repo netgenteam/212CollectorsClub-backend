@@ -14,6 +14,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { AdminAuthGuard } from '../common/admin-auth.guard.js';
 import type { RequestWithAdminUser } from '../common/admin-auth.guard.js';
 import { extractBearerToken } from './admin-jwt.strategy.js';
@@ -48,6 +49,10 @@ export class AdminAuthController {
   constructor(private readonly adminAuthService: AdminAuthService) {}
 
   @Post('login')
+  // Story 20.5 (R4): a generous per-IP ceiling on ALL attempts (the Throttler counts every
+  // request); the real brakes are the failure limits of `AdminLoginLimiter`.
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { limit: 60, ttl: 10 * 60 * 1000 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Admin login',
@@ -59,6 +64,16 @@ export class AdminAuthController {
     status: 401,
     description:
       'errorCode INVALID_ADMIN_CREDENTIALS — the username/email does not match any AdminUser, OR it does but the password is wrong. Identical response either way.',
+  })
+  @ApiResponse({
+    status: 429,
+    description:
+      'errorCode ADMIN_LOGIN_RATE_LIMITED (too many failed attempts from this IP, or for this user name from this IP; details.retryAfterSeconds) or the generic per-IP Throttler limit.',
+  })
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE — the login could not be audited (fail-closed); the session was not issued.',
   })
   async login(@Body() dto: AdminLoginDto): Promise<AdminLoginResponseDto> {
     return this.adminAuthService.login(dto.usernameOrEmail, dto.password);
@@ -92,6 +107,11 @@ export class AdminAuthController {
       'Revokes the presented session (AD-27): its AdminSession row is deleted from Postgres, so any subsequent request bearing this same token — including a repeat call to this same endpoint — is rejected with 401 INVALID_ADMIN_TOKEN from then on, even before its 8h expiry, and even across an app restart (the session lives in Postgres, not memory, so it survives a redeploy).',
   })
   @ApiResponse({ status: 204, description: 'Token revoked. No response body.' })
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE — the logout could not be audited (fail-closed); the session was NOT revoked, retry.',
+  })
   @ApiResponse({
     status: 401,
     description:

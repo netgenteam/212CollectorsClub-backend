@@ -81,7 +81,7 @@ export class MeConsentController {
   @ApiResponse({
     status: 503,
     description:
-      'errorCode LEGAL_NOT_PUBLISHED (LEGAL_REQUIRE_PUBLISHED=true and a document has no version in force) or CONSENT_BUSY (another request for this account holds the lock for > 3 s).',
+      'errorCode LEGAL_NOT_PUBLISHED (LEGAL_REQUIRE_PUBLISHED=true and a document has no version in force), CONSENT_BUSY (another request for this account holds the lock for > 3 s) or AUDIT_UNAVAILABLE (the CONSENT_RECORDED event could not be written to the immutable audit log: fail-closed, nothing was recorded, retry).',
   })
   reaccept(
     @Req() req: RequestWithCustomer,

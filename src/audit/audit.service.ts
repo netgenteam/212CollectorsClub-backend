@@ -179,7 +179,16 @@ export class AuditService {
    */
   async transaction<T>(
     fn: (tx: Tx, audit: AuditCollector) => Promise<T>,
-    options: { maxWait?: number; timeout?: number } = {},
+    options: {
+      maxWait?: number;
+      timeout?: number;
+      /**
+       * An expired Prisma transaction (P2028) is a 503 `AUDIT_UNAVAILABLE` by default. A caller
+       * with its own "busy" answer (409 `*_BUSY` for FX, vitrina, legal: bounded lock waits)
+       * passes `'rethrow'` to receive the original error and map it itself.
+       */
+      onTimeout?: 'unavailable' | 'rethrow';
+    } = {},
   ): Promise<T> {
     try {
       return await this.prisma.$transaction(
@@ -201,12 +210,47 @@ export class AuditService {
     } catch (err) {
       // Prisma reports an expired interactive transaction (the action itself
       // plus the lock wait ran too long) as P2028.
-      if (isTxTimeout(err)) {
+      if (isTxTimeout(err) && options.onTimeout !== 'rethrow') {
         this.logger.warn('audit transaction timed out (P2028)');
         throw unavailable('TX_TIMEOUT', err);
       }
       throw err;
     }
+  }
+
+  /**
+   * `DATA_EXPORTED` (FR-139) for ANY admin export of data (CSV, report, dump): the helper every
+   * future export calls BEFORE it hands the file to the admin, so "no event, no delivery"
+   * (same discipline as the ID document reveal). It is an audit transaction of its own that
+   * commits first; the (possibly slow) export work must run before or after it, never inside.
+   * Today no admin export exists (20.5 found none), so nothing calls it yet. Describe the
+   * export, never its content: `dataset` (what), `format`, `rows`, optional scalar `filters`.
+   */
+  async recordDataExport(
+    admin: { id: string },
+    info: {
+      dataset: string;
+      format: string;
+      rows: number;
+      filters?: Record<string, string | number | boolean | null>;
+    },
+  ): Promise<void> {
+    await this.transaction((_tx, audit) => {
+      audit.add({
+        actorType: 'ADMIN',
+        actorId: admin.id,
+        action: 'DATA_EXPORTED',
+        entityType: 'Export',
+        entityId: info.dataset,
+        after: {
+          dataset: info.dataset,
+          format: info.format,
+          rows: info.rows,
+          filters: info.filters ?? {},
+        },
+      });
+      return Promise.resolve();
+    });
   }
 
   private async flush(

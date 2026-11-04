@@ -1,3 +1,4 @@
+import { fakeAudit } from '../../test/helpers/fake-audit.js';
 import { makeTestCrypto } from '../../test/helpers/iddoc-test-crypto.js';
 import { FxRateService } from '../fx/fx-rate.service.js';
 import { Prisma } from '../generated/prisma/client.js';
@@ -76,6 +77,7 @@ describe('CheckoutService (account)', () => {
         recordConsents: () => Promise.resolve(0),
       } as never,
       makeTestCrypto(),
+      fakeAudit({ $transaction: transaction }),
     );
   });
 

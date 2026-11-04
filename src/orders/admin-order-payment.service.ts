@@ -13,6 +13,9 @@ import {
 } from '../common/order-status-transition.js';
 import type { AuthenticatedAdminUser } from '../common/admin-auth.guard.js';
 import { UPLOADS_PRIVATE_ROOT } from './upload-paths.constants.js';
+import { AuditService } from '../audit/audit.service.js';
+import type { AuditCollector } from '../audit/audit.service.js';
+import { adminActor, payload } from '../audit/audit-events.js';
 import { AdminPaymentDecisionResponseDto } from './dto/admin-payment-decision-response.dto.js';
 
 function orderNotFoundException(orderId: string): ApiException {
@@ -162,7 +165,10 @@ export interface ProofOfPaymentFile {
 export class AdminOrderPaymentService {
   private readonly logger = new Logger(AdminOrderPaymentService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   /**
    * Story 9.2 AC1 (AD-12, NFR-5). Resolves the Order's most recent
@@ -248,7 +254,10 @@ export class AdminOrderPaymentService {
     await this.assertOrderExists(orderId);
 
     try {
-      await this.prisma.$transaction(async (tx) => {
+      // Story 20.5 (AD-99): `audit.transaction` flushes `PAYMENT_PAGO_MOVIL_CONFIRMED` as the LAST
+      // statement (after the Orders/StockHold/Products locks); an audit failure rolls the
+      // whole confirmation back (stock, status, history) and answers 503.
+      await this.audit.transaction(async (tx, audit) => {
         await guardedOrderStatusTransition(tx, {
           orderId,
           fromStatus: OrderStatus.PENDING_VERIFICATION,
@@ -282,6 +291,12 @@ export class AdminOrderPaymentService {
             data: { releasedAt: now },
           });
         }
+        await this.addDecisionEvent(tx, audit, admin, orderId, {
+          action: 'PAYMENT_PAGO_MOVIL_CONFIRMED',
+          toStatus: OrderStatus.PAID,
+          holds: holds.length,
+          holdsKey: 'stockCommitted',
+        });
       });
     } catch (err) {
       await this.translateDecisionError(err, orderId);
@@ -311,7 +326,7 @@ export class AdminOrderPaymentService {
     await this.assertOrderExists(orderId);
 
     try {
-      await this.prisma.$transaction(async (tx) => {
+      await this.audit.transaction(async (tx, audit) => {
         await guardedOrderStatusTransition(tx, {
           orderId,
           fromStatus: OrderStatus.PENDING_VERIFICATION,
@@ -343,6 +358,12 @@ export class AdminOrderPaymentService {
             data: { releasedAt: now },
           });
         }
+        await this.addDecisionEvent(tx, audit, admin, orderId, {
+          action: 'PAYMENT_PAGO_MOVIL_REJECTED',
+          toStatus: OrderStatus.PAYMENT_REJECTED,
+          holds: holds.length,
+          holdsKey: 'holdsReleased',
+        });
       });
     } catch (err) {
       await this.translateDecisionError(err, orderId);
@@ -352,6 +373,56 @@ export class AdminOrderPaymentService {
       `Order ${orderId} rejected (payment_rejected) by admin ${admin.id} — every active StockHold released, "stock" left untouched.`,
     );
     return this.toDecisionDto(orderId);
+  }
+
+  /**
+   * Story 20.5: the audit event of a Pago Movil decision. Only ids, statuses and money as
+   * strings (no bank reference, no phone, no name). The Orders row is already locked by the
+   * guarded transition, so this read is a cheap indexed lookup; the event is only collected
+   * here, the chain lock is taken after the callback returns.
+   */
+  private async addDecisionEvent(
+    tx: Prisma.TransactionClient,
+    audit: AuditCollector,
+    admin: AuthenticatedAdminUser,
+    orderId: string,
+    d: {
+      action: 'PAYMENT_PAGO_MOVIL_CONFIRMED' | 'PAYMENT_PAGO_MOVIL_REJECTED';
+      toStatus: OrderStatus;
+      holds: number;
+      holdsKey: 'stockCommitted' | 'holdsReleased';
+    },
+  ): Promise<void> {
+    const order = await tx.order.findUniqueOrThrow({
+      where: { id: orderId },
+      select: {
+        totalUsd: true,
+        totalVes: true,
+        fxRateVesPerUsd: true,
+        proofOfPayments: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { id: true },
+        },
+      },
+    });
+    audit.add({
+      ...adminActor(admin),
+      action: d.action,
+      entityType: 'Order',
+      entityId: orderId,
+      before: { orderStatus: OrderStatus.PENDING_VERIFICATION },
+      after: payload({
+        orderId,
+        orderStatus: d.toStatus,
+        previousStatus: OrderStatus.PENDING_VERIFICATION,
+        proofId: order.proofOfPayments[0]?.id ?? null,
+        amountUsd: order.totalUsd,
+        amountVes: order.totalVes,
+        fxRate: order.fxRateVesPerUsd,
+        [d.holdsKey]: d.holds,
+      }),
+    });
   }
 
   private async assertOrderExists(orderId: string): Promise<void> {

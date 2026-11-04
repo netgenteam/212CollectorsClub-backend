@@ -1,3 +1,4 @@
+import { fakeAudit } from '../../test/helpers/fake-audit.js';
 import { HttpStatus } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client.js';
 import { FX_LOCK_BUDGET_MS, AdminFxService } from './admin-fx.service.js';
@@ -9,7 +10,11 @@ const lockErr = () =>
   });
 
 const make = (tx: ReturnType<typeof vi.fn>) =>
-  new AdminFxService({ $transaction: tx } as never, {} as never);
+  new AdminFxService(
+    { $transaction: tx } as never,
+    {} as never,
+    fakeAudit({ $transaction: tx }),
+  );
 const body = (e: unknown) =>
   (e as { getResponse(): { errorCode: string } }).getResponse();
 

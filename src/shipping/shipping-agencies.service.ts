@@ -2,6 +2,9 @@ import { HttpStatus, Injectable } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client.js';
 import { ApiException } from '../common/api-exception.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { AuditService } from '../audit/audit.service.js';
+import { adminActor, diffPayload, payload } from '../audit/audit-events.js';
+import type { AuthenticatedAdminUser } from '../common/admin-auth.guard.js';
 import type {
   CreateShippingAgencyDto,
   ShippingAgencyAdminDto,
@@ -33,7 +36,10 @@ const UPDATABLE_FIELDS = [
 /** Story 17.1 (AD-71, FR-82/83): agency catalog read + admin edit. */
 @Injectable()
 export class ShippingAgenciesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   listPublic(): Promise<ShippingAgencyPublicDto[]> {
     return this.prisma.shippingAgency.findMany({
@@ -56,9 +62,11 @@ export class ShippingAgenciesService {
     });
   }
 
+  /** Story 20.5: `SHIPPING_AGENCY_CHANGED` in the same transaction as the edit (flushed last). */
   async update(
     id: string,
     dto: Readonly<UpdateShippingAgencyDto>,
+    admin: Pick<AuthenticatedAdminUser, 'id'>,
   ): Promise<ShippingAgencyAdminDto> {
     const data: Prisma.ShippingAgencyUpdateInput = {};
     for (const field of UPDATABLE_FIELDS) {
@@ -75,7 +83,9 @@ export class ShippingAgenciesService {
     }
     this.assertTemplate(dto.trackingUrlTemplate);
 
-    return this.prisma.$transaction(async (tx) => {
+    return this.audit.transaction(async (tx, audit) => {
+      // Row lock: concurrent edits serialize, so each `before` is the previous `after`.
+      await tx.$queryRaw`SELECT "id" FROM "Shipping_Agencies" WHERE "id" = ${id}::uuid FOR UPDATE`;
       const current = await tx.shippingAgency.findUnique({
         where: { id },
         select: ADMIN_SELECT,
@@ -87,16 +97,33 @@ export class ShippingAgenciesService {
         merged.allowsOfficePickup,
         merged.allowsHomeDelivery,
       );
-      return tx.shippingAgency.update({
+      const updated = await tx.shippingAgency.update({
         where: { id },
         data,
         select: ADMIN_SELECT,
       });
+      const diff = diffPayload(current, updated, UPDATABLE_FIELDS);
+      if (diff.changed.length > 0) {
+        audit.add({
+          ...adminActor(admin),
+          action: 'SHIPPING_AGENCY_CHANGED',
+          entityType: 'ShippingAgency',
+          entityId: id,
+          before: diff.before,
+          after: payload({
+            operation: 'UPDATE',
+            code: updated.code,
+            ...(diff.after as object),
+          }),
+        });
+      }
+      return updated;
     });
   }
 
   async create(
     dto: Readonly<CreateShippingAgencyDto>,
+    admin: Pick<AuthenticatedAdminUser, 'id'>,
   ): Promise<ShippingAgencyAdminDto> {
     this.assertTemplate(dto.trackingUrlTemplate);
     const isActive = dto.isActive ?? true;
@@ -105,17 +132,27 @@ export class ShippingAgenciesService {
     this.assertHasMode(isActive, allowsOfficePickup, allowsHomeDelivery);
     try {
       // Plain INSERT: the unique index on `code` is the atomic arbiter.
-      return await this.prisma.shippingAgency.create({
-        data: {
-          name: dto.name,
-          code: dto.code,
-          isActive,
-          allowsOfficePickup,
-          allowsHomeDelivery,
-          trackingUrlTemplate: dto.trackingUrlTemplate ?? null,
-          sortOrder: dto.sortOrder ?? 0,
-        },
-        select: ADMIN_SELECT,
+      return await this.audit.transaction(async (tx, audit) => {
+        const created = await tx.shippingAgency.create({
+          data: {
+            name: dto.name,
+            code: dto.code,
+            isActive,
+            allowsOfficePickup,
+            allowsHomeDelivery,
+            trackingUrlTemplate: dto.trackingUrlTemplate ?? null,
+            sortOrder: dto.sortOrder ?? 0,
+          },
+          select: ADMIN_SELECT,
+        });
+        audit.add({
+          ...adminActor(admin),
+          action: 'SHIPPING_AGENCY_CHANGED',
+          entityType: 'ShippingAgency',
+          entityId: created.id,
+          after: payload({ operation: 'CREATE', ...created }),
+        });
+        return created;
       });
     } catch (error) {
       if (
@@ -133,7 +170,10 @@ export class ShippingAgenciesService {
   }
 
   /** 409 SHIPPING_AGENCY_IN_USE when any address or order references it. */
-  async remove(id: string): Promise<void> {
+  async remove(
+    id: string,
+    admin: Pick<AuthenticatedAdminUser, 'id'>,
+  ): Promise<void> {
     const inUse = (): ApiException =>
       new ApiException(
         HttpStatus.CONFLICT,
@@ -141,10 +181,10 @@ export class ShippingAgenciesService {
         'The agency is referenced by addresses or orders; deactivate it instead.',
       );
     try {
-      await this.prisma.$transaction(async (tx) => {
+      await this.audit.transaction(async (tx, audit) => {
         const exists = await tx.shippingAgency.findUnique({
           where: { id },
-          select: { id: true },
+          select: ADMIN_SELECT,
         });
         if (!exists) throw this.notFound();
         const [addresses, orders] = await Promise.all([
@@ -153,6 +193,14 @@ export class ShippingAgenciesService {
         ]);
         if (addresses > 0 || orders > 0) throw inUse();
         await tx.shippingAgency.delete({ where: { id } });
+        audit.add({
+          ...adminActor(admin),
+          action: 'SHIPPING_AGENCY_CHANGED',
+          entityType: 'ShippingAgency',
+          entityId: id,
+          before: payload({ ...exists }),
+          after: { operation: 'DELETE', code: exists.code },
+        });
       });
     } catch (error) {
       if (

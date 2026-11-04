@@ -1,5 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { AuditService } from '../../audit/audit.service.js';
+import {
+  orderStatusChangedEvent,
+  SYSTEM_ACTOR,
+} from '../../audit/audit-events.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { OrderActorType, OrderStatus } from '../../generated/prisma/enums.js';
 import {
@@ -63,7 +68,10 @@ export class PaymentProcessingTimeoutCronService {
     PaymentProcessingTimeoutCronService.name,
   );
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Cron(CronExpression.EVERY_5_MINUTES, { name: 'payment-processing-timeout' })
   async handleCron(): Promise<void> {
@@ -92,7 +100,8 @@ export class PaymentProcessingTimeoutCronService {
         // --- AD-7/AD-16: payment_processing->payment_failed,
         // actorType=cron. NEVER decrements stock — see this class's own
         // doc comment.
-        await this.prisma.$transaction(async (tx) => {
+        // Story 20.5: one short audited transaction per order (event flushed last).
+        await this.audit.transaction(async (tx, audit) => {
           await guardedOrderStatusTransition(tx, {
             orderId,
             fromStatus: OrderStatus.PAYMENT_PROCESSING,
@@ -101,6 +110,15 @@ export class PaymentProcessingTimeoutCronService {
           });
           // AD-50: only the transition winner releases the holds.
           await releaseOrderHolds(tx, orderId);
+          audit.add(
+            orderStatusChangedEvent({
+              actor: SYSTEM_ACTOR,
+              orderId,
+              from: OrderStatus.PAYMENT_PROCESSING,
+              to: OrderStatus.PAYMENT_FAILED,
+              reason: 'PAYMENT_PROCESSING_TIMEOUT',
+            }),
+          );
         });
         ordersFailed++;
       } catch (err) {

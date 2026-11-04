@@ -14,6 +14,7 @@ import {
   lockLegalDoc,
   type LegalActor,
 } from './legal-admin.common.js';
+import { AuditService } from '../audit/audit.service.js';
 import { LegalAuditService } from './legal-audit.service.js';
 import { LegalMarkdownService } from './legal-markdown.service.js';
 import { detectPlaceholders } from './legal-placeholders.js';
@@ -52,6 +53,7 @@ export class LegalDraftService {
     private readonly prisma: PrismaService,
     private readonly markdown: LegalMarkdownService,
     private readonly audit: LegalAuditService,
+    private readonly immutableAudit: AuditService,
   ) {}
 
   /** `GET /admin/legal`: the six real documents with their state. */
@@ -124,7 +126,7 @@ export class LegalDraftService {
     await this.markdown.validate(dto.bodyMd);
     const bytes = Buffer.byteLength(dto.bodyMd, 'utf8');
 
-    const row = await legalTx(this.prisma, async (tx, budget) => {
+    const row = await legalTx(this.immutableAudit, async (tx, budget) => {
       await lockLegalDoc(tx, budget, doc.id);
       let saved: DraftRow | undefined;
       if (dto.baseRevision === 0) {
@@ -175,7 +177,7 @@ export class LegalDraftService {
 
   async discard(slug: string, actor: LegalActor): Promise<void> {
     const doc = await findLegalDoc(this.prisma, slug);
-    await legalTx(this.prisma, async (tx, budget) => {
+    await legalTx(this.immutableAudit, async (tx, budget) => {
       await lockLegalDoc(tx, budget, doc.id);
       const rows = await tx.$queryRaw<{ revision: number }[]>`
         DELETE FROM "Legal_Drafts" WHERE "documentId" = ${doc.id}::uuid
@@ -207,7 +209,7 @@ export class LegalDraftService {
         'That version of the document does not exist.',
       );
     }
-    const row = await legalTx(this.prisma, async (tx, budget) => {
+    const row = await legalTx(this.immutableAudit, async (tx, budget) => {
       await lockLegalDoc(tx, budget, doc.id);
       const [saved] = await tx.$queryRaw<DraftRow[]>`
         INSERT INTO "Legal_Drafts"

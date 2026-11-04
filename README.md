@@ -50,7 +50,7 @@ must never contain committed secrets.
 | `pnpm build` | Compile to `dist/` |
 | `pnpm lint` | ESLint, zero warnings/errors allowed |
 | `pnpm lint:fix` | ESLint with autofix |
-| `pnpm test` / `pnpm test:e2e` | Vitest unit (correctness only) / e2e tests |
+| `pnpm test` / `pnpm test:e2e` | Vitest unit (correctness only) / e2e tests. **`test:e2e` and `test:perf` never touch your development database**: they clone it into a throw-away `<db>_e2e_<epoch>_<hex>` database, run there, verify the audit chain it produced and drop it (`docs/deployment.md` §17.1) |
 | `pnpm test:perf` | Performance assertions (`*.perf.spec.ts`: time budgets, event-loop delay), one file at a time on one thread; run it on a quiet machine, not under load |
 | `pnpm prisma:generate` | Regenerate the Prisma client (also runs on `postinstall`) |
 | `pnpm prisma:migrate` | `prisma migrate dev` (local dev only) |

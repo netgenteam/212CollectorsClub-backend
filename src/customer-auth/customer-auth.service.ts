@@ -15,6 +15,7 @@ import {
 import { MailerService } from '../common/mailer/mailer.service.js';
 import type { SendMailOptions } from '../common/mailer/mailer.service.js';
 import { Prisma } from '../generated/prisma/client.js';
+import { AuditService } from '../audit/audit.service.js';
 import { ConsentService } from '../legal/consent.service.js';
 import { ConsentContext } from '../generated/prisma/enums.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -75,6 +76,7 @@ export class CustomerAuthService {
     private readonly mailer: MailerService,
     private readonly config: ConfigService,
     private readonly consent: ConsentService,
+    private readonly audit: AuditService,
   ) {}
 
   private get frontendUrl(): string {
@@ -159,13 +161,16 @@ export class CustomerAuthService {
     // between, the account is simply "pending" for FR-115 (safe degradation).
     // The duplicate-email branches above never write anything.
     try {
-      await this.prisma.$transaction((tx) =>
+      // Story 20.5: the `CONSENT_RECORDED` event commits (or fails) with the evidence rows.
+      // An audit failure is handled like any other failure here: the account is removed.
+      await this.audit.transaction((tx, audit) =>
         this.consent.recordConsents(tx, {
           context: ConsentContext.REGISTER,
           customerId: created.user.id,
           accepted,
           keys: ['terms', 'privacy'],
           age: true,
+          audit,
         }),
       );
     } catch (err) {
@@ -179,6 +184,8 @@ export class CustomerAuthService {
             `Could not remove customer ${created.user.id} after a consent failure: ${delErr instanceof Error ? delErr.message : String(delErr)}`,
           );
         });
+      // An audit outage is a clean 503 `AUDIT_UNAVAILABLE` (the account is gone, retry later).
+      if (err instanceof ApiException) throw err;
       throw new ApiException(
         HttpStatus.INTERNAL_SERVER_ERROR,
         'CONSENT_RECORD_FAILED',

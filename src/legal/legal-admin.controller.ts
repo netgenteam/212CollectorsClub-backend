@@ -216,6 +216,11 @@ export class LegalAdminController {
   }
 
   @Put('identity')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @ApiOperation({
     summary: 'Update the seller identity',
     description:
@@ -307,6 +312,11 @@ export class LegalAdminController {
   }
 
   @Post(':slug/publish')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @ApiOperation({
     summary: 'Publish the draft as a new immutable version',
     description:

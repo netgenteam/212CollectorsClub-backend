@@ -37,6 +37,11 @@ export class CheckoutController {
    * cleared here too (see CartCookieService.clearCartId's doc comment).
    */
   @Post()
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Check out the current cart (Pago Móvil or Stripe)',

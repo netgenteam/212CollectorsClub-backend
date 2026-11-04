@@ -28,6 +28,11 @@ describe('Related products (e2e, Story 11.3)', () => {
   let categoryId: string;
   let otherCategoryId: string;
   const ids: Record<string, string> = {};
+  // Story 20.5: the ranking is global, so ambient NARUTO products (residue of earlier runs or real
+  // catalog content) fill the 10 slots and push this suite's rows out. The suite runs on a
+  // THROW-AWAY database (assert-test-db), where it may park them (isActive=false) and put them
+  // back afterwards; the developer's database is never involved.
+  let parked: string[] = [];
 
   const mk = async (
     key: string,
@@ -70,6 +75,17 @@ describe('Related products (e2e, Story 11.3)', () => {
     app.useGlobalPipes(createGlobalValidationPipe());
     await app.init();
     prisma = app.get(PrismaService);
+
+    parked = (
+      await prisma.product.findMany({
+        where: { franchise: 'NARUTO', isActive: true },
+        select: { id: true },
+      })
+    ).map((p) => p.id);
+    await prisma.product.updateMany({
+      where: { id: { in: parked } },
+      data: { isActive: false },
+    });
 
     categoryId = (
       await prisma.category.create({
@@ -136,6 +152,10 @@ describe('Related products (e2e, Story 11.3)', () => {
   });
 
   afterAll(async () => {
+    await prisma.product.updateMany({
+      where: { id: { in: parked } },
+      data: { isActive: true },
+    });
     await prisma.product.deleteMany({ where: { id: { in: createdIds } } });
     await prisma.category.deleteMany({
       where: { slug: { startsWith: token.toLowerCase() } },

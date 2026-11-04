@@ -9,6 +9,8 @@ import {
   OrderTransitionConflictError,
 } from '../common/order-status-transition.js';
 import type { AuthenticatedAdminUser } from '../common/admin-auth.guard.js';
+import { AuditService } from '../audit/audit.service.js';
+import { adminActor, orderStatusChangedEvent } from '../audit/audit-events.js';
 import { AdminFulfillmentDecisionResponseDto } from './dto/admin-fulfillment-decision-response.dto.js';
 
 function orderNotFoundException(orderId: string): ApiException {
@@ -98,7 +100,10 @@ class StockReincrementConflictError extends Error {
 export class AdminOrderFulfillmentService {
   private readonly logger = new Logger(AdminOrderFulfillmentService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   /**
    * Story 9.3 AC1 (AD-7, AD-16). One transaction, one guarded UPDATE:
@@ -113,7 +118,8 @@ export class AdminOrderFulfillmentService {
     await this.assertOrderExists(orderId);
 
     try {
-      await this.prisma.$transaction(async (tx) => {
+      // Story 20.5: `ORDER_STATUS_CHANGED` is the last statement of this transaction.
+      await this.audit.transaction(async (tx, audit) => {
         await guardedOrderStatusTransition(tx, {
           orderId,
           fromStatus: OrderStatus.PAID,
@@ -121,6 +127,14 @@ export class AdminOrderFulfillmentService {
           actorType: OrderActorType.ADMIN,
           adminUserId: admin.id,
         });
+        audit.add(
+          orderStatusChangedEvent({
+            actor: adminActor(admin),
+            orderId,
+            from: OrderStatus.PAID,
+            to: OrderStatus.FULFILLED,
+          }),
+        );
       });
     } catch (err) {
       await this.translateTransitionError(err, orderId);
@@ -154,7 +168,7 @@ export class AdminOrderFulfillmentService {
     await this.assertOrderExists(orderId);
 
     try {
-      await this.prisma.$transaction(async (tx) => {
+      await this.audit.transaction(async (tx, audit) => {
         await guardedOrderStatusTransition(tx, {
           orderId,
           fromStatus: OrderStatus.PAID,
@@ -181,6 +195,15 @@ export class AdminOrderFulfillmentService {
             throw new StockReincrementConflictError(orderId, line.productId);
           }
         }
+        audit.add(
+          orderStatusChangedEvent({
+            actor: adminActor(admin),
+            orderId,
+            from: OrderStatus.PAID,
+            to: OrderStatus.CANCELLED,
+            extra: { stockRestoredLines: lines.length },
+          }),
+        );
       });
     } catch (err) {
       await this.translateTransitionError(err, orderId);

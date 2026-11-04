@@ -481,7 +481,9 @@ describe('Date / BigInt / Decimal: a bug in both modes, with helpers to avoid it
     isNaN: () => false,
     constructor: { name: 'Decimal' },
   };
+  // decimal.js tags its instances (what the guard recognises); the class name is irrelevant.
   class Decimal {
+    readonly [Symbol.toStringTag] = 'Decimal';
     toFixed(): string {
       return '12.5000';
     }
@@ -527,6 +529,25 @@ describe('Date / BigInt / Decimal: a bug in both modes, with helpers to avoid it
     });
     for (const mode of ['strict', 'lenient'] as const) {
       expect(() => sanitizeAuditPayload(p, mode)).not.toThrow();
+    }
+  });
+});
+
+describe('a REAL Prisma Decimal (Story 20.5: its class is called Decimal2, not Decimal)', () => {
+  it('toAuditPayload converts it to a plain decimal string in both modes', async () => {
+    const { Prisma } = await import('../generated/prisma/client.js');
+    const d = new Prisma.Decimal('12.50');
+    expect(toAuditPayload({ amountUsd: d, nested: { rate: d } })).toEqual({
+      amountUsd: '12.5',
+      nested: { rate: '12.5' },
+    });
+    for (const mode of ['strict', 'lenient'] as const) {
+      expect(() => sanitizeAuditPayload({ m: d }, mode)).toThrow(
+        AuditPayloadError,
+      );
+      expect(
+        sanitizeAuditPayload(toAuditPayload({ m: d }), mode).value,
+      ).toEqual({ m: '12.5' });
     }
   });
 });

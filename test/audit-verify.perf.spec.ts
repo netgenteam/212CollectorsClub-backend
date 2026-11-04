@@ -1,3 +1,4 @@
+import { mintAdminToken } from './helpers/admin-session.js';
 import { randomUUID } from 'node:crypto';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { VersioningType } from '@nestjs/common';
@@ -109,7 +110,7 @@ describe('audit verification does not block the event loop (perf, Story 20.1)', 
     app.useGlobalPipes(createGlobalValidationPipe());
     await app.init();
     prisma = app.get(PrismaService);
-    await prisma.adminUser.upsert({
+    const admin = await prisma.adminUser.upsert({
       where: { username: USER },
       create: {
         username: USER,
@@ -118,11 +119,9 @@ describe('audit verification does not block the event loop (perf, Story 20.1)', 
       },
       update: {},
     });
-    const login = await request(app.getHttpServer())
-      .post('/api/v1/admin/auth/login')
-      .send({ usernameOrEmail: USER, password: PASS })
-      .expect(200);
-    token = (login.body as { accessToken: string }).accessToken;
+    // Story 20.5: not through the login endpoint (it would audit LOGIN_ADMIN_OK and add a row
+    // to the 200 000 the verify call is measured over).
+    token = await mintAdminToken(app, admin.id);
   }, 300_000);
 
   afterAll(async () => {

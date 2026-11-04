@@ -1,3 +1,4 @@
+import { fakeAudit } from '../../test/helpers/fake-audit.js';
 import { makeTestCrypto } from '../../test/helpers/iddoc-test-crypto.js';
 import { FxRateService } from '../fx/fx-rate.service.js';
 import { Prisma } from '../generated/prisma/client.js';
@@ -140,6 +141,7 @@ describe('CheckoutService (story 20.4: buyer ID, expected account, account lock)
         recordConsents: () => Promise.resolve(0),
       } as never,
       crypto,
+      fakeAudit({ $transaction: transaction }),
     );
   });
 

@@ -4,6 +4,11 @@ import { ApiException } from '../common/api-exception.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { ConsentContext, ConsentType } from '../generated/prisma/enums.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { AuditService } from '../audit/audit.service.js';
+import type {
+  AuditCollector,
+  AuditEventInput,
+} from '../audit/audit.service.js';
 import {
   computePendingConsents,
   type CurrentConsentDocument,
@@ -118,6 +123,7 @@ export class ConsentService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly audit: AuditService,
   ) {
     if (consentSlugPrefixIgnored()) {
       this.logger.warn(
@@ -259,9 +265,17 @@ export class ConsentService {
       (r) =>
         Prisma.sql`(gen_random_uuid(), ${r.customerId}::uuid, ${r.orderId}::uuid, ${r.type}::"ConsentType", ${r.documentVersionId}::uuid, ${r.version}, ${r.context}::"ConsentContext")`,
     );
-    return tx.$executeRaw`INSERT INTO "Consent_Records"
+    // Story 20.5 (AD-99): ONE `CONSENT_RECORDED` per call (not one per row), with the ids of the
+    // rows just written and the versions accepted; the content is never duplicated. The event is
+    // only COLLECTED here (`p.audit.add`): whoever owns the transaction flushes it last.
+    const written = await tx.$queryRaw<
+      { id: string }[]
+    >`INSERT INTO "Consent_Records"
       ("id", "customerId", "orderId", "type", "documentVersionId", "version", "context")
-      VALUES ${Prisma.join(values)}`;
+      VALUES ${Prisma.join(values)}
+      RETURNING "id"`;
+    p.audit.add(consentRecordedEvent(p, rows, written));
+    return written.length;
   }
 
   /** `GET /me/consent-status` (TERMS and PRIVACY only, plus the age declaration). */
@@ -343,7 +357,8 @@ export class ConsentService {
     sent: { terms?: unknown; privacy?: unknown; ageDeclared?: unknown },
   ): Promise<ConsentStatus> {
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      // Story 20.5: the per-customer advisory lock comes first, the chain lock last.
+      return await this.audit.transaction(async (tx, audit) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'consent:' + customerId}, 0))`;
         const hasAge = await this.hasAge(tx, customerId);
@@ -386,6 +401,7 @@ export class ConsentService {
           accepted,
           keys,
           age: !hasAge,
+          audit,
         });
         return this.statusIn(tx, customerId);
       });
@@ -449,6 +465,8 @@ export class ConsentService {
 }
 
 export interface RecordConsentsParams {
+  /** Collector of the transaction (`AuditService.transaction`): receives the single event. */
+  audit: AuditCollector;
   context: ConsentContext;
   customerId?: string | null;
   orderId?: string | null;
@@ -494,6 +512,36 @@ export function consentRows(p: RecordConsentsParams): ConsentRow[] {
     });
   }
   return rows;
+}
+
+/**
+ * Story 20.5: the `CONSENT_RECORDED` event of one `recordConsents` call. `after` holds
+ * `consentRecordIds` (the rows written), `versions` (type -> version number), the `context`
+ * and the order/customer ids: no document text, no person data. The actor is the customer
+ * who accepted (a guest checkout is ANON).
+ */
+export function consentRecordedEvent(
+  p: RecordConsentsParams,
+  rows: readonly ConsentRow[],
+  written: readonly { id: string }[],
+): AuditEventInput {
+  const versions: Record<string, number> = {};
+  for (const r of rows) versions[r.type] = r.version;
+  const customerId = p.customerId ?? null;
+  return {
+    actorType: customerId ? 'CUSTOMER' : 'ANON',
+    actorId: customerId,
+    action: 'CONSENT_RECORDED',
+    entityType: p.orderId ? 'Order' : 'Customer',
+    entityId: p.orderId ?? customerId ?? 'unknown',
+    after: {
+      context: p.context,
+      consentRecordIds: written.map((w) => w.id),
+      versions,
+      orderId: p.orderId ?? null,
+      customerId,
+    },
+  };
 }
 
 export const ADMIN_CONSENTS_LIMIT = 200;

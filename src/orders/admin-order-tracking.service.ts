@@ -2,6 +2,8 @@ import { HttpStatus, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { ApiException } from '../common/api-exception.js';
 import type { AuthenticatedAdminUser } from '../common/admin-auth.guard.js';
+import { AuditService } from '../audit/audit.service.js';
+import { adminActor } from '../audit/audit-events.js';
 import { buildTrackingUrl } from '../shipping/tracking-url.js';
 import {
   AdminOrderTrackingResponseDto,
@@ -17,7 +19,10 @@ const TRACKING_NUMBER_PATTERN = /^[A-Za-z0-9._/-]{3,64}$/;
  */
 @Injectable()
 export class AdminOrderTrackingService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   async setTracking(
     orderId: string,
@@ -26,7 +31,9 @@ export class AdminOrderTrackingService {
   ): Promise<AdminOrderTrackingResponseDto> {
     const next = this.normalize(dto.trackingNumber);
 
-    return this.prisma.$transaction(async (tx) => {
+    // Story 20.5: `ORDER_TRACKING_CHANGED` shares the transaction of `Order_Tracking_Events`
+    // (flushed last, after the Orders row lock).
+    return this.audit.transaction(async (tx, audit) => {
       // Serialize concurrent PATCHes on the same order so previousValue and
       // the no-change check always see the latest committed value.
       await tx.$queryRaw`SELECT id FROM "Orders" WHERE id = ${orderId}::uuid FOR UPDATE`;
@@ -57,6 +64,14 @@ export class AdminOrderTrackingService {
             previousValue: order.trackingNumber,
             newValue: next,
           },
+        });
+        audit.add({
+          ...adminActor(admin),
+          action: 'ORDER_TRACKING_CHANGED',
+          entityType: 'Order',
+          entityId: orderId,
+          before: { trackingNumber: order.trackingNumber },
+          after: { trackingNumber: next },
         });
       }
 

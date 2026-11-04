@@ -1,3 +1,5 @@
+import { fakeAudit } from '../../../test/helpers/fake-audit.js';
+import { AuditService } from '../../audit/audit.service.js';
 import { Test, TestingModule } from '@nestjs/testing';
 import {
   HeldQtyReleaseConflictError,
@@ -48,6 +50,7 @@ describe('StockHoldExpiryCronService', () => {
       providers: [
         StockHoldExpiryCronService,
         { provide: PrismaService, useValue: prisma },
+        { provide: AuditService, useValue: fakeAudit(prisma) },
       ],
     }).compile();
 

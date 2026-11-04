@@ -61,6 +61,7 @@ describe('AdminVitrinaService weights guard', () => {
       prisma as never,
       {} as never,
       {} as never,
+      {} as never,
     );
     const dto = Object.assign(new UpdateVitrinaAlgorithmDto(), {
       wSales: 50,

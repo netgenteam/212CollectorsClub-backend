@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -9,6 +10,7 @@ import {
   legalTx,
   type LegalActor,
 } from './legal-admin.common.js';
+import { AuditService } from '../audit/audit.service.js';
 import { LegalAuditService } from './legal-audit.service.js';
 import {
   LegalMarkdownService,
@@ -55,6 +57,7 @@ export class LegalPublishService {
     private readonly prisma: PrismaService,
     private readonly markdown: LegalMarkdownService,
     private readonly audit: LegalAuditService,
+    private readonly immutableAudit: AuditService,
   ) {}
 
   async publish(
@@ -82,7 +85,7 @@ export class LegalPublishService {
     const { residuals } = await this.markdown.validate(seen.bodyMd);
     this.assertNoPlaceholders(seen.bodyMd, residuals);
 
-    return legalTx(this.prisma, async (tx, budget) => {
+    return legalTx(this.immutableAudit, async (tx, budget, collector) => {
       // (1) serializes publishers of the same document.
       await tx.$queryRaw`SELECT "id" FROM "Legal_Documents" WHERE "id" = ${doc.id}::uuid FOR UPDATE`;
       // (2) the draft, under its own lock (edit/discard/restore take the
@@ -144,19 +147,30 @@ export class LegalPublishService {
 
       // (5) the draft goes away; (6) audit, same transaction.
       await tx.$executeRaw`DELETE FROM "Legal_Drafts" WHERE "documentId" = ${doc.id}::uuid`;
-      await this.audit.record(tx, {
-        documentId: doc.id,
-        action: 'PUBLISHED',
-        actor,
-        versionNumber: version.versionNumber,
-        meta: {
-          isSubstantial: dto.isSubstantial,
-          effectiveFrom: version.effectiveFrom.toISOString(),
-          draftRevision: draft.revision,
-          restoredFromVersion: draft.restoredFromVersion,
-          changeSummary: dto.changeSummary.slice(0, 200),
+      await this.audit.record(
+        tx,
+        {
+          documentId: doc.id,
+          action: 'PUBLISHED',
+          actor,
+          versionNumber: version.versionNumber,
+          meta: {
+            isSubstantial: dto.isSubstantial,
+            effectiveFrom: version.effectiveFrom.toISOString(),
+            draftRevision: draft.revision,
+            restoredFromVersion: draft.restoredFromVersion,
+            changeSummary: dto.changeSummary.slice(0, 200),
+          },
+          // Story 20.5: LEGAL_DOC_PUBLISHED carries the SHA-256 of the text, never the text.
+          event: {
+            slug: doc.slug,
+            contentHash: createHash('sha256')
+              .update(draft.bodyMd)
+              .digest('hex'),
+          },
         },
-      });
+        collector,
+      );
       return {
         slug: doc.slug,
         versionNumber: version.versionNumber,

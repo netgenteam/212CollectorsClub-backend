@@ -456,21 +456,23 @@ describe('Reveal limit window (e2e, Story 20.4) on a sandbox WITHOUT triggers (s
       .set('Authorization', `Bearer ${admin.token}`)
       .send({ field: 'recipient' });
 
-  /** Seeds `n` ID_DOC_REVEALED rows of `actor` aged `minutes`, directly (the chain is not under test here). */
+  /**
+   * Seeds `n` ID_DOC_REVEALED rows of `actor` aged `minutes`, directly (the chain is not under test here).
+   * Story 20.5: the boot logins now write LOGIN_ADMIN_OK events, so the rows continue after the head.
+   */
   async function seed(
     actor: string,
     n: number,
     minutesAgo: number,
-    startSeq: number,
   ): Promise<void> {
     await c.sb.exec(
       `INSERT INTO "Audit_Events" ("seq","occurredAt","actorType","actorId","action","entityType","entityId",
                                    "hashVersion","prevHash","hash")
-       SELECT $1::bigint + g, clock_timestamp() - make_interval(mins => $3::int) + make_interval(secs => g),
-              'ADMIN', $2::uuid, 'ID_DOC_REVEALED', 'Order', 'seed', 1,
-              repeat('0', 64), md5($4 || g::text) || md5($4 || g::text || 'x')
-         FROM generate_series(1, $5::int) g`,
-      [startSeq, actor, minutesAgo, randomUUID(), n],
+       SELECT (SELECT COALESCE(max("seq"), 0) FROM "Audit_Events") + g, clock_timestamp() - make_interval(mins => $2::int) + make_interval(secs => g),
+              'ADMIN', $1::uuid, 'ID_DOC_REVEALED', 'Order', 'seed', 1,
+              repeat('0', 64), md5($3 || g::text) || md5($3 || g::text || 'x')
+         FROM generate_series(1, $4::int) g`,
+      [actor, minutesAgo, randomUUID(), n],
     );
   }
 
@@ -484,8 +486,8 @@ describe('Reveal limit window (e2e, Story 20.4) on a sandbox WITHOUT triggers (s
 
   it('events older than an hour do not count; the window slides', async () => {
     // Seeded in chronological order (as the chain trigger guarantees in production).
-    await seed(c.admins[0].id, 40, 90, 0); // 40 reveals 90 minutes ago: outside the window
-    await seed(c.admins[1].id, 29, 59, 40); // 29 reveals about an hour ago: inside, the oldest leaves in ~1 min
+    await seed(c.admins[0].id, 40, 90); // 40 reveals 90 minutes ago: outside the window
+    await seed(c.admins[1].id, 29, 59); // 29 reveals about an hour ago: inside, the oldest leaves in ~1 min
     await reveal(c.admins[0]).expect(200);
   });
 

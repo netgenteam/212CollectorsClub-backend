@@ -1,3 +1,4 @@
+import { fakeAudit } from '../../test/helpers/fake-audit.js';
 import { Logger, NotFoundException } from '@nestjs/common';
 import { AdminProductsService } from './admin-products.service.js';
 import { Prisma } from '../generated/prisma/client.js';
@@ -40,6 +41,8 @@ const CATEGORY = {
   name: 'Cartas Sueltas',
   slug: 'cartas-sueltas',
 };
+
+const ADMIN = { id: '11111111-1111-4111-8111-111111111111' };
 
 function buildProductRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -100,6 +103,7 @@ const CREATE_DTO: CreateProductDto = {
  */
 describe('AdminProductsService', () => {
   let service: AdminProductsService;
+  let audit: ReturnType<typeof fakeAudit>;
   let downloader: { download: ReturnType<typeof vi.fn> };
   let prisma: {
     masterCard: { findUnique: ReturnType<typeof vi.fn> };
@@ -107,6 +111,7 @@ describe('AdminProductsService', () => {
       create: ReturnType<typeof vi.fn>;
       findMany: ReturnType<typeof vi.fn>;
       findUnique: ReturnType<typeof vi.fn>;
+      findUniqueOrThrow: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
       delete: ReturnType<typeof vi.fn>;
     };
@@ -141,6 +146,11 @@ describe('AdminProductsService', () => {
         create: vi.fn(),
         findMany: vi.fn(),
         findUnique: vi.fn(),
+        // Story 20.5: the `before` of a manual price/stock change (priceUsd 79.99, stock 25).
+        findUniqueOrThrow: vi.fn().mockResolvedValue({
+          priceUsd: new Prisma.Decimal('79.99'),
+          stock: 25,
+        }),
         update: vi.fn(),
         delete: vi.fn(),
       },
@@ -170,7 +180,12 @@ describe('AdminProductsService', () => {
       ),
     };
     downloader = { download: vi.fn() };
-    service = new AdminProductsService(prisma as never, downloader as never);
+    audit = fakeAudit(prisma);
+    service = new AdminProductsService(
+      prisma as never,
+      downloader as never,
+      audit,
+    );
   });
 
   describe('create', () => {
@@ -578,16 +593,33 @@ describe('AdminProductsService', () => {
 
   describe('update', () => {
     it('sends only the defined fields to Prisma (partial update)', async () => {
-      prisma.product.update.mockResolvedValue(buildProductRow());
-      prisma.product.findUnique.mockResolvedValue(
-        buildProductRow({ priceUsd: '99.99' }),
+      prisma.product.update.mockResolvedValue({
+        ...buildProductRow(),
+        priceUsd: new Prisma.Decimal('99.99'),
+      });
+      prisma.product.findUnique
+        // the audited `before` (read under the row lock), then `findOne` after the update
+        .mockResolvedValueOnce({
+          priceUsd: new Prisma.Decimal('79.99'),
+          stock: 25,
+        })
+        .mockResolvedValue(buildProductRow({ priceUsd: '99.99' }));
+
+      await service.update(buildProductRow().id, { priceUsd: 99.99 }, ADMIN);
+
+      expect(prisma.product.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: buildProductRow().id },
+          data: { priceUsd: 99.99 },
+        }),
       );
-
-      await service.update(buildProductRow().id, { priceUsd: 99.99 });
-
-      expect(prisma.product.update).toHaveBeenCalledWith({
-        where: { id: buildProductRow().id },
-        data: { priceUsd: 99.99 },
+      // Story 20.5: a manual price change is audited in the same transaction, money as strings.
+      expect(audit.events).toHaveLength(1);
+      expect(audit.events[0]).toMatchObject({
+        action: 'PRODUCT_PRICE_CHANGED',
+        actorId: ADMIN.id,
+        before: { priceUsd: '79.99' },
+        after: { priceUsd: '99.99', previousPriceUsd: '79.99' },
       });
     });
 
@@ -649,30 +681,46 @@ describe('AdminProductsService', () => {
 
   describe('adjustStock', () => {
     it('writes ONLY stock to Prisma — never touches heldQty', async () => {
-      prisma.product.update.mockResolvedValue(buildProductRow());
+      prisma.product.update.mockResolvedValue({
+        priceUsd: new Prisma.Decimal('79.99'),
+        stock: 40,
+      });
       prisma.product.findUnique.mockResolvedValue(
         buildProductRow({ stock: 40 }),
       );
 
-      const result = await service.adjustStock(buildProductRow().id, {
-        stock: 40,
-      });
+      const result = await service.adjustStock(
+        buildProductRow().id,
+        { stock: 40 },
+        ADMIN,
+      );
 
       expect(prisma.product.update).toHaveBeenCalledWith({
         where: { id: buildProductRow().id },
         data: { stock: 40 },
+        select: { priceUsd: true, stock: true },
       });
       expect(result.stock).toBe(40);
+      // Story 20.5: PRODUCT_STOCK_ADJUSTED, same transaction, never PRODUCT_PRICE_CHANGED.
+      expect(audit.events).toHaveLength(1);
+      expect(audit.events[0]).toMatchObject({
+        action: 'PRODUCT_STOCK_ADJUSTED',
+        actorId: ADMIN.id,
+        after: { stock: 40, previousStock: 25, delta: 15 },
+      });
     });
 
-    it('throws NotFoundException on P2025 (no such Product)', async () => {
-      prisma.product.update.mockRejectedValue(knownRequestError('P2025'));
+    it('throws NotFoundException when the row lock finds no such Product', async () => {
+      prisma.$queryRaw.mockResolvedValue([]);
 
       await expect(
-        service.adjustStock('00000000-0000-0000-0000-000000000000', {
-          stock: 5,
-        }),
+        service.adjustStock(
+          '00000000-0000-0000-0000-000000000000',
+          { stock: 5 },
+          ADMIN,
+        ),
       ).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.product.update).not.toHaveBeenCalled();
     });
 
     it('rethrows any other error untouched', async () => {
@@ -680,7 +728,7 @@ describe('AdminProductsService', () => {
       prisma.product.update.mockRejectedValue(dbDown);
 
       await expect(
-        service.adjustStock(buildProductRow().id, { stock: 5 }),
+        service.adjustStock(buildProductRow().id, { stock: 5 }, ADMIN),
       ).rejects.toBe(dbDown);
     });
   });

@@ -26,6 +26,11 @@ import {
 import { releaseOrderHolds } from '../common/order-stock-holds.js';
 import { invalidCustomerTokenException } from '../common/customer-auth.guard.js';
 import type { AuthenticatedCustomer } from '../common/customer-auth.guard.js';
+import { AuditService } from '../audit/audit.service.js';
+import {
+  orderStatusChangedEvent,
+  SYSTEM_ACTOR,
+} from '../audit/audit-events.js';
 import { STRIPE_CLIENT } from '../payments-stripe/stripe-client.interface.js';
 import type {
   CreateStripeCheckoutSessionResult,
@@ -204,6 +209,7 @@ export class CheckoutService implements OnModuleInit {
     private readonly fxRates: FxRateService,
     private readonly consent: ConsentService,
     private readonly idDocCrypto: IdDocCryptoService,
+    private readonly audit: AuditService,
   ) {}
 
   /**
@@ -300,8 +306,12 @@ export class CheckoutService implements OnModuleInit {
       ? await customerAnonymizedAtExists(this.prisma)
       : false;
 
-    const result = await this.prisma.$transaction(
-      async (tx): Promise<CheckoutTransactionResult> => {
+    // Story 20.5 (AD-99): `CONSENT_RECORDED` is collected by `recordConsents` and flushed by
+    // `audit.transaction` AFTER the callback: the chain-head lock is taken after the Products
+    // rows (guarded UPDATEs), the Cart row and every other business lock, held only for the
+    // INSERT and the COMMIT. Stripe is called after this transaction, never inside it.
+    const result = await this.audit.transaction(
+      async (tx, audit): Promise<CheckoutTransactionResult> => {
         // Story 20.4 (AC4): FIRST statement with a session (hook for 20.6, see checkout-account-lock.ts).
         if (customer && lockAnonymized) {
           await lockCustomerForCheckout(tx, customer.id);
@@ -469,6 +479,7 @@ export class CheckoutService implements OnModuleInit {
           customerId: customer?.id ?? null,
           accepted,
           keys: ['terms', 'shipping', 'returns'],
+          audit,
         });
 
         // --- AD-6 / AD-50: both rails guardedly reserve stock at checkout.
@@ -667,8 +678,8 @@ export class CheckoutService implements OnModuleInit {
       this.logger.error(
         `Stripe session creation failed for Order ${result.orderId}: ${err instanceof Error ? err.message : String(err)}`,
       );
-      await this.prisma
-        .$transaction(async (tx) => {
+      await this.audit
+        .transaction(async (tx, audit) => {
           await guardedOrderStatusTransition(tx, {
             orderId: result.orderId,
             fromStatus: OrderStatus.PAYMENT_PROCESSING,
@@ -677,6 +688,15 @@ export class CheckoutService implements OnModuleInit {
           });
           // AD-50: same transaction as the transition (winner owns release).
           await releaseOrderHolds(tx, result.orderId);
+          audit.add(
+            orderStatusChangedEvent({
+              actor: SYSTEM_ACTOR,
+              orderId: result.orderId,
+              from: OrderStatus.PAYMENT_PROCESSING,
+              to: OrderStatus.PAYMENT_FAILED,
+              reason: 'STRIPE_SESSION_CREATION_FAILED',
+            }),
+          );
         })
         .catch((transitionErr: unknown) => {
           this.logger.error(

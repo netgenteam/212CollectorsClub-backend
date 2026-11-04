@@ -60,6 +60,11 @@ export class AdminFxController {
   }
 
   @Put('settings')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @ApiOperation({
     summary: 'Change the rate source / thresholds',
     description:
@@ -116,6 +121,11 @@ export class AdminFxController {
   }
 
   @Post('accept-rejected')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Apply the last rejected reading of the active source',

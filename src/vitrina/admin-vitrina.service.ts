@@ -8,6 +8,8 @@ import {
 } from '../common/lock-timeout.js';
 import { buildPageMeta } from '../common/pagination.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { AuditService } from '../audit/audit.service.js';
+import { adminActor, diffPayload } from '../audit/audit-events.js';
 import type {
   UpdateVitrinaAlgorithmDto,
   UpdateVitrinaAlgorithmResponseDto,
@@ -56,6 +58,7 @@ export class AdminVitrinaService {
     private readonly prisma: PrismaService,
     private readonly scoring: VitrinaScoringService,
     private readonly selection: VitrinaSelectionService,
+    private readonly immutableAudit: AuditService,
   ) {}
 
   async getAlgorithm(): Promise<VitrinaAlgorithmResponseDto> {
@@ -80,8 +83,11 @@ export class AdminVitrinaService {
 
     const budget = PUT_LOCK_BUDGET_MS;
     try {
-      await this.prisma.$transaction(
-        async (tx) => {
+      // Story 20.5: `VITRINA_CONFIG_CHANGED` is flushed as the LAST statement, after the
+      // settings row lock (FOR UPDATE) and the writes; a Prisma tx timeout is re-thrown so
+      // it keeps answering 409 VITRINA_BUSY.
+      await this.immutableAudit.transaction(
+        async (tx, audit) => {
           // The wait is bounded IN THE DATABASE: a Prisma tx timeout would
           // queue its ROLLBACK behind the blocked FOR UPDATE on the same
           // connection and never fire. lockSetting's FOR UPDATE is the only
@@ -142,12 +148,37 @@ export class AdminVitrinaService {
               after: after,
             },
           });
+          // Only what changed; non-integer numbers (mmrLambda, priorM) go as strings
+          // (the audit payload has no floats).
+          const asText = (c: Record<string, unknown>) =>
+            Object.fromEntries(
+              Object.entries(c).map(([k, v]) => [
+                k,
+                typeof v === 'number' && !Number.isInteger(v) ? String(v) : v,
+              ]),
+            );
+          const diff = diffPayload(
+            asText(before as unknown as Record<string, unknown>),
+            asText(after),
+            Object.keys(after),
+          );
+          if (diff.changed.length > 0) {
+            audit.add({
+              ...adminActor({ id: adminUserId }),
+              action: 'VITRINA_CONFIG_CHANGED',
+              entityType: 'VitrinaAlgorithmSetting',
+              entityId: VITRINA_SETTING_ID,
+              before: diff.before,
+              after: diff.after,
+              reason: null,
+            });
+          }
         },
         // FOR UPDATE can queue behind a long recompute. Own, SHORTER budget
         // than the recompute's TX_TIMEOUT_MS (60 s): Nginx cuts at
         // proxy_read_timeout 60 s, so the admin must get our 409 VITRINA_BUSY
         // (not Nginx's 504) before that. Not Prisma's 5 s default either.
-        lockedTxOptions(budget),
+        { ...lockedTxOptions(budget), onTimeout: 'rethrow' },
       );
     } catch (err) {
       if (isLockWaitExpired(err)) {

@@ -8,6 +8,7 @@ import {
   Param,
   Patch,
   Post,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -18,6 +19,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { AdminAuthGuard } from '../common/admin-auth.guard.js';
+import type { RequestWithAdminUser } from '../common/admin-auth.guard.js';
 import { ApiException } from '../common/api-exception.js';
 import { strictBody } from '../customer-auth/strict-body.pipe.js';
 import { ShippingAgenciesService } from './shipping-agencies.service.js';
@@ -54,6 +56,11 @@ export class AdminShippingController {
   }
 
   @Post()
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @ApiOperation({
     summary: 'Create a shipping agency',
     description:
@@ -80,11 +87,17 @@ export class AdminShippingController {
   create(
     @Body(strictBody(CreateShippingAgencyDto))
     dto: Readonly<CreateShippingAgencyDto>,
+    @Req() request: RequestWithAdminUser,
   ): Promise<ShippingAgencyAdminDto> {
-    return this.agencies.create(dto);
+    return this.agencies.create(dto, request.user);
   }
 
   @Delete(':id')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
     summary: 'Delete a shipping agency',
@@ -104,12 +117,20 @@ export class AdminShippingController {
     status: HttpStatus.CONFLICT,
     description: 'SHIPPING_AGENCY_IN_USE',
   })
-  remove(@Param('id') id: string): Promise<void> {
+  remove(
+    @Param('id') id: string,
+    @Req() request: RequestWithAdminUser,
+  ): Promise<void> {
     this.assertUuid(id);
-    return this.agencies.remove(id);
+    return this.agencies.remove(id, request.user);
   }
 
   @Patch(':id')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @ApiOperation({
     summary: 'Edit a shipping agency',
     description:
@@ -138,9 +159,10 @@ export class AdminShippingController {
     @Param('id') id: string,
     @Body(strictBody(UpdateShippingAgencyDto))
     dto: Readonly<UpdateShippingAgencyDto>,
+    @Req() request: RequestWithAdminUser,
   ): Promise<ShippingAgencyAdminDto> {
     this.assertUuid(id);
-    return this.agencies.update(id, dto);
+    return this.agencies.update(id, dto, request.user);
   }
 
   /** A non-uuid id is simply "not found" (never a distinct 400). */

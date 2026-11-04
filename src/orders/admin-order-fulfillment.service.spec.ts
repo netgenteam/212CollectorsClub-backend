@@ -1,3 +1,4 @@
+import { fakeAudit } from '../../test/helpers/fake-audit.js';
 import { AdminOrderFulfillmentService } from './admin-order-fulfillment.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AuthenticatedAdminUser } from '../common/admin-auth.guard.js';
@@ -51,6 +52,7 @@ describe('AdminOrderFulfillmentService', () => {
 
     service = new AdminOrderFulfillmentService(
       prisma as unknown as PrismaService,
+      fakeAudit(prisma),
     );
   });
 

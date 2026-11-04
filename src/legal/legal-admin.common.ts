@@ -6,7 +6,7 @@ import {
   LockBudget,
 } from '../common/lock-timeout.js';
 import type { Prisma } from '../generated/prisma/client.js';
-import type { PrismaService } from '../prisma/prisma.service.js';
+import type { AuditCollector, AuditService } from '../audit/audit.service.js';
 
 /** Bound (ms) of every lock wait of the admin legal writes (DB `lock_timeout`). */
 export const LEGAL_LOCK_BUDGET_MS = 10_000;
@@ -93,15 +93,25 @@ export const legalDraftStale = (currentRevision: number | null) =>
  * database guard (race) is 409 `LEGAL_VERSION_CONFLICT` (retryable). Never 500.
  */
 export async function legalTx<T>(
-  prisma: PrismaService,
-  run: (tx: Prisma.TransactionClient, budget: LockBudget) => Promise<T>,
+  audit: AuditService,
+  run: (
+    tx: Prisma.TransactionClient,
+    budget: LockBudget,
+    collector: AuditCollector,
+  ) => Promise<T>,
 ): Promise<T> {
   try {
-    return await prisma.$transaction(async (tx) => {
-      const budget = new LockBudget(tx, LEGAL_LOCK_BUDGET_MS);
-      await budget.arm();
-      return run(tx, budget);
-    }, lockedTxOptions(LEGAL_LOCK_BUDGET_MS));
+    // Story 20.5: the immutable events collected by `run` are flushed as the LAST statement of
+    // this transaction (the document row lock is taken first, the chain lock last). A Prisma
+    // tx timeout is re-thrown to be mapped to LEGAL_DOCUMENT_BUSY, as before.
+    return await audit.transaction(
+      async (tx, collector) => {
+        const budget = new LockBudget(tx, LEGAL_LOCK_BUDGET_MS);
+        await budget.arm();
+        return run(tx, budget, collector);
+      },
+      { ...lockedTxOptions(LEGAL_LOCK_BUDGET_MS), onTimeout: 'rethrow' },
+    );
   } catch (err) {
     if (err instanceof ApiException) throw err;
     if (isLockWaitExpired(err) || isDeadlockOrWriteConflict(err)) {

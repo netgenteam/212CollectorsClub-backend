@@ -398,10 +398,16 @@ const MAX_DEPTH = 8;
 const pathKey = (k: string): string =>
   k.length > 64 ? `${k.slice(0, 64)}...` : k;
 
+/**
+ * decimal.js (what Prisma returns for `Decimal` columns) tags its instances with
+ * `Symbol.toStringTag = 'Decimal'`. The CLASS NAME is not reliable: Prisma's bundled copy is
+ * called `Decimal2`, so a `constructor.name === 'Decimal'` test missed every real Prisma Decimal
+ * (Story 20.5: an unconverted money column would have thrown in production and failed a sale).
+ */
 const isDecimal = (v: unknown): v is { toFixed(): string } =>
   typeof v === 'object' &&
   v !== null &&
-  (v as { constructor?: { name?: string } }).constructor?.name === 'Decimal' &&
+  Object.prototype.toString.call(v) === '[object Decimal]' &&
   typeof (v as { toFixed?: unknown }).toFixed === 'function';
 
 function unsupportedWhy(v: unknown): string {

@@ -1,5 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { AuditService } from '../../audit/audit.service.js';
+import {
+  orderStatusChangedEvent,
+  SYSTEM_ACTOR,
+} from '../../audit/audit-events.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { OrderActorType, OrderStatus } from '../../generated/prisma/enums.js';
@@ -94,7 +99,10 @@ export interface StockHoldExpiryCheckResult {
 export class StockHoldExpiryCronService {
   private readonly logger = new Logger(StockHoldExpiryCronService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Cron(CronExpression.EVERY_5_MINUTES, { name: 'stock-hold-expiry' })
   async handleCron(): Promise<void> {
@@ -170,7 +178,8 @@ export class StockHoldExpiryCronService {
   }
 
   private async expireOneOrder(orderId: string, now: Date): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
+    // Story 20.5: `ORDER_STATUS_CHANGED` (SYSTEM) is flushed as the last statement.
+    await this.audit.transaction(async (tx, audit) => {
       // --- AD-7/AD-16: pending_verification->expired, actorType=cron.
       // Runs FIRST (same ordering the Stripe webhook
       // uses for its own guarded transition + stock mutation): if
@@ -214,6 +223,16 @@ export class StockHoldExpiryCronService {
           data: { releasedAt: now },
         });
       }
+      audit.add(
+        orderStatusChangedEvent({
+          actor: SYSTEM_ACTOR,
+          orderId,
+          from: OrderStatus.PENDING_VERIFICATION,
+          to: OrderStatus.EXPIRED,
+          reason: 'STOCK_HOLD_EXPIRED',
+          extra: { holdsReleased: holds.length },
+        }),
+      );
     });
   }
 }

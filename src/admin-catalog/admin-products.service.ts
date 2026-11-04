@@ -16,6 +16,10 @@ import type {
   ProductMarketReference,
 } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { AuditService } from '../audit/audit.service.js';
+import type { AuditCollector } from '../audit/audit.service.js';
+import { adminActor, payload } from '../audit/audit-events.js';
+import type { AuthenticatedAdminUser } from '../common/admin-auth.guard.js';
 import { mapRarity, slugify } from '../tcg/tcg-mappings.js';
 import {
   MASTER_CARD_IMAGE_DOWNLOADER,
@@ -210,6 +214,7 @@ export class AdminProductsService {
     private readonly prisma: PrismaService,
     @Inject(MASTER_CARD_IMAGE_DOWNLOADER)
     private readonly imageDownloader: MasterCardImageDownloader,
+    private readonly audit: AuditService,
   ) {}
 
   async create(
@@ -478,6 +483,7 @@ export class AdminProductsService {
   async update(
     id: string,
     dto: UpdateProductDto,
+    admin?: Pick<AuthenticatedAdminUser, 'id'>,
   ): Promise<AdminProductResponseDto> {
     const data: Prisma.ProductUncheckedUpdateInput = {};
     if (dto.name !== undefined) data.name = dto.name;
@@ -564,26 +570,40 @@ export class AdminProductsService {
         dto.categoryIds !== undefined ||
         dto.franchise !== undefined ||
         dto.productType !== undefined;
-      if (marketRefs === undefined && !touchesTags) {
+      // Story 20.5: a manual price or stock change is audited in the SAME transaction.
+      const audited = dto.priceUsd !== undefined || dto.stock !== undefined;
+      if (marketRefs === undefined && !touchesTags && !audited) {
         await this.prisma.product.update({ where: { id }, data });
       } else {
         // Story 11.4 semantics: an array (even []) REPLACES every stored
         // reference atomically with the product update; omitted = untouched.
-        await this.prisma.$transaction(async (tx) => {
-          if (touchesTags) {
+        await this.audit.transaction(async (tx, audit) => {
+          if (touchesTags || audited) {
             // Row lock serialises concurrent PATCHes of the same product, so
-            // delete+create of tags never interleaves (AC14).
+            // delete+create of tags never interleaves (AC14), and the audited
+            // `before` of price/stock is exactly the previous committed `after`.
             await this.lockProductOrThrow(tx, id);
           }
+          const prev = audited
+            ? await tx.product.findUnique({
+                where: { id },
+                select: { priceUsd: true, stock: true },
+              })
+            : null;
           const stored = await tx.product.update({
             where: { id },
             data,
             select: {
               franchise: true,
               productType: true,
+              priceUsd: true,
+              stock: true,
               taxonomyTags: { select: { categoryId: true } },
             },
           });
+          if (prev) {
+            this.addCatalogEvents(audit, admin, id, prev, stored);
+          }
           if (marketRefs !== undefined) {
             await tx.productMarketReference.deleteMany({
               where: { productId: id },
@@ -661,11 +681,22 @@ export class AdminProductsService {
   async adjustStock(
     id: string,
     dto: AdjustProductStockDto,
+    admin?: Pick<AuthenticatedAdminUser, 'id'>,
   ): Promise<AdminProductResponseDto> {
     try {
-      await this.prisma.product.update({
-        where: { id },
-        data: { stock: dto.stock },
+      // Story 20.5: `PRODUCT_STOCK_ADJUSTED` in the same transaction (flushed last).
+      await this.audit.transaction(async (tx, audit) => {
+        await this.lockProductOrThrow(tx, id);
+        const prev = await tx.product.findUniqueOrThrow({
+          where: { id },
+          select: { priceUsd: true, stock: true },
+        });
+        const stored = await tx.product.update({
+          where: { id },
+          data: { stock: dto.stock },
+          select: { priceUsd: true, stock: true },
+        });
+        this.addCatalogEvents(audit, admin, id, prev, stored);
       });
     } catch (err) {
       if (isPrismaKnownError(err, 'P2025')) {
@@ -875,6 +906,45 @@ export class AdminProductsService {
         }
         throw err;
       }
+    }
+  }
+
+  /** Story 20.5: price / stock events, only for a real change. Money as strings. */
+  private addCatalogEvents(
+    audit: AuditCollector,
+    admin: Pick<AuthenticatedAdminUser, 'id'> | undefined,
+    productId: string,
+    prev: { priceUsd: Prisma.Decimal; stock: number },
+    next: { priceUsd: Prisma.Decimal; stock: number },
+  ): void {
+    if (!prev.priceUsd.equals(next.priceUsd)) {
+      audit.add({
+        ...adminActor(admin),
+        action: 'PRODUCT_PRICE_CHANGED',
+        entityType: 'Product',
+        entityId: productId,
+        before: payload({ priceUsd: prev.priceUsd }),
+        after: payload({
+          productId,
+          priceUsd: next.priceUsd,
+          previousPriceUsd: prev.priceUsd,
+        }),
+      });
+    }
+    if (prev.stock !== next.stock) {
+      audit.add({
+        ...adminActor(admin),
+        action: 'PRODUCT_STOCK_ADJUSTED',
+        entityType: 'Product',
+        entityId: productId,
+        before: { stock: prev.stock },
+        after: {
+          productId,
+          stock: next.stock,
+          previousStock: prev.stock,
+          delta: next.stock - prev.stock,
+        },
+      });
     }
   }
 

@@ -1,3 +1,5 @@
+import { fakeAudit } from '../../../test/helpers/fake-audit.js';
+import { AuditService } from '../../audit/audit.service.js';
 import { Test, TestingModule } from '@nestjs/testing';
 import { PaymentProcessingTimeoutCronService } from './payment-processing-timeout-cron.service.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
@@ -41,6 +43,7 @@ describe('PaymentProcessingTimeoutCronService', () => {
       providers: [
         PaymentProcessingTimeoutCronService,
         { provide: PrismaService, useValue: prisma },
+        { provide: AuditService, useValue: fakeAudit(prisma) },
       ],
     }).compile();
 

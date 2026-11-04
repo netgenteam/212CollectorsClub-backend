@@ -1500,3 +1500,75 @@ Alineada con las reglas de `buyer-id.ts`: un token con letra de tipo solo cuenta
 - `log_format` de Nginx: no se probó con `nginx -t` (no hay imagen de Nginx en esta máquina); la sintaxis es la estándar.
 - Los RIF de los tests son uno publicado (Banesco) y valores calculados a mano; el caso resto 1 no se ha contrastado con un RIF real (16.4).
 - Nada de esto se ha probado en un VPS real ni con tablas de producción.
+
+## 17. Epic 20, Story 20.5: eventos de auditoría desde las acciones reales, límite del login admin y base de pruebas desechable
+
+### 17.1 `pnpm test:e2e` y `pnpm test:perf` ya no tocan tu base de desarrollo
+
+**Por qué.** `Audit_Events` es inmutable (triggers + `REVOKE`) y, desde esta story, casi cualquier e2e escribe eventos (login admin, FX, vitrina, checkout con consentimiento, legal). Una fila escrita en tu base real **no se puede borrar**. Ya pasó una vez (un e2e de la 20.4 renombró una tabla de un sandbox y, con `search_path = sandbox,public`, una sentencia sin esquema cayó en la tabla real). Además, la suite llevaba meses dejando residuos en tu base (`Acc%`, instantáneas FX, órdenes) y restaurando a mano lo que tocaba.
+
+**Qué hace ahora.** `test/helpers/global-test-db.ts` (primer `globalSetup`; se desmonta el último):
+
+1. Borra clones viejos de corridas muertas (`<base>_e2e_<epoch>_<hex8>` de más de 3 horas; solo nombres de ese formato exacto, nunca la base fuente).
+2. `CREATE DATABASE "<base>_e2e_<epoch>_<hex8>" TEMPLATE "<base>"` (126 MB: unos 2 s). Postgres solo clona una base **sin otras sesiones conectadas**: si hay un servidor de desarrollo conectado, reintenta ~60 s y aborta con un mensaje (no mata ninguna sesión). Salida: parar el servidor, o `E2E_DB_SOURCE=<otra base tranquila>`.
+3. Apunta `DATABASE_URL` (y `MIGRATE_DATABASE_URL` si existe) de **toda la corrida** al clon antes de crear los workers, y comprueba con `SELECT current_database()` que es un clon. Cada archivo de test vuelve a comprobarlo (`test/helpers/assert-test-db.ts`, `setupFiles`): una URL que no case con `^[a-z0-9_]+_e2e_\d{10}_[0-9a-f]{8}$` aborta el archivo.
+4. Al terminar: **verifica la cadena de auditoría completa** del clon (génesis a cabeza, cada hash) con `AuditChainVerifier` e imprime `[e2e db] audit chain of <clon> after the run: OK, N rows verified from genesis`; si está rota, la corrida falla. Después `DROP DATABASE ... WITH (FORCE)` (un `DROP`, no un `DELETE`: los triggers de inmutabilidad no aplican).
+
+Los `global-*` de snapshot (FX, `Product_Daily_Stats`, vitrina, landing, consentimientos huérfanos) siguen funcionando, ahora sobre el clon (son inofensivos y protegen si alguien apunta la suite a otra base); su marcador de aborto lleva la identidad de la base, así que uno viejo de tu base real **no** se restaura en un clon.
+
+Necesita `CREATEDB`: el propietario (`MIGRATE_DATABASE_URL`) o, con una sola URL, el rol actual. Con rol limitado: `DATABASE_URL='<app>' MIGRATE_DATABASE_URL='<propietario>' pnpm test:e2e --no-file-parallelism` (el clon hereda los privilegios del rol).
+
+Comprobado: tras `pnpm test:e2e` completo `SELECT count(*) FROM "Audit_Events"` en `collectorsclub_dev` sigue en 1 y no queda ninguna base `*_e2e_*`.
+
+Efecto colateral: `test/related-products.e2e-spec.ts` fallaba por residuos de tu base (productos NARUTO activos de corridas viejas llenaban los 10 puestos del ranking). Ahora, como corre en un clon, aparca (`isActive=false`) los NARUTO activos mientras dura y los devuelve; tus datos no se tocan.
+
+### 17.2 Qué acción emite qué (todas en la **misma transacción** y como **última sentencia**)
+
+Todas usan `AuditService.transaction(fn)`: `audit.add(ev)` solo acumula; el lock de la cadena y el `INSERT` van **después** de `fn`, justo antes del commit. Ninguna llama a Stripe, correo, proveedor FX ni nada externo dentro de la transacción (Stripe en el checkout se llama **después** de que la transacción confirma; el proveedor FX, antes de abrirla). Un fallo al auditar revierte la acción y responde `503 AUDIT_UNAVAILABLE`, salvo `LOGIN_ADMIN_FAILED` (best-effort).
+
+| Acción | Dónde | Notas |
+|---|---|---|
+| `PAYMENT_PAGO_MOVIL_CONFIRMED/REJECTED` | `AdminOrderPaymentService` | ids, estados, `amountUsd/amountVes/fxRate` como string, nº de holds. Sin referencia bancaria, teléfono ni nombre. |
+| `STRIPE_PAYMENT_STATE_CHANGED` | `StripePaymentsService` | solo si la transición guardada gana; un duplicado devuelve `duplicate` antes de añadir nada (sin lock de cadena). |
+| `ORDER_STATUS_CHANGED` | cumplir/cancelar (admin), cron de expiración de holds y de timeout de `payment_processing` (actor `SYSTEM`), fallo al crear la sesión Stripe | |
+| `ORDER_TRACKING_CHANGED` | `AdminOrderTrackingService` | misma tx que `Order_Tracking_Events` (se mantiene); un valor igual no emite. |
+| `PRODUCT_PRICE_CHANGED`, `PRODUCT_STOCK_ADJUSTED` | `AdminProductsService` (`PATCH /admin/products/:id` y `/:id/stock`) | bloquea la fila (`FOR UPDATE`) para que `before` sea el `after` anterior; solo si cambia. |
+| `SHIPPING_AGENCY_CHANGED` | `ShippingAgenciesService` (crear/editar/borrar) | |
+| `FX_SOURCE_CHANGED`, `FX_RATE_CHANGED` | `AdminFxService` (`PUT /settings`, `accept-rejected`) | `Fx_Setting_Audits` se mantiene. **No** emite el refresco automático del proveedor (cron): no es un ajuste. |
+| `VITRINA_CONFIG_CHANGED` | `AdminVitrinaService.updateAlgorithm` | solo las claves que cambian; los no enteros (`mmrLambda`, `priorM`) como string. |
+| `LEGAL_DOC_PUBLISHED`, `SELLER_IDENTITY_UPDATED` | `LegalAuditService.record(tx, input, collector)` | solo `PUBLISHED` e `IDENTITY_UPDATED` delegan; el resto (`DRAFT_*`, `RESTORED`) no entra al catálogo. El evento lleva el SHA-256 del texto, nunca el texto. La identidad del vendedor es dato público (`publicFields`). |
+| `CONSENT_RECORDED` | `ConsentService.recordConsents(tx, {…, audit})` | **uno por llamada** con `consentRecordIds` y `versions`; checkout (`audit.transaction`), registro y re-aceptación. |
+| `LOGIN_ADMIN_OK`, `LOGOUT_ADMIN`, `LOGIN_ADMIN_FAILED` | `AdminAuthService` | ver 17.3. |
+| `DATA_EXPORTED` | `AuditService.recordDataExport(admin, {dataset, format, rows, filters})` | helper listo; hoy ninguna exportación lo llama (no existe ninguna). |
+
+**Sin emisor hoy (justificado en `test/audit-coverage.spec.ts`):** `REFUND_ISSUED` (no hay ruta de reembolso: se hace a mano en el panel de Stripe), `ADMIN_CREDENTIALS_CHANGED`, `ADMIN_ROLE_CHANGED`, `ADMIN_CREATED`, `ADMIN_DISABLED` (no existe ningún flujo: los admins salen del seed; A104). El test estático falla si se añade una acción `emittedBy: '20.5'` sin emisor ni justificación, o si un servicio del catálogo deja de emitir.
+
+**Bug encontrado y corregido en el guard (20.1):** `toAuditPayload` no reconocía los `Decimal` reales de Prisma (su clase se llama `Decimal2` en el bundle, el guard comparaba `constructor.name === 'Decimal'`): cualquier monto sin convertir habría lanzado `AuditPayloadError` en producción y tumbado una venta. Ahora usa la etiqueta de decimal.js (`[object Decimal]`) y hay un test con un `Prisma.Decimal` real.
+
+### 17.3 Login admin: fail-closed, best-effort y límites (R4)
+
+- **`LOGIN_ADMIN_OK` fail-closed.** BetterAuth crea la sesión con su propia conexión (no puede compartir nuestra transacción): se crea la sesión, se escribe el evento en su propia transacción corta y, si falla, **se borra la sesión** y se responde `503 AUDIT_UNAVAILABLE` (nunca un token sin rastro).
+- **`LOGOUT_ADMIN`** va en la misma transacción que el `DELETE` de la sesión (fail-closed: si no se puede auditar, la sesión no se revoca y se puede reintentar). Solo emite quien borró la fila.
+- **`LOGIN_ADMIN_FAILED` best-effort y fuera del camino de la respuesta.** Se programa tras el veredicto y **no se espera** (el 401 nunca espera el lock de la cadena y su tiempo no distingue usuario conocido de desconocido); un error solo se loguea. Lleva `emailHash` (HMAC salado, A103), `reason` (`UNKNOWN_USER`/`BAD_PASSWORD`) y nunca lo tecleado.
+- **Tres frenos** (`AdminLoginLimiter`, en memoria, una instancia por entorno): (1) por IP, 20 fallos / 15 min; (2) por (IP, usuario), 5 fallos / 15 min (el par, no el usuario solo: nadie puede bloquear al admin real desde otra IP); ambos devuelven `429 ADMIN_LOGIN_RATE_LIMITED` **antes de hashear** y no escriben evento; (3) un presupuesto de la instancia de `LOGIN_ADMIN_FAILED` en la cadena (20/min, 4 escrituras en vuelo): pasado, el evento se descarta, se cuenta y se loguea, el 401 no cambia. Más el `@Throttle` genérico de 60 intentos / 10 min por IP sobre la ruta. Variables en `.env.example`.
+- **¿Fuera de la cadena?** Se revisó: se dejan en la cadena (el FR-139 y A104 los incluyen y un registro de ataques que se puede podar no es auditoría), pero acotados por los tres frenos: el peor caso sostenido son 20 filas/min (28 800/día) frente a lo que antes era ilimitado.
+
+### 17.4 Lo medido (disposable en tu Postgres de desarrollo clonado, `pnpm test:perf`, `test/audit-emission.perf.spec.ts`; "antes" = el mismo código con un `AuditService` que abre la misma transacción y no emite)
+
+| Ruta | antes p50 / p95 | después p50 / p95 | Δ p50 |
+|---|---|---|---|
+| checkout Pago Móvil + 3 consentimientos (1 evento), secuencial | 10,2 / 15,0 ms | 11,0 / 15,0 ms | +0,7 ms |
+| checkout igual, 8 concurrentes | 34,0 / 46,0 ms | 39,5 / 63,5 ms | +5,5 ms |
+| confirmar Pago Móvil | 8,9 / 10,8 ms | 10,2 / 17,2 ms | +1,2 ms |
+| webhook Stripe pagado | 6,4 / 8,5 ms | 8,6 / 12,0 ms | +2,2 ms |
+| `PUT /admin/fx/settings` | 8,0 / 10,0 ms | 9,3 / 11,0 ms | +1,3 ms |
+| `PUT /admin/vitrina/algorithm` | 8,6 / 11,2 ms | 10,3 / 12,9 ms | +1,8 ms |
+
+Sin documentos de consentimiento publicados el checkout no emite nada (medido: −0,6 ms secuencial, −4,4 ms con 8 concurrentes, ruido). **Stripe a 300 ms con 8 checkouts/s durante 6 s (48 checkouts): p50 312 ms, p95 314 ms** (los 300 ms de Stripe más la base; con la llamada tras `record` el 20.1 midió p50 7,5 s). Publicar un documento legal no se midió aparte (lo domina el validador de Markdown; el evento añade un `INSERT` bajo el lock).
+
+### 17.5 Lo que NO está verificado ni hecho
+
+- La cadena completa no se ha probado contra el Postgres de producción ni con volumen real; las cifras son de la máquina de desarrollo, un solo proceso.
+- El refresco automático del proveedor FX (cron) y la recomputación de la vitrina no emiten eventos (no son ajustes de un admin).
+- El límite del login es por instancia (en memoria): con varias instancias detrás de un balanceador cada una cuenta aparte. Hoy hay una por entorno (A101).
+- `ADMIN_*` y `REFUND_ISSUED` esperan a que existan sus flujos (17.2).

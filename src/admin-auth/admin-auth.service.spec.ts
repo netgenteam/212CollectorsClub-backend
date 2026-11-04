@@ -1,7 +1,9 @@
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import * as argon2 from 'argon2';
 import { Prisma } from '../generated/prisma/client.js';
+import { fakeAudit } from '../../test/helpers/fake-audit.js';
 import { AdminAuthService } from './admin-auth.service.js';
+import { AdminLoginLimiter } from './admin-login-limiter.js';
 
 vi.mock('argon2', async (importOriginal) => {
   const actual = await importOriginal<typeof import('argon2')>();
@@ -28,7 +30,9 @@ describe('AdminAuthService', () => {
       updateMany: ReturnType<typeof vi.fn>;
     };
     adminSession: { deleteMany: ReturnType<typeof vi.fn> };
+    $transaction: ReturnType<typeof vi.fn>;
   };
+  let audit: ReturnType<typeof fakeAudit>;
   let createSession: ReturnType<typeof vi.fn>;
   let adminAuth: { $context: Promise<unknown> };
   let service: AdminAuthService;
@@ -49,15 +53,28 @@ describe('AdminAuthService', () => {
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       adminSession: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      $transaction: vi.fn((cb: (tx: unknown) => unknown) => cb({})),
     };
-    createSession = vi.fn().mockResolvedValue({ token: 'session-token' });
+    audit = fakeAudit(prisma);
+    createSession = vi
+      .fn()
+      .mockResolvedValue({ id: 'session-id-1', token: 'session-token' });
     adminAuth = {
       $context: Promise.resolve({
         secret: 'unit-secret',
         internalAdapter: { createSession },
       }),
     };
-    service = new AdminAuthService(prisma as never, adminAuth as never);
+    service = new AdminAuthService(
+      prisma as never,
+      adminAuth as never,
+      audit,
+      {
+        hashEmail: (e: string) =>
+          createHash('sha256').update(e.toLowerCase()).digest('hex'),
+      } as never,
+      new AdminLoginLimiter({ get: () => undefined } as never),
+    );
   });
 
   const existingAdmin = () => ({
@@ -178,6 +195,98 @@ describe('AdminAuthService', () => {
     prisma.adminAccount.create.mockRejectedValueOnce(new Error('boom'));
     await expect(service.login('admin', REAL_PASSWORD)).rejects.toThrow('boom');
   });
+
+  describe('audit (Story 20.5, A104)', () => {
+    it('LOGIN_ADMIN_OK is written in an audit transaction of its own, with the session id', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(existingAdmin());
+
+      await service.login('admin', REAL_PASSWORD);
+
+      expect(audit.events).toHaveLength(1);
+      expect(audit.events[0]).toMatchObject({
+        action: 'LOGIN_ADMIN_OK',
+        actorType: 'ADMIN',
+        actorId: ADMIN_ID,
+        entityId: ADMIN_ID,
+        after: {
+          adminId: ADMIN_ID,
+          method: 'password',
+          sessionId: 'session-id-1',
+        },
+      });
+    });
+
+    it('is FAIL-CLOSED: when the audit write fails the session is deleted and the error (503) propagates', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(existingAdmin());
+      const unavailable = Object.assign(new Error('AUDIT_UNAVAILABLE'), {
+        status: 503,
+      });
+      prisma.$transaction.mockRejectedValueOnce(unavailable);
+
+      await expect(service.login('admin', REAL_PASSWORD)).rejects.toBe(
+        unavailable,
+      );
+      expect(prisma.adminSession.deleteMany).toHaveBeenCalledWith({
+        where: { token: 'session-token' },
+      });
+    });
+
+    it('LOGIN_ADMIN_FAILED is best-effort: still a 401 when the audit write fails, never the audit error', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(existingAdmin());
+      prisma.$transaction.mockRejectedValue(new Error('audit down'));
+      const err = vi
+        .spyOn(
+          (service as unknown as { logger: { error: (m: string) => void } })
+            .logger,
+          'error',
+        )
+        .mockImplementation(() => undefined);
+
+      await expect(
+        service.login('admin', 'wrong-password'),
+      ).rejects.toMatchObject({
+        status: 401,
+        response: { errorCode: 'INVALID_ADMIN_CREDENTIALS' },
+      });
+      await vi.waitFor(() => expect(err).toHaveBeenCalled());
+      expect(String(err.mock.calls[0][0])).toMatch(/LOGIN_ADMIN_FAILED/);
+    });
+
+    it('a failed login carries emailHash and never the typed value; unknown and wrong password differ only inside the event', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(null);
+      await service.login('Someone@Example.com', 'x').catch(() => undefined);
+      prisma.adminUser.findFirst.mockResolvedValue(existingAdmin());
+      await service.login('admin', 'wrong').catch(() => undefined);
+
+      await vi.waitFor(() => expect(audit.events).toHaveLength(2));
+      const [unknown, known] = audit.events;
+      expect(unknown).toMatchObject({
+        action: 'LOGIN_ADMIN_FAILED',
+        actorType: 'ANON',
+        after: { reason: 'UNKNOWN_USER', adminFound: false },
+      });
+      expect(known).toMatchObject({
+        entityId: ADMIN_ID,
+        after: { reason: 'BAD_PASSWORD', adminFound: true },
+      });
+      expect(JSON.stringify(audit.events)).not.toMatch(/Someone|example\.com/i);
+    });
+
+    it('answers 429 BEFORE hashing once the per-user failure limit is reached', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(null);
+      for (let i = 0; i < 5; i++) {
+        await service.login('victim', 'x').catch(() => undefined);
+      }
+      const verifySpy = vi.mocked(argon2.verify);
+      verifySpy.mockClear();
+      await expect(service.login('victim', 'x')).rejects.toMatchObject({
+        status: 429,
+        response: { errorCode: 'ADMIN_LOGIN_RATE_LIMITED' },
+      });
+      expect(verifySpy).not.toHaveBeenCalled();
+      expect(prisma.adminUser.findFirst).toHaveBeenCalledTimes(5);
+    });
+  });
 });
 
 /**
@@ -185,36 +294,55 @@ describe('AdminAuthService', () => {
  * guard-verified) signed bearer value; `deleteMany` keeps it idempotent.
  */
 describe('AdminAuthService.logout', () => {
-  let prisma: { adminSession: { deleteMany: ReturnType<typeof vi.fn> } };
+  let tx: { $queryRaw: ReturnType<typeof vi.fn> };
+  let prisma: { $transaction: ReturnType<typeof vi.fn> };
+  let audit: ReturnType<typeof fakeAudit>;
   let service: AdminAuthService;
 
   beforeEach(() => {
-    prisma = {
-      adminSession: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    tx = {
+      $queryRaw: vi
+        .fn()
+        .mockResolvedValue([{ id: 'sess-1', userId: ADMIN_ID }]),
     };
-    service = new AdminAuthService(prisma as never, {} as never);
+    prisma = { $transaction: vi.fn((cb: (t: unknown) => unknown) => cb(tx)) };
+    audit = fakeAudit(prisma);
+    service = new AdminAuthService(
+      prisma as never,
+      {} as never,
+      audit,
+      {} as never,
+      new AdminLoginLimiter({ get: () => undefined } as never),
+    );
   });
 
-  it('deletes the session identified by the token part of the signed value', async () => {
+  const deletedToken = () =>
+    (tx.$queryRaw.mock.calls[0] as unknown[])[1] as string;
+
+  it('deletes the session identified by the token part of the signed value and emits LOGOUT_ADMIN', async () => {
     await service.logout('sessiontoken123.c2lnbmF0dXJl');
 
-    expect(prisma.adminSession.deleteMany).toHaveBeenCalledWith({
-      where: { token: 'sessiontoken123' },
+    expect(deletedToken()).toBe('sessiontoken123');
+    expect(audit.events).toHaveLength(1);
+    expect(audit.events[0]).toMatchObject({
+      action: 'LOGOUT_ADMIN',
+      actorType: 'ADMIN',
+      actorId: ADMIN_ID,
+      entityId: ADMIN_ID,
     });
   });
 
   it('handles URL-encoded signed values (tokens may contain %2B/%3D)', async () => {
     await service.logout('sessiontoken123.c2ln%2BYXR1cmU%3D');
 
-    expect(prisma.adminSession.deleteMany).toHaveBeenCalledWith({
-      where: { token: 'sessiontoken123' },
-    });
+    expect(deletedToken()).toBe('sessiontoken123');
   });
 
-  it('is idempotent: deleting an already-deleted session is not an error', async () => {
-    prisma.adminSession.deleteMany.mockResolvedValue({ count: 0 });
+  it('is idempotent: deleting an already-deleted session is not an error and emits nothing', async () => {
+    tx.$queryRaw.mockResolvedValue([]);
 
     await expect(service.logout('abc.def')).resolves.toBeUndefined();
+    expect(audit.events).toHaveLength(0);
   });
 
   it('rejects with INVALID_ADMIN_TOKEN on a value with no signature part (defense in depth)', async () => {
@@ -222,6 +350,6 @@ describe('AdminAuthService.logout', () => {
       status: 401,
       response: { errorCode: 'INVALID_ADMIN_TOKEN' },
     });
-    expect(prisma.adminSession.deleteMany).not.toHaveBeenCalled();
+    expect(tx.$queryRaw).not.toHaveBeenCalled();
   });
 });

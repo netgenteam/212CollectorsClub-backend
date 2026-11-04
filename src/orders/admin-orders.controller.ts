@@ -241,6 +241,11 @@ export class AdminOrdersController {
   }
 
   @Post(':orderId/confirm-payment')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @HttpCode(HttpStatus.OK)
   @ApiParam({ name: 'orderId', format: 'uuid' })
   @ApiOperation({
@@ -274,6 +279,11 @@ export class AdminOrdersController {
   }
 
   @Post(':orderId/reject-payment')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @HttpCode(HttpStatus.OK)
   @ApiParam({ name: 'orderId', format: 'uuid' })
   @ApiOperation({
@@ -309,6 +319,11 @@ export class AdminOrdersController {
   }
 
   @Post(':orderId/fulfill')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @HttpCode(HttpStatus.OK)
   @ApiParam({ name: 'orderId', format: 'uuid' })
   @ApiOperation({
@@ -345,6 +360,11 @@ export class AdminOrdersController {
   }
 
   @Post(':orderId/cancel')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @HttpCode(HttpStatus.OK)
   @ApiParam({ name: 'orderId', format: 'uuid' })
   @ApiOperation({
@@ -378,6 +398,11 @@ export class AdminOrdersController {
   }
 
   @Patch(':orderId/tracking')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @HttpCode(HttpStatus.OK)
   @ApiParam({ name: 'orderId', format: 'uuid' })
   @ApiBody({ type: UpdateOrderTrackingDto })

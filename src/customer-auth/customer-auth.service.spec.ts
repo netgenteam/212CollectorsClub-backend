@@ -1,3 +1,4 @@
+import { fakeAudit } from '../../test/helpers/fake-audit.js';
 import * as argon2 from 'argon2';
 import { APIError } from 'better-auth/api';
 import { Prisma } from '../generated/prisma/client.js';
@@ -83,6 +84,7 @@ describe('CustomerAuthService', () => {
           k === 'REGISTER_MIN_DURATION_MS' ? 0 : d,
       } as never,
       consent as never,
+      fakeAudit(prisma as never),
     );
   });
 
@@ -373,6 +375,7 @@ describe('CustomerAuthService', () => {
             k === 'REGISTER_MIN_DURATION_MS' ? 120 : 'http://x',
         } as never,
         consent as never,
+        fakeAudit(prisma as never),
       );
       signUpEmail.mockResolvedValue({ user: { id: 'u1' } });
       prisma.customer.count.mockResolvedValue(1);

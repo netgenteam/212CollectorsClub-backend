@@ -23,13 +23,17 @@ describe('LegalAuditService', () => {
 
   it('record writes through the transaction it is given, with the admin snapshot', async () => {
     const { tx, created } = fakeTx(false);
-    await svc.record(tx, {
-      documentId: 'doc',
-      action: 'PUBLISHED',
-      actor,
-      versionNumber: 3,
-      meta: { a: 1 },
-    });
+    await svc.record(
+      tx,
+      {
+        documentId: 'doc',
+        action: 'PUBLISHED',
+        actor,
+        versionNumber: 3,
+        meta: { a: 1 },
+      },
+      { add: () => undefined },
+    );
     expect(created).toEqual([
       {
         data: {

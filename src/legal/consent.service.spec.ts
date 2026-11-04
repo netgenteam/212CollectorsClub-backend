@@ -1,3 +1,4 @@
+import { fakeAudit } from '../../test/helpers/fake-audit.js';
 import { ApiException } from '../common/api-exception.js';
 import { Logger } from '@nestjs/common';
 import {
@@ -21,14 +22,23 @@ const row = (slug: string, versionNumber: number): Row => ({
 });
 
 function make(rows: Row[], requirePublished = false) {
+  const selectRows = rows.length
+    ? rows
+    : [{ now: NOW, slug: null, id: null, versionNumber: null }];
+  // `executeRaw` records the INSERT of `recordConsents` (now a `$queryRaw ... RETURNING "id"`).
+  const executeRaw = vi.fn().mockResolvedValue(0);
   const queryRaw = vi
     .fn()
-    .mockResolvedValue(
-      rows.length
-        ? rows
-        : [{ now: NOW, slug: null, id: null, versionNumber: null }],
-    );
-  const executeRaw = vi.fn().mockResolvedValue(0);
+    .mockImplementation((strings: TemplateStringsArray, ...vals: unknown[]) => {
+      if (strings.join('?').includes('INSERT INTO "Consent_Records"')) {
+        executeRaw(strings, ...vals);
+        const n = (vals[0] as { values: unknown[] }).values.length / 6;
+        return Promise.resolve(
+          Array.from({ length: n }, (_, i) => ({ id: `cr-${i + 1}` })),
+        );
+      }
+      return Promise.resolve(selectRows);
+    });
   const db = { $queryRaw: queryRaw, $executeRaw: executeRaw };
   const svc = new ConsentService(
     {} as never,
@@ -38,6 +48,7 @@ function make(rows: Row[], requirePublished = false) {
           ? 'true'
           : undefined,
     } as never,
+    {} as never,
   );
   return { svc, db: db as never, executeRaw };
 }
@@ -158,6 +169,7 @@ describe('ConsentService.assertAccepted (Story 19.4, AD-92)', () => {
       });
       expect(Object.keys(r.versions)).toEqual(['terms']);
       await svc.recordConsents(db, {
+        audit: { add: () => undefined },
         context: 'CHECKOUT',
         orderId: 'o1',
         accepted: r,
@@ -188,6 +200,7 @@ describe('ConsentService.assertAccepted (Story 19.4, AD-92)', () => {
       });
       expect(r.versions).toEqual({});
       await svc.recordConsents(db, {
+        audit: { add: () => undefined },
         context: 'CHECKOUT',
         orderId: 'o1',
         accepted: r,
@@ -235,6 +248,7 @@ describe('ConsentService.recordConsents', () => {
       { declared: true },
     );
     await svc.recordConsents(db, {
+      audit: { add: () => undefined },
       context: 'REGISTER',
       customerId: 'c1',
       accepted,
@@ -272,6 +286,7 @@ describe('ConsentService.recordConsents', () => {
       { declared: true },
     );
     await svc.recordConsents(db, {
+      audit: { add: () => undefined },
       context: 'REGISTER',
       customerId: 'c1',
       accepted,
@@ -367,7 +382,7 @@ describe('consentSlugPrefixIgnored (startup WARN trigger)', () => {
       .spyOn(Logger.prototype, 'warn')
       .mockImplementation(() => undefined);
     try {
-      const svc = new ConsentService({} as never, {} as never);
+      const svc = new ConsentService({} as never, {} as never, {} as never);
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining('LEGAL_CONSENT_SLUG_PREFIX'),
       );
@@ -392,34 +407,43 @@ describe('ConsentService.status / reaccept: the age declaration', () => {
     docs?: unknown[];
     last?: unknown[];
   }) {
+    const executeRaw = vi.fn().mockResolvedValue(1);
     const queryRaw = vi
       .fn()
       // reaccept: assertAccepted, then statusIn(docs, last); status alone: docs, last
-      .mockImplementation((strings: TemplateStringsArray) => {
-        const text = strings.join('?');
-        if (text.includes('lastSubstantialVersion'))
-          return Promise.resolve(opts.docs ?? []);
-        if (text.includes('max("version")'))
-          return Promise.resolve(opts.last ?? []);
-        return Promise.resolve([
-          { now: NOW, slug: 'terminos', id: 'idT', versionNumber: 3 },
-          { now: NOW, slug: 'privacidad', id: 'idP', versionNumber: 2 },
-        ]);
-      });
-    const executeRaw = vi.fn().mockResolvedValue(1);
+      .mockImplementation(
+        (strings: TemplateStringsArray, ...vals: unknown[]) => {
+          const text = strings.join('?');
+          if (text.includes('INSERT INTO "Consent_Records"')) {
+            // Story 20.5: the INSERT now RETURNs the ids (recorded like the old $executeRaw one).
+            executeRaw(strings, ...vals);
+            return Promise.resolve([{ id: 'cr-1' }]);
+          }
+          if (text.includes('lastSubstantialVersion'))
+            return Promise.resolve(opts.docs ?? []);
+          if (text.includes('max("version")'))
+            return Promise.resolve(opts.last ?? []);
+          return Promise.resolve([
+            { now: NOW, slug: 'terminos', id: 'idT', versionNumber: 3 },
+            { now: NOW, slug: 'privacidad', id: 'idP', versionNumber: 2 },
+          ]);
+        },
+      );
     const prisma: Record<string, unknown> = {
       $queryRaw: queryRaw,
       $executeRaw: executeRaw,
       consentRecord: { count: vi.fn().mockResolvedValue(opts.ageCount) },
     };
     prisma.$transaction = (cb: (tx: unknown) => unknown) => cb(prisma);
+    const audit = fakeAudit(prisma as never);
     const svc = new ConsentService(
       prisma as never,
       {
         get: () => undefined,
       } as never,
+      audit,
     );
-    return { svc, executeRaw };
+    return { svc, executeRaw, audit };
   }
 
   it('status: ageDeclarationPending is true while the customer has no AGE_DECLARATION', async () => {
@@ -469,6 +493,14 @@ describe('ConsentService.status / reaccept: the age declaration', () => {
       'PRIVACY',
       'AGE_DECLARATION',
     ]);
+    // Story 20.5: ONE CONSENT_RECORDED for the whole call (not one per row).
+    expect(first.audit.events).toHaveLength(1);
+    expect(first.audit.events[0]).toMatchObject({
+      action: 'CONSENT_RECORDED',
+      actorType: 'CUSTOMER',
+      actorId: 'c1',
+      after: { context: 'RE_ACCEPT', versions: { TERMS: 3, PRIVACY: 2 } },
+    });
     const again = make({ ageCount: 1 });
     await again.svc.reaccept('c1', { terms: 3, privacy: 2 }); // no ageDeclared needed
     expect(

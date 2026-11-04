@@ -1,3 +1,4 @@
+import { fakeAudit } from '../../test/helpers/fake-audit.js';
 import { HttpStatus } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client.js';
 import {
@@ -20,6 +21,14 @@ const p2028 = () =>
     clientVersion: 'test',
   });
 
+const mkSvc = (tx: ReturnType<typeof vi.fn>) =>
+  new AdminVitrinaService(
+    { $transaction: tx } as never,
+    {} as never,
+    {} as never,
+    fakeAudit({ $transaction: tx }),
+  );
+
 describe('AdminVitrinaService.updateAlgorithm tx budget (Story 18.9)', () => {
   it('runs the PUT transaction with its own lock budget (> 5 s default, well under Nginx 60 s)', async () => {
     const $transaction = vi.fn().mockRejectedValue(p2028());
@@ -27,6 +36,7 @@ describe('AdminVitrinaService.updateAlgorithm tx budget (Story 18.9)', () => {
       { $transaction } as never,
       {} as never,
       {} as never,
+      fakeAudit({ $transaction }),
     );
     await expect(svc.updateAlgorithm(DTO, 'admin')).rejects.toBeDefined();
     expect($transaction).toHaveBeenCalledTimes(1);
@@ -41,11 +51,7 @@ describe('AdminVitrinaService.updateAlgorithm tx budget (Story 18.9)', () => {
   });
 
   it('answers 409 VITRINA_BUSY (not 500) when the lock wait times out', async () => {
-    const svc = new AdminVitrinaService(
-      { $transaction: vi.fn().mockRejectedValue(p2028()) } as never,
-      {} as never,
-      {} as never,
-    );
+    const svc = mkSvc(vi.fn().mockRejectedValue(p2028()));
     const err = await svc
       .updateAlgorithm(DTO, 'admin')
       .catch((e: unknown) => e);
@@ -75,11 +81,7 @@ describe('AdminVitrinaService.updateAlgorithm tx budget (Story 18.9)', () => {
     ],
   ])('maps SQLSTATE 55P03 (%s) to 409 VITRINA_BUSY', async (_n, extra) => {
     const e = Object.assign(new Error('raw'), extra);
-    const svc = new AdminVitrinaService(
-      { $transaction: vi.fn().mockRejectedValue(e) } as never,
-      {} as never,
-      {} as never,
-    );
+    const svc = mkSvc(vi.fn().mockRejectedValue(e));
     const err = await svc
       .updateAlgorithm(DTO, 'admin')
       .catch((x: unknown) => x);
@@ -90,11 +92,7 @@ describe('AdminVitrinaService.updateAlgorithm tx budget (Story 18.9)', () => {
 
   it('other errors are not masked', async () => {
     const boom = new Error('boom');
-    const svc = new AdminVitrinaService(
-      { $transaction: vi.fn().mockRejectedValue(boom) } as never,
-      {} as never,
-      {} as never,
-    );
+    const svc = mkSvc(vi.fn().mockRejectedValue(boom));
     await expect(svc.updateAlgorithm(DTO, 'admin')).rejects.toBe(boom);
   });
 });

@@ -1,4 +1,6 @@
+import { fakeAudit } from '../../test/helpers/fake-audit.js';
 import { AdminOrderPaymentService } from './admin-order-payment.service.js';
+import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { UPLOADS_PRIVATE_ROOT } from './upload-paths.constants.js';
 import { join } from 'node:path';
@@ -41,7 +43,9 @@ describe('AdminOrderPaymentService', () => {
       findMany: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
     };
+    order: { findUniqueOrThrow: ReturnType<typeof vi.fn> };
   };
+  let audit: ReturnType<typeof fakeAudit>;
   let prisma: {
     $transaction: ReturnType<typeof vi.fn>;
     order: {
@@ -58,6 +62,15 @@ describe('AdminOrderPaymentService', () => {
       $executeRaw: vi.fn(),
       orderStatusHistory: { create: vi.fn() },
       stockHold: { findMany: vi.fn(), update: vi.fn() },
+      // Story 20.5: the audit event reads the order inside the transaction.
+      order: {
+        findUniqueOrThrow: vi.fn().mockResolvedValue({
+          totalUsd: new Prisma.Decimal('12.5'),
+          totalVes: new Prisma.Decimal('4567.8'),
+          fxRateVesPerUsd: new Prisma.Decimal('365.4'),
+          proofOfPayments: [{ id: 'proof-1' }],
+        }),
+      },
     };
     prisma = {
       $transaction: vi.fn((cb: (tx: unknown) => unknown) => cb(tx)),
@@ -65,7 +78,11 @@ describe('AdminOrderPaymentService', () => {
       proofOfPayment: { findFirst: vi.fn() },
     };
 
-    service = new AdminOrderPaymentService(prisma as unknown as PrismaService);
+    audit = fakeAudit(prisma);
+    service = new AdminOrderPaymentService(
+      prisma as unknown as PrismaService,
+      audit,
+    );
   });
 
   describe('getProofOfPaymentFile', () => {
@@ -166,6 +183,25 @@ describe('AdminOrderPaymentService', () => {
       });
 
       const result = await service.confirmPayment('order-1', ADMIN);
+
+      // Story 20.5: exactly one event, money as strings, no bank reference / phone / name.
+      expect(audit.events).toHaveLength(1);
+      expect(audit.events[0]).toMatchObject({
+        action: 'PAYMENT_PAGO_MOVIL_CONFIRMED',
+        actorType: 'ADMIN',
+        actorId: ADMIN.id,
+        entityType: 'Order',
+        entityId: 'order-1',
+        after: {
+          orderStatus: 'PAID',
+          previousStatus: 'PENDING_VERIFICATION',
+          proofId: 'proof-1',
+          amountUsd: '12.5',
+          amountVes: '4567.8',
+          fxRate: '365.4',
+          stockCommitted: 2,
+        },
+      });
 
       expect(tx.$executeRaw).toHaveBeenCalledTimes(3);
       expect(tx.orderStatusHistory.create).toHaveBeenCalledWith({
@@ -271,6 +307,12 @@ describe('AdminOrderPaymentService', () => {
       });
 
       const result = await service.rejectPayment('order-1', ADMIN);
+
+      expect(audit.events).toHaveLength(1);
+      expect(audit.events[0]).toMatchObject({
+        action: 'PAYMENT_PAGO_MOVIL_REJECTED',
+        after: { orderStatus: 'PAYMENT_REJECTED', holdsReleased: 1 },
+      });
 
       expect(tx.orderStatusHistory.create).toHaveBeenCalledWith({
         data: expect.objectContaining({

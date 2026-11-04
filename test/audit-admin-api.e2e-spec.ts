@@ -26,6 +26,7 @@ import {
   createAuditSandbox,
 } from './helpers/audit-sandbox.js';
 import type { AuditSandbox } from './helpers/audit-sandbox.js';
+import { mintAdminToken } from './helpers/admin-session.js';
 
 /**
  * Story 20.1 (AC7, AC9, AC10): the whole app, with its connection pointed at a
@@ -74,17 +75,16 @@ async function boot(opts: { noTriggers?: boolean }): Promise<Ctx> {
     create: { username: USER, email: EMAIL, passwordHash },
     update: { email: EMAIL, passwordHash },
   });
-  const login = await request(app.getHttpServer())
-    .post('/api/v1/admin/auth/login')
-    .send({ usernameOrEmail: USER, password: PASS })
-    .expect(200);
+  // Story 20.5: not through the login endpoint (it audits LOGIN_ADMIN_OK; this suite starts from an
+  // EMPTY chain on purpose).
+  const token = await mintAdminToken(app, admin.id);
   return {
     app,
     sb,
     prisma,
     savedUrl,
     adminId: admin.id,
-    token: (login.body as { accessToken: string }).accessToken,
+    token,
   };
 }
 

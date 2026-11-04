@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Req,
   UploadedFiles,
   UseGuards,
   UseInterceptors,
@@ -24,6 +25,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { AdminAuthGuard } from '../common/admin-auth.guard.js';
+import type { RequestWithAdminUser } from '../common/admin-auth.guard.js';
 import { AdminProductsService } from './admin-products.service.js';
 import { CreateProductDto } from './dto/create-product.dto.js';
 import { UpdateProductDto } from './dto/update-product.dto.js';
@@ -184,6 +186,11 @@ export class AdminProductsController {
   }
 
   @Patch(':id')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Update a Product (including deactivate/reactivate via isActive)',
@@ -208,11 +215,17 @@ export class AdminProductsController {
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateProductDto,
+    @Req() request: RequestWithAdminUser,
   ): Promise<AdminProductResponseDto> {
-    return this.adminProductsService.update(id, dto);
+    return this.adminProductsService.update(id, dto, request.user);
   }
 
   @Patch(':id/stock')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: "Directly set a Product's stock count (inventory correction)",
@@ -232,8 +245,9 @@ export class AdminProductsController {
   adjustStock(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: AdjustProductStockDto,
+    @Req() request: RequestWithAdminUser,
   ): Promise<AdminProductResponseDto> {
-    return this.adminProductsService.adjustStock(id, dto);
+    return this.adminProductsService.adjustStock(id, dto, request.user);
   }
 
   @Delete(':id')
