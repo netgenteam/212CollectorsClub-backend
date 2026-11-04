@@ -26,6 +26,7 @@ import { VitrinaModule } from './vitrina/vitrina.module.js';
 import { LegalModule } from './legal/legal.module.js';
 import { WishlistModule } from './wishlist/wishlist.module.js';
 import { AuditModule } from './audit/audit.module.js';
+import { CryptoModule } from './crypto/crypto.module.js';
 
 @Module({
   imports: [
@@ -82,6 +83,8 @@ import { AuditModule } from './audit/audit.module.js';
     // Story 19.1 (AD-88..91): legal documents, safe Markdown, public read API.
     LegalModule,
     AuditModule,
+    // Story 20.2 (AD-95): ID document crypto; aborts the boot if the keyring is invalid.
+    CryptoModule,
   ],
   controllers: [AppController],
   providers: [AppService],

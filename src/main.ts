@@ -8,6 +8,7 @@ import { AppModule } from './app.module.js';
 import { applyRequestContext } from './common/request-id.middleware.js';
 import { applyJsonBodyLimit } from './common/json-body-limit.js';
 import { createGlobalValidationPipe } from './common/global-validation-pipe.js';
+import { RedactingLogger } from './common/redacting-logger.js';
 import {
   PUBLIC_STATIC_PREFIX,
   UPLOADS_PUBLIC_ROOT,
@@ -18,6 +19,8 @@ async function bootstrap() {
     // Story 14.3 (AD-47): exposes req.rawBody (Buffer) for Stripe webhook
     // signature verification; JSON parsing of every route is unchanged.
     rawBody: true,
+    // Story 20.2 (FR-129): no cedula/secret ever reaches a log line.
+    logger: new RedactingLogger(),
   });
   const configService = app.get(ConfigService);
   const port = configService.get<number>('PORT', 3000);

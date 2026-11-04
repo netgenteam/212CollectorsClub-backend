@@ -72,6 +72,12 @@ log "environment=$ENVIRONMENT app_dir=$APP_DIR service=$SERVICE_NAME ref=$GIT_RE
 for var in CUSTOMER_AUTH_SECRET; do
   grep -Eq "^${var}=.+" "$ENV_FILE" || fail "$var is missing in $ENV_FILE — see docs/deployment.md §1.5"
 done
+# Story 20.2: the service does not boot without the ID document keyring either
+# (docs/deployment.md section 14). Only presence is checked here; the app
+# validates the values at boot and never prints them.
+for var in IDDOC_ENC_KEYS IDDOC_ENC_ACTIVE_KEY IDDOC_BLIND_KEY; do
+  grep -Eq "^${var}=.+" "$ENV_FILE" || fail "$var is missing in $ENV_FILE — see docs/deployment.md §14"
+done
 for var in ADMIN_AUTH_SECRET FRONTEND_URL; do
   grep -Eq "^${var}=.+" "$ENV_FILE" || log "WARNING: $var is not set in $ENV_FILE — see docs/deployment.md §1.5"
 done

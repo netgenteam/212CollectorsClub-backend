@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import tsconfigPaths from 'vite-tsconfig-paths';
+import { generateIdDocTestEnv } from './test/helpers/iddoc-test-keys.js';
 
 export default defineConfig({
   plugins: [tsconfigPaths()],
@@ -9,7 +10,7 @@ export default defineConfig({
     include: ['**/*.e2e-spec.ts'],
     // Story 19.4: the consent documents resolve to the SANDBOX slugs
     // (`e2e-terminos`, ...): no e2e ever publishes on a real, immutable document.
-    env: { LEGAL_CONSENT_SLUG_PREFIX: 'e2e-' },
+    env: { LEGAL_CONSENT_SLUG_PREFIX: 'e2e-', ...generateIdDocTestEnv() },
     // Shared dev Postgres: specs mutate stock/orders, so files run serially (AD-48).
     fileParallelism: false,
     // Story 18.3: keep the real (possibly weeks-old) FX row usable by checkout.

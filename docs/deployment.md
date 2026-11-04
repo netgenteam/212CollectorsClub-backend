@@ -1132,3 +1132,63 @@ Quien tenga privilegios plenos en la BD puede desactivar los triggers y reescrib
 ### 13.8 Volver atrás
 
 Las tablas y triggers nuevos son inertes para la versión anterior del código: despliega la anterior y deja las migraciones aplicadas. `Audit_Events` no se puede vaciar por diseño (solo el propietario puede `DROP TABLE`, y no se debe). Para volver al rol único, quita `MIGRATE_DATABASE_URL` y pon en `DATABASE_URL` la del propietario; el rol limitado puede quedarse sin efecto, o eliminarse con `DROP OWNED BY collectorsclub_<entorno>_app; DROP ROLE collectorsclub_<entorno>_app;`.
+
+## 14. Epic 20, Story 20.2: claves de cifrado de la cédula (módulo `crypto`)
+
+Esta sección es para Angel. Story 20.2 solo entrega las utilidades (cifrado AES-256-GCM, índice ciego, normalización, enmascarado, redacción de logs); **todavía no cifra ninguna fila** (eso es 20.3) y no tiene migración. Aun así, **la app ya no arranca sin las tres variables** (también en desarrollo y en test), así que hay que prepararlas antes del próximo despliegue.
+
+### 14.1 Variables (en el `.env` de cada entorno, nunca en el repo)
+
+| Variable | Contenido | Notas |
+|---|---|---|
+| `IDDOC_ENC_KEYS` | `1:<base64 de 32 bytes>[,2:<...>]` | Llavero: versión y clave. Descifrar usa la versión que lleva cada valor (`v1:...`), así que tras rotar siguen leyéndose los valores antiguos. |
+| `IDDOC_ENC_ACTIVE_KEY` | `1` | Versión con la que se cifra lo nuevo. Debe existir en el llavero. |
+| `IDDOC_BLIND_KEY` | base64 de ≥ 32 bytes | Clave del índice ciego (HMAC) y del hash de email de la auditoría. **Distinta** de toda clave de cifrado. |
+| `RIF_CHECKDIGIT_STRICT` | `false` (opcional) | Con `false` el RIF se valida solo por formato (por si el dígito verificador del SENIAT divergiera, A98). |
+
+Genera cada clave por separado, en tu máquina o en el servidor: `openssl rand -base64 32`. Cada variable lleva una clave **distinta**. `.env.example` solo trae marcadores (`<generate ...>`), que no son claves válidas: si alguien copia el ejemplo tal cual, el arranque falla con un mensaje claro. **No hay clave por defecto en ningún entorno.** `deploy/deploy.sh` aborta el despliegue si falta alguna de las tres líneas en `/opt/212cc/<entorno>/shared/.env`.
+
+Tu `.env` de desarrollo local también las necesita (el servidor de desarrollo no arrancará hasta que las añadas): genera tres claves con el comando anterior y pégalas a mano. Los tests (`pnpm test`, `test:e2e`, `test:perf`) generan claves desechables al vuelo y no usan las tuyas.
+
+El arranque aborta, con la lista de **todos** los problemas y sin imprimir ninguna clave, si: falta una variable; una clave no es base64 o no mide exactamente 32 bytes (la ciega, al menos 32); hay versiones repetidas o no enteras; la versión activa no existe; una clave son todos bytes iguales (marcador); o la ciega coincide con una de cifrado.
+
+### 14.2 Si pierdes `IDDOC_ENC_KEYS`: las cédulas son irrecuperables
+
+La cédula es obligatoria en las facturas y se conserva durante el plazo fiscal. Se guarda **solo cifrada** (desde 20.3). Sin la clave de la versión que cifró un valor, ese valor no se puede descifrar por ningún medio (ni nosotros ni PostgreSQL): habría que volver a pedir la cédula a cada comprador, y las órdenes antiguas perderían el dato de la factura. Tampoco sirve la copia de la BD sin la clave.
+
+**Respaldo (haz esto ANTES de que 20.3 cifre datos reales y antes de activar una versión nueva):**
+
+1. Guarda `IDDOC_ENC_KEYS`, `IDDOC_ENC_ACTIVE_KEY` e `IDDOC_BLIND_KEY` en un gestor de secretos (o, como mínimo, en un archivo cifrado o gestor de contraseñas) que **no** esté en el servidor ni en el mismo almacenamiento que los backups de la base de datos. Quien tenga el backup de la BD y la clave puede leer todas las cédulas; guárdalas separadas.
+2. Al menos **dos copias** en sitios distintos, con dos personas de confianza que sepan dónde están.
+3. Tras cada cambio del llavero, actualiza las copias **antes** de reiniciar el servicio.
+4. Prueba de restauración: con un backup de la BD en un clon y las claves del gestor, el endpoint de revelado (20.4) o el script `iddoc:report` (20.3) debe poder descifrar una fila. Hazlo antes de lanzar y tras cada rotación.
+5. Nunca elimines una versión del llavero mientras exista alguna fila cifrada con ella.
+
+### 14.3 Rotación de la clave de cifrado
+
+1. Genera la clave nueva y añade `2:<clave>` a `IDDOC_ENC_KEYS` (conservando la `1`). Copia el llavero actualizado al gestor de secretos.
+2. Cambia `IDDOC_ENC_ACTIVE_KEY=2` y reinicia: lo nuevo se cifra con la `2`, lo antiguo sigue leyéndose con la `1` (sin ventana de parada).
+3. Re-cifra lo antiguo con el script de 20.3 (`pnpm iddoc:reencrypt --to 2`; aún no existe). Cuando `iddoc:report` no muestre filas `v1`, y solo entonces, puedes retirar la `1`.
+
+El **índice ciego no rota con la clave de cifrado** (A97). Cambiar `IDDOC_BLIND_KEY` obliga a descifrar y recalcular el índice de todas las filas (procedimiento previsto en 20.3); hasta entonces, no la cambies.
+
+### 14.4 Qué protege el índice ciego, y qué no
+
+`blind = HMAC-SHA256(IDDOC_BLIND_KEY, "iddoc:v1:" + tipo + dígitos)`. Sirve para buscar por cédula exacta y detectar duplicados sin guardar la cédula en claro. **Solo protege mientras `IDDOC_BLIND_KEY` no se filtre**: una cédula tiene pocos valores posibles (unos 40 millones por tipo), así que quien tenga la clave ciega y la BD puede probarlos todos en minutos y recuperar las cédulas. Por eso la clave ciega vive fuera de la BD y de los backups, igual que las de cifrado. Una función hash sin clave (SHA-256 a secas) se descartó por la misma razón: se rompería sin necesidad de ninguna filtración. Además el índice revela **igualdad** entre filas (dos órdenes con el mismo valor ciego son de la misma cédula), cosa aceptada para detectar duplicados (A97). Nunca hay búsqueda parcial ni `LIKE`.
+
+La normalización une todas las grafías de la misma cédula (`V-12.345.678`, `v12345678`, ` V 12 345 678 `, E/J/P/G) y no une cédulas distintas: el tipo y los dígitos (incluidos los ceros a la izquierda) cuentan siempre. Un valor heredado que no se puede interpretar (por ejemplo `12345678` sin tipo) se conserva en mayúsculas sin adivinar el tipo, se marca `unparsed` y **no recibe índice ciego**.
+
+### 14.5 Logs
+
+El logger de la app (`RedactingLogger`, en `main.ts` y en `pnpm tcg:ingest`) sustituye por `[REDACTED]` los campos cuyo nombre contiene `idDoc`, `buyerId`, `recipientId`, `cedula`, `password`, `token`, `authorization`, `cookie` o `secret`, y por `[REDACTED_ID]` cualquier texto con forma de cédula (`V-12345678`, `v-12.345.678`, `J-12345678-9`...), también dentro de mensajes de error y *stack traces* (por ejemplo un error de Prisma/Postgres que repite el valor). No altera UUID, fechas ni importes. Límite conocido: solo redacta lo que pasa por el logger de Nest; un `console.log` directo o un log de otro proceso (Nginx, journald de otro servicio) no se cubre. La app no activa el log de consultas de Prisma (que mostraría parámetros): no lo actives en producción.
+
+### 14.6 Lo medido (`pnpm test:perf`, `test/iddoc-crypto.perf.spec.ts`, máquina de desarrollo)
+
+- Redacción por línea de log: 0,23 µs (línea sin cédula, con pid de 7 dígitos, el peor caso del filtro previo), 0,28 µs (línea con cédula), 1,4 µs (objeto de 9 campos). Es despreciable aun con miles de líneas por segundo.
+- Lote de 20 000 cédulas (normalizar + cifrar + índice ciego): 163 ms en total (≈ 8 µs por valor), retraso máximo del event loop 5,4 ms, porque `protectMany` cede el control cada 200 valores. Un backfill (20.3) puede ir por lotes sin bloquear el servidor.
+
+### 14.7 Lo que NO está verificado
+
+- Nada se ha probado en un VPS real ni con las claves reales de Angel; los tests usan claves desechables.
+- Con `deploy.sh`, solo se comprueba que las líneas existan; la validez la comprueba el arranque de la app (si falla, el servicio no levanta y el despliegue lo detecta en el reinicio).
+- El respaldo y la prueba de restauración de las claves (14.2) son un procedimiento operativo que Angel debe ejecutar; el código no lo hace.

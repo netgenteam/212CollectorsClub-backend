@@ -1,3 +1,5 @@
+import { looksLikeIdDoc } from '../common/id-doc-pattern.js';
+
 /**
  * Story 20.1 (AD-99, FR-139, NFR-20.5): the `before`/`after` of an audit event
  * hold ONLY strings, safe integers, booleans and null (nested objects/arrays of
@@ -24,7 +26,6 @@ const PII_KEY =
 /** Never allowed, not even as a hash. */
 const SECRET_KEY = /(passw|secret|token|ciphertext|cookie|authorization)/i;
 const EMAIL_VALUE = /[^\s@]+@[^\s@]+\.[^\s@]+/;
-const ID_DOC_VALUE = /^[VEJGP]-?\d{5,10}(-?\d)?$/i;
 
 export function assertAuditPayload(
   value: unknown,
@@ -49,7 +50,7 @@ export function assertAuditPayload(
     if (EMAIL_VALUE.test(value)) {
       throw new AuditPayloadError(path, 'looks like an email address (PII)');
     }
-    if (ID_DOC_VALUE.test(value.trim())) {
+    if (looksLikeIdDoc(value)) {
       throw new AuditPayloadError(path, 'looks like an ID document (PII)');
     }
     return;

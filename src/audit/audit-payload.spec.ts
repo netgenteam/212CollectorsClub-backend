@@ -54,6 +54,25 @@ describe('assertAuditPayload: before/after never admit floats or PII (Story 20.1
     }
   });
 
+  it('uses the shared ID pattern (Story 20.2): spaced/dotted forms are rejected, UUIDs, dates and hashes are not', () => {
+    for (const bad of [
+      'V 12345678',
+      'v-12.345.678',
+      'E1234567',
+      'J-12345678-9',
+    ]) {
+      expect(() => assertAuditPayload({ note: bad })).toThrow(/ID document/);
+    }
+    for (const ok of [
+      'e1234567-89ab-4cde-8f01-23456789abcd',
+      '2026-11-03',
+      'PENDING12345',
+      'a'.repeat(64),
+    ]) {
+      expect(() => assertAuditPayload({ note: ok })).not.toThrow();
+    }
+  });
+
   it('a salted hash of an email is allowed under a *Hash key', () => {
     expect(() =>
       assertAuditPayload({ emailHash: 'f'.repeat(64) }),

@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { RedactingLogger } from '../../common/redacting-logger.js';
 import { TcgCliModule } from './tcg-cli.module.js';
 import { parseIngestArgs } from './ingest-args.js';
 import { TcgIngestService } from '../tcg-ingest.service.js';
@@ -8,7 +9,7 @@ import { TcgIngestService } from '../tcg-ingest.service.js';
 async function main(): Promise<number> {
   const overrides = parseIngestArgs(process.argv.slice(2));
   const app = await NestFactory.createApplicationContext(TcgCliModule, {
-    logger: ['log', 'warn', 'error'],
+    logger: new RedactingLogger({ logLevels: ['log', 'warn', 'error'] }),
   });
   try {
     const service = app.get(TcgIngestService);
