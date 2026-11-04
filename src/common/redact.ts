@@ -57,6 +57,22 @@ export const REDACTED_ENC = '[REDACTED_ENC]';
 
 const MAX_DEPTH = 8;
 const MAX_NODES = 2_000;
+/**
+ * The cedula regexes are quadratic on one long unbroken run of digits (measured, dev machine:
+ * 8 000 digits 24 ms, 32 000 digits 0.4 s, 100 000 digits 3.9-5.3 s of blocked event loop), and this runs on
+ * EVERY log line in the main thread. A longer string is cut (the cut tail is never logged, so it
+ * cannot leak either) and one `redactDeep` call spends at most `MAX_TOTAL_CHARS` characters on
+ * strings; the rest becomes a marker. Object keys are cut at `MAX_KEY_CHARS`.
+ */
+export const MAX_STRING_CHARS = 8_192;
+/**
+ * Only a string with a run of 64+ digits/dots can hit the quadratic case (`1111...`, `111.111.111...`):
+ * every other shape was measured linear (1 MB of `x` or of ordinary text costs milliseconds), so a
+ * long ordinary message is NOT cut and does not spend the budget.
+ */
+const RISKY_RUN = /[\d.]{64}/;
+export const MAX_TOTAL_CHARS = 32_768;
+export const MAX_KEY_CHARS = 256;
 /** Cheap gate: every cedula token needs 5 digits in a row or a grouped `d.ddd.ddd`. */
 const MAYBE_ID =
   /\d{5}|\d[.\s]\d{3}[.\s]\d{3}|[pP][\s.-][A-Za-z0-9]{5}|iddoc|id_doc|cedula|buyerid|buyer_id|recipientid|recipient_id|v\d{1,4}:/i;
@@ -67,6 +83,9 @@ const NON_ASCII = /[^\x00-\x7F]/;
 /** Replaces cedula-shaped tokens in free text. A line without 5 digits skips the regex. */
 export function redactString(input: string): string {
   if (input.length === 0) return input;
+  if (input.length > MAX_STRING_CHARS && RISKY_RUN.test(input)) {
+    return `${redactString(input.slice(0, MAX_STRING_CHARS))}[TRUNCATED:${input.length - MAX_STRING_CHARS} chars]`;
+  }
   // `Ｖ-７０１２３４５６` (fullwidth) and `V<ZWSP>-…` are the same cedula once folded: look at the
   // folded text, and if it holds one, return the folded-and-redacted text (never the original).
   if (NON_ASCII.test(input)) {
@@ -108,11 +127,18 @@ function redactAscii(input: string): string {
 
 interface Budget {
   nodes: number;
+  chars: number;
   seen: WeakSet<object>;
 }
 
 function walk(value: unknown, depth: number, b: Budget): unknown {
-  if (typeof value === 'string') return redactString(value);
+  if (typeof value === 'string') {
+    if (value.length > 64 && RISKY_RUN.test(value)) {
+      b.chars += Math.min(value.length, MAX_STRING_CHARS);
+      if (b.chars > MAX_TOTAL_CHARS) return '[Truncated]';
+    }
+    return redactString(value);
+  }
   if (value === null || typeof value !== 'object') {
     return typeof value === 'function' || typeof value === 'symbol'
       ? String(value.toString())
@@ -127,16 +153,20 @@ function walk(value: unknown, depth: number, b: Budget): unknown {
     if (value instanceof Error) {
       const out: Record<string, unknown> = {
         name: value.name,
-        message: redactString(value.message),
+        message: walk(String(value.message), depth + 1, b),
       };
-      if (value.stack) out.stack = redactString(value.stack);
+      if (value.stack) out.stack = walk(String(value.stack), depth + 1, b);
       for (const k of Object.keys(value)) {
         if (!(k in out)) out[k] = fieldOf(value, k, depth, b);
       }
       return out;
     }
     const out: Record<string, unknown> = {};
-    for (const k of Object.keys(value)) out[k] = fieldOf(value, k, depth, b);
+    for (const k of Object.keys(value)) {
+      const shown =
+        k.length > MAX_KEY_CHARS ? `${k.slice(0, MAX_KEY_CHARS)}...` : k;
+      out[shown] = fieldOf(value, k, depth, b);
+    }
     return out;
   } finally {
     // Siblings may legitimately share a node; only an ancestor is a cycle.
@@ -155,5 +185,5 @@ function fieldOf(obj: object, key: string, depth: number, b: Budget): unknown {
 
 /** Deep copy of `value` with sensitive keys masked and cedula-shaped strings replaced. */
 export function redactDeep<T = unknown>(value: T): T {
-  return walk(value, 0, { nodes: 0, seen: new WeakSet() }) as T;
+  return walk(value, 0, { nodes: 0, chars: 0, seen: new WeakSet() }) as T;
 }

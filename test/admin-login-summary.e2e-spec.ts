@@ -233,12 +233,15 @@ describe(
         }
         const rows = await waitFor(async () => {
           const r = await sql(
-            `SELECT "after" FROM "Audit_Events" WHERE "action"='LOGIN_ADMIN_FAILED_SUMMARY' AND "seq" > $1`,
+            `SELECT "after", host("ip") AS ip, "requestId" AS rid FROM "Audit_Events" WHERE "action"='LOGIN_ADMIN_FAILED_SUMMARY' AND "seq" > $1`,
             [since],
           );
           return r.length >= 1 ? r : null;
         });
         expect(rows).toHaveLength(1);
+        // Fired by a timer armed inside a request: it must NOT carry that request's address/id.
+        expect(rows[0].ip).toBeNull();
+        expect(rows[0].rid).toBeNull();
         expect((rows[0].after as { dropped: number }).dropped).toBe(3);
         await new Promise((r) => setTimeout(r, 1_000));
         const again = await sql(

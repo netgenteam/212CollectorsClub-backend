@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AuditService } from '../audit/audit.service.js';
 import { SYSTEM_ACTOR } from '../audit/audit-events.js';
+import { RequestContext } from '../common/request-context.js';
 
 /** One summary per window, at most (the window opens with the first discarded failure). */
 export const LOGIN_SUMMARY_WINDOW_MS = 60_000;
@@ -73,9 +74,12 @@ export class AdminLoginFailureSummary implements OnModuleDestroy {
 
   private arm(): void {
     if (this.timer) return;
+    // The timer is armed from inside the request that dropped the first failure: without
+    // `detached` the summary would be written with THAT request's id and ip (a stranger's address
+    // in an event whose doc says "never an IP").
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.flush();
+      RequestContext.detached(() => void this.flush());
     }, this.windowMs);
     this.timer.unref();
   }
@@ -150,6 +154,10 @@ export class AdminLoginFailureSummary implements OnModuleDestroy {
     await this.audit.transaction((_tx, audit) => {
       audit.add({
         ...SYSTEM_ACTOR,
+        // Explicit: a summary belongs to no request and no address (also when `flush()` is called
+        // from inside one, e.g. by a test or the shutdown hook).
+        ip: null,
+        requestId: null,
         action: 'LOGIN_ADMIN_FAILED_SUMMARY',
         entityType: 'AdminLogin',
         entityId: 'failed-logins',

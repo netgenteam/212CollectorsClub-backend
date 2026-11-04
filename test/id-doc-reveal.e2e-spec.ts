@@ -26,6 +26,21 @@ import { appCrypto } from './helpers/iddoc-assert.js';
  * connection pointed at a SANDBOX schema (`search_path`), so the events never reach the real,
  * immutable `Audit_Events`; the synthetic orders live in the real tables and are removed.
  */
+/**
+ * A response body without what is random but not a document: UUIDs, long hex (hashes), ISO dates
+ * and epoch timestamps. `/9\d{8}/` would otherwise match a run of digits inside a random UUID
+ * (about 1 run in 10).
+ */
+const noise = (json: string): string =>
+  json
+    .replace(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
+      '',
+    )
+    .replace(/\b[0-9a-f]{32,}\b/gi, '')
+    .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z?/g, '')
+    .replace(/\b\d{10,}\b/g, '');
+
 const TAG = randomUUID().slice(0, 8);
 const PASS = 'correct-horse-battery-staple-20-4';
 const UUID_V4 =
@@ -307,7 +322,7 @@ describe('Reveal of the full ID document (e2e, Story 20.4) on a sandbox audit sc
       entityId: moved,
       after: { field: 'recipient', reason: 'BLIND_MISMATCH' },
     });
-    expect(JSON.stringify(ev)).not.toMatch(/9\d{8}|v1:/);
+    expect(noise(JSON.stringify(ev))).not.toMatch(/9\d{8}|v1:/);
   });
 
   it('an integrity failure whose audit cannot be written is 503 AUDIT_UNAVAILABLE (never a 500 with a hole in the log)', async () => {
@@ -327,7 +342,7 @@ describe('Reveal of the full ID document (e2e, Story 20.4) on a sandbox audit sc
     try {
       const res = await reveal(moved, 'recipient').expect(503);
       expect(res.body.errorCode).toBe('AUDIT_UNAVAILABLE');
-      expect(JSON.stringify(res.body)).not.toMatch(/9\d{8}|v1:/);
+      expect(noise(JSON.stringify(res.body))).not.toMatch(/9\d{8}|v1:/);
       // the integrity failure itself was still reported
       expect(spy.mock.calls.map((x) => String(x[0])).join('\n')).toContain(
         `ID_DOC_INTEGRITY_FAILED order=${moved}`,
@@ -454,7 +469,7 @@ describe('Reveal of the full ID document (e2e, Story 20.4) on a sandbox audit sc
     expect(retry).toBeGreaterThan(3_500);
     expect(retry).toBeLessThanOrEqual(3_600);
     expect(limited[0].headers['cache-control']).toBe('no-store');
-    expect(JSON.stringify(limited[0].body)).not.toMatch(/9\d{8}/);
+    expect(noise(JSON.stringify(limited[0].body))).not.toMatch(/9\d{8}/);
     for (const r of ok) expect(r.body.value).toMatch(/^V-9\d{8}$/);
 
     const mine = (await events()).filter((e) => e.actorId === admin.id);

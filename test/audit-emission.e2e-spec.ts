@@ -1240,10 +1240,15 @@ describe('Audit event emission (e2e, Story 20.5)', { timeout: 60_000 }, () => {
         ),
       );
       expect(await eventsAfter(s2, 'DATA_IMPORT_RUN')).toEqual([]);
-      expect(
-        (await prisma.tcgSyncRun.findUniqueOrThrow({ where: { id: row2!.id } }))
-          .status,
-      ).toBe('SUCCEEDED');
+      const closed = await prisma.tcgSyncRun.findUniqueOrThrow({
+        where: { id: row2!.id },
+      });
+      expect(closed.status).toBe('SUCCEEDED');
+      // the missing event leaves a VISIBLE trace in the run row (not a silent null)
+      expect(closed.errorSummary).toContain(
+        'DATA_IMPORT_RUN event NOT written',
+      );
+      expect(closed.errorCount).toBe(0);
       // an admin-started run: the actor is that admin
       const row3 = await runs.tryStart('INGEST');
       const s3 = await head();

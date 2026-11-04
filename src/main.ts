@@ -1,11 +1,15 @@
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
-import { VersioningType } from '@nestjs/common';
+import { Logger, VersioningType } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module.js';
 import { applyTrustProxy } from './common/trust-proxy.js';
+import {
+  applyClientIpMonitor,
+  proxyStartupWarning,
+} from './common/proxy-diagnostics.js';
 import { applyRequestContext } from './common/request-id.middleware.js';
 import { applyJsonBodyLimit } from './common/json-body-limit.js';
 import { createGlobalValidationPipe } from './common/global-validation-pipe.js';
@@ -31,7 +35,22 @@ async function bootstrap() {
   // server on the same host) and only the address that proxy added: see `common/trust-proxy.ts`.
   // `@nestjs/throttler` (contact, simulator, admin login...), the view rate limit and the audit
   // events (`RequestContext.ip`) all read `req.ip`.
-  applyTrustProxy(app, configService.get<string>('TRUST_PROXY'));
+  const trustProxy = configService.get<string>('TRUST_PROXY');
+  applyTrustProxy(app, trustProxy);
+  // `HOST` (optional): the interface to bind. Unset = all interfaces (Node's default; Docker needs it).
+  const host = configService.get<string>('HOST');
+  // `trust proxy` fails silently when the proxy is not trusted: say so (docs/deployment.md 9.4).
+  if (process.env.NODE_ENV === 'production') {
+    const warning = proxyStartupWarning({
+      nodeEnv: process.env.NODE_ENV,
+      trustProxy,
+      host,
+    });
+    if (warning) new Logger('Bootstrap').warn(warning);
+    applyClientIpMonitor(app, {
+      hasExplicitTrustProxy: (trustProxy ?? '').trim() !== '',
+    });
+  }
 
   // Story 19.2 (A78, QA E): JSON bodies are capped at 100 KB (Express' default)
   // everywhere, except PUT /admin/legal/:slug/draft (a 200 KB Markdown draft,
@@ -126,6 +145,7 @@ async function bootstrap() {
   // such as the discarded failed-login counts (`AdminLoginFailureSummary`).
   app.enableShutdownHooks();
 
-  await app.listen(port);
+  if (host && host.trim() !== '') await app.listen(port, host.trim());
+  else await app.listen(port);
 }
 await bootstrap();

@@ -88,4 +88,37 @@ describe('trust proxy (Story 20.5 follow-up): what IP does the backend see?', ()
       '198.51.100.9',
     );
   });
+
+  describe('Docker / Dokploy: Next and Nest in different containers (QA blocker)', () => {
+    const NEXT = '172.30.212.2';
+    it('NEGATIVE, the default: the Next container is not loopback, so its X-Forwarded-For is ignored and every client is the Next container', () => {
+      expect(ipSeenBy(undefined, NEXT, '203.0.113.7')).toBe(NEXT);
+      expect(ipSeenBy(undefined, NEXT, '198.51.100.20')).toBe(NEXT);
+    });
+    it('POSITIVE: TRUST_PROXY = the segment of the container network, the single address Next set is believed', () => {
+      expect(ipSeenBy('172.30.212.0/28', NEXT, '203.0.113.7')).toBe(
+        '203.0.113.7',
+      );
+      expect(ipSeenBy('172.30.212.0/28', NEXT, '198.51.100.20')).toBe(
+        '198.51.100.20',
+      );
+    });
+    it('a client address written to the left of the one Next set is never read', () => {
+      expect(ipSeenBy('172.30.212.0/28', NEXT, '6.6.6.6, 203.0.113.7')).toBe(
+        '203.0.113.7',
+      );
+    });
+    it('a container OUTSIDE the trusted segment is not believed (a narrow range is the defence)', () => {
+      expect(ipSeenBy('172.30.212.0/28', '172.30.99.9', '6.6.6.6')).toBe(
+        '172.30.99.9',
+      );
+    });
+    it('RISK of a wide range: any container inside it chooses the IP the backend sees', () => {
+      // 172.16.0.0/12 covers every default Docker network on the host: a neighbour container
+      // that can reach the backend port can claim to be anyone (and so dodge or aim a rate limit).
+      expect(ipSeenBy('172.16.0.0/12', '172.18.0.77', '203.0.113.7')).toBe(
+        '203.0.113.7',
+      );
+    });
+  });
 });

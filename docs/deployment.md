@@ -651,6 +651,8 @@ Every limit by IP (simulator, admin login, contact, customer login/register/reco
 
 Answers to the questions of the QA round: with `1` and the single entry Next adds, Nest sees that entry (the real client); a client cannot impersonate another address through Nginx or through Next (what it writes is to the left of what the trusted hop appends, or discarded); it could if it reached the backend port directly, which `loopback` closes.
 
+> **Docker / Dokploy (Next and Nest in different containers): the default `loopback` does NOT work there; set `TRUST_PROXY` to the narrow container-network subnet. Full table, steps, risks and the test: section 17.8.**
+
 Requirements: **only Nginx can reach the backend and the Next server** (both bound to 127.0.0.1 / blocked by the firewall; never expose 3000/3001) and `BACKEND_API_URL` on loopback (11.3).
 
 Checklist: (1) `curl -s -H 'X-Forwarded-For: 1.2.3.4' https://<DOMAIN>/api/...` from outside must not let you choose your own throttle key; (2) 31 requests/min to `POST /simulator/packs` from one address get a 429, a second address is unaffected; (3) five wrong passwords for `admin` from one address lock **that address + that user** and the real admin, from another address, still logs in; (4) the `ip` of `LOGIN_ADMIN_OK` / `LOGIN_ADMIN_FAILED` in `GET /admin/audit/events` is the client's, never `127.0.0.1`.
@@ -1616,7 +1618,8 @@ Sin documentos de consentimiento publicados el checkout no emite nada (medido: �
 - El límite del login es por instancia (en memoria): con varias instancias detrás de un balanceador cada una cuenta aparte. Hoy hay una por entorno (A101).
 - `ADMIN_*` y `REFUND_ISSUED` esperan a que existan sus flujos (17.2).
 - Nginx no está instalado en esta máquina: la cadena Nginx -> Next -> Nest se probó con servidores HTTP de Node que hacen lo que dicen las plantillas (9.4), no con un Nginx real; la IP que el Nginx real ve (`$remote_addr`) depende de la red del VPS (un balanceador o un CDN delante exige `TRUSTED_PROXY_HOPS` en Next y, si no están en loopback, `TRUST_PROXY` en el backend).
-- El `CUSTOMER_PASSWORD_RESET` no puede ser fail-closed (BetterAuth usa su propia conexión): si la auditoría cae en ese instante la contraseña cambia sin evento (queda un `logger.error`).
+- El `CUSTOMER_PASSWORD_RESET` no puede ser fail-closed (BetterAuth usa su propia conexión): si la auditoría cae en ese instante la contraseña cambia sin evento (queda un `logger.error`). **Aceptado** (17.8).
+- Docker/Dokploy (Traefik -> Next -> Nest): no probado contra un Dokploy ni un Traefik reales; ver 17.8 para la configuración y lo que falta.
 
 ### 17.6 Criterio de qué acción es de riesgo (y por tanto lleva evento)
 
@@ -1639,6 +1642,71 @@ Una acción de admin o de sistema se audita si cumple **al menos uno**:
 - `--sequence.shuffle` a secas (mezcla además los **tests dentro de cada archivo**, semilla 20251): 43 fallos en 11 archivos (`legal-consent`, `legal-admin`, `audit-admin-api`, `id-doc-reveal`, `iddoc-masking`, `audit-emission`, `epic-18-regression`, `epic-19-regression`, `landing-vitrina-modes`, `vitrina-scoring`, `legal-seed`). Todos son dependencias **dentro del mismo archivo** (escenarios escritos en secuencia: un `describe` que siembra datos y tests que continúan el anterior), no entre archivos, y cada uno de esos archivos pasa en su orden. No se reescribieron: la suite aísla entre archivos (cada e2e deja su estado) pero no pretende que los tests de un mismo archivo sean independientes entre sí.
 - Plazo de la plantilla de BD: con una sesión abierta sobre la plantilla el helper abortó a los 67 s (antes 272 s) con el mensaje de parar el servidor o usar `E2E_DB_SOURCE`; con la plantilla `collectorsclub_e2e_template` tranquila (creada con el `CREATE DATABASE ... TEMPLATE` de 17.1) la corrida clona, pasa y borra su clon.
 
+
+### 17.8 Docker / Dokploy: la IP real del cliente con Traefik -> Next -> Nest (hallazgo bloqueante de QA)
+
+**El fallo.** Los dos repos traen un `Dockerfile` «for Dokploy» (commit `352f141`) que sustituye el flujo systemd/Nginx. Con Next y Nest en **contenedores distintos**, el par que Nest ve es el contenedor de Next, que no es loopback. `trust proxy` vale por omisión `loopback` (9.4), así que Nest **ignora** `X-Forwarded-For` y `req.ip` es la misma para todo el mundo. No hay ningún error: reproducido con un Next de producción cuyo `BACKEND_API_URL` apunta a una IP no loopback y el Nest real: un anónimo con 5 fallos bloquea al admin real (que entra desde otra IP) con 429, y los eventos de auditoría llevan la IP del contenedor. Con `TRUST_PROXY` apuntando a la red de contenedores funciona. **Angel aún no ha confirmado el destino de despliegue**: ambas topologías quedan funcionando y documentadas.
+
+**Configuración por topología** (`HOST` y `TRUST_PROXY` en el backend, `TRUSTED_PROXY_HOPS` en Next):
+
+| Topología | Backend `TRUST_PROXY` | Backend `HOST` | Next `TRUSTED_PROXY_HOPS` |
+|---|---|---|---|
+| **A. VPS con systemd + Nginx** (9.4, 11.3), todo en loopback | sin definir (`loopback`) | `127.0.0.1` | `1` (Nginx) |
+| **B. Dokploy: Traefik -> Next -> Nest**, contenedores | **la subred estrecha de la red compartida Next-Nest** (abajo) | sin definir (el contenedor debe escuchar en todas las interfaces) | `1` (Traefik) |
+| **C. CDN -> Nginx o Traefik -> ...** | igual que A o B | igual | `2`, **solo si** el proxy de entrada confía en el CDN y lo añade (abajo) |
+
+**Backend (`TRUST_PROXY`, `HOST`).** `TRUST_PROXY` acepta `loopback`, un número de saltos, una lista de CIDR (`loopback,172.30.212.0/28`) o `false` (9.4). `HOST` (nuevo, opcional) es la interfaz en la que escucha: sin definir, todas (necesario en un contenedor); `127.0.0.1` en el VPS con Nginx. En el `.env.example` están los dos.
+
+**Dokploy (topología B), paso a paso.**
+
+1. Los dos servicios (`frontend`, `backend`) en un `docker-compose` de Dokploy (tipo Docker Compose) con **una red propia y diminuta, solo para ellos**, y la subred fijada para poder confiar en ella:
+
+   ```yaml
+   networks:
+     cc-app:
+       ipam:
+         config:
+           - subnet: 172.30.212.0/28   # 14 direcciones: Next, Nest y la pasarela
+   services:
+     backend:
+       networks: [cc-app]              # sin `ports:`; sin dominio salvo el del webhook de Stripe (abajo)
+       environment:
+         TRUST_PROXY: 172.30.212.0/28
+     frontend:
+       networks: [cc-app, dokploy-network]   # Traefik llega a Next por dokploy-network
+       environment:
+         BACKEND_API_URL: http://backend:3000/api/v1
+         TRUSTED_PROXY_HOPS: '1'
+   ```
+
+   (Es un ejemplo: no hay un `docker-compose` de despliegue en los repos; solo el `docker-compose.yml` de Postgres de desarrollo. **No se ha probado en un Dokploy real.** Un servicio en modo Swarm/stack usa redes `overlay`: la subred se lee con `docker network inspect <red> --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'` y es esa la que va en `TRUST_PROXY`.)
+2. **`TRUST_PROXY` debe confiar solo en el segmento de esa red.** El backend cree el `X-Forwarded-For` de cualquier par que esté en el rango. **Riesgo de un rango privado ancho** (`172.16.0.0/12`, `10.0.0.0/8`, `192.168.0.0/16`, la subred de `dokploy-network`): cualquier otro contenedor de la misma red que alcance el puerto del backend puede **falsificar la IP** que Nest ve (esquivar un límite o dirigir uno contra el admin real). `src/common/trust-proxy.spec.ts` lo demuestra (un contenedor fuera de `/28` no es creído; uno dentro de `172.16.0.0/12` elige su IP). Por eso la red propia: no meter el backend en `dokploy-network` ni en una red compartida con otras aplicaciones.
+3. **Nest sin exponer.** Sin `ports:` y sin dominio de Traefik; solo Next lo alcanza (`BACKEND_URL` y `BACKEND_API_URL` apuntan a `http://backend:3000`). **Excepción real:** el webhook de Stripe se registra en `https://api.<DOMAIN>/api/v1/payments/stripe/webhook` (sección 7.2), así que si ese dominio existe, Traefik llega al backend y el par es el contenedor de Traefik, que **no** está en `cc-app`: ese tráfico no es creído y su `req.ip` es la IP de Traefik (el webhook no tiene límite por IP; solo afecta a la IP de los eventos de ese webhook). Para que sí se crea, añade la IP **fija** de Traefik (`TRUST_PROXY=172.30.212.0/28,<ip-de-traefik>/32`), nunca la subred de `dokploy-network`.
+4. **Next con Traefik.** Next cuenta el `X-Forwarded-For` desde la derecha: con Traefik delante, `TRUSTED_PROXY_HOPS=1` (Traefik, por omisión, **descarta** el `X-Forwarded-For` que llega de un cliente no confiable y pone la IP del par que él ve; documentado por Traefik, **no verificado aquí con un Traefik real**).
+
+**`TRUSTED_PROXY_HOPS` mal configurado falla en silencio.** Valor por topología: Nginx o Traefik directamente delante de Next = `1`; un CDN delante de Nginx/Traefik = `2` **solo si** ese proxy confía en el CDN y le añade su IP. Qué pasa si no cuadra:
+
+- **Demasiado pequeño** (`1` con un CDN que el proxy sí añade): Next toma la dirección del borde del CDN. Muchos clientes comparten pocas IP: un solo cubo de límites y la IP del CDN en los eventos. Sin error.
+- **El proxy no confía en el CDN** (Traefik descarta la cabecera que trae el CDN y deja solo la IP del borde): la entrada es la del CDN con `1`; con `2` solo hay una entrada, Next no reenvía nada (`at < 0`) y el backend ve el contenedor de Next. El número no lo arregla: hay que configurar el **proxy** (en Traefik, `entryPoints.<n>.forwardedHeaders.trustedIPs` con los rangos publicados del CDN).
+- **Demasiado grande** (`2` sin CDN): Next toma una entrada **escrita por el cliente**; es el caso peligroso, porque el cliente elige su IP. Nunca subas el valor «por si acaso».
+- **Cómo comprobarlo**: lista de verificación de 9.4, punto 4, y un `curl -H 'X-Forwarded-For: 1.2.3.4' https://<DOMAIN>/api/...` desde fuera: la IP del evento no puede ser `1.2.3.4`, ni la de Traefik, ni la del CDN.
+
+**Next no debe exponerse sin el proxy delante.** El `Dockerfile` del frontend fija `HOSTNAME=0.0.0.0` (necesario para que el proxy lo alcance en la red de contenedores). Con `TRUSTED_PROXY_HOPS=1`, quien llegue **directo** a Next (puerto publicado por error, red compartida con un contenedor hostil) escribe el último `X-Forwarded-For`, y por tanto **elige la IP** que Next reenvía al backend, que `TRUST_PROXY` cree. Reglas: ni `ports:` en el servicio de Next ni un puerto abierto en el cortafuegos del host; solo Traefik lo alcanza. **Defensa propuesta, no implementada** (es invasiva: toca el proxy, Next y el despliegue a la vez): una cabecera secreta compartida. Traefik la añade con un middleware (`headers.customRequestHeaders.X-Edge-Secret`), Next (`lib/utils/client-ip.ts`) solo reenvía una IP si la cabecera coincide (comparación en tiempo constante, secreto en las variables de Dokploy) y, si no coincide, no reenvía nada (el backend verá la IP de Next: degrada, no se deja engañar). Alternativa: lista de pares permitidos en el propio Next, que desde una ruta de Route Handler no se ve (`request` no expone el socket), así que haría falta un servidor propio delante. Con el secreto, el CDN/Traefik debe poder fijar la cabecera; hay que valorarlo cuando Angel confirme el destino.
+
+**Avisos que da el backend (sin PII).**
+
+- Al arrancar, en `NODE_ENV=production`, un `WARN` si `TRUST_PROXY` no está definida y `HOST` no es loopback (`proxyStartupWarning`, `src/common/proxy-diagnostics.ts`).
+- En ejecución, en producción, un `WARN` si **50 peticiones consecutivas** llegan con un `req.ip` privado (RFC 1918, CGNAT, ULA, link-local) o con un `X-Forwarded-For` ignorado (el par no loopback es el propio `req.ip`). Una petición normal reinicia la cuenta. Como mucho **uno cada 10 minutos**, para no inundar el log; no incluye ninguna dirección, solo el tipo y el número de peticiones. Un par loopback con `X-Forwarded-For` (el operador, un health check local) no cuenta. Falso positivo posible: una intranet donde los clientes reales tienen IP privada (el aviso solo orienta; no cambia nada).
+
+**Prueba (`test/admin-login-proxy-chain-nonloopback.e2e-spec.ts`, par no loopback de verdad).** Es la prueba de cadena de 9.4 con el salto Next -> Nest por una **dirección no loopback** de la máquina (Nest escucha en `0.0.0.0` y Next lo llama por esa dirección, de modo que el par que Nest ve no es loopback). Una prueba **negativa** (`TRUST_PROXY` por omisión, el error de Dokploy): el atacante anónimo con 5 fallos deja al admin real con 429 y los 5 eventos llevan la dirección de Next. Una **positiva** (`TRUST_PROXY=loopback,<dirección>/32`): el atacante queda bloqueado, el admin real desde otra IP entra (200), los eventos llevan las IPs reales y una cabecera falsificada a la izquierda de lo que añade el proxy no se lee. Se omite (y se dice) si la máquina no tiene IPv4 no loopback. `src/common/trust-proxy.spec.ts` añade el mismo contraste con `172.30.212.0/28` y el caso del rango ancho. **No se probó contra un Traefik ni un Dokploy reales.**
+
+**Otras correcciones de esta ronda.**
+
+- `DATA_IMPORT_RUN` con la auditoría caída: la corrida se cierra igual (es el candado de sincronización) pero ya no queda `SUCCEEDED` con `errorSummary: null`; `Tcg_Sync_Runs.errorSummary` lleva `AUDIT: DATA_IMPORT_RUN event NOT written (audit log unavailable); the import itself finished` (el `status` no cambia: la importación terminó).
+- `LOGIN_ADMIN_FAILED_SUMMARY` guardaba en `ip` la de una petición cualquiera: el temporizador de la ventana se arma dentro de la petición que descarta el primer fallo y `AsyncLocalStorage` propaga su contexto al temporizador. Ahora el callback corre en `RequestContext.detached(...)` y el evento fija `ip` y `requestId` a `NULL` de forma explícita. Revisados los demás temporizadores de `src/`: los `setTimeout` restantes son esperas dentro del flujo de una petición (el contexto es el suyo a propósito), el del pool de Markdown solo mata un hilo y los `@Cron`/`@Interval` nacen al arrancar, sin contexto; ninguno más escribe un evento desde un temporizador sin contexto propio.
+- **Topes de la guarda de payload** (`src/audit/audit-payload.ts`): una clave de más de **256** caracteres es una violación (estricto: lanza; producción: se corta) antes de escanear, y un presupuesto de **coste de escaneo** por payload: los detectores son cuadráticos en la racha más larga sin espacios (8 000 caracteres seguidos: 27-32 ms; sin rachas largas, lineales), así que se suma el cuadrado de cada racha de 64+ caracteres y el tope es 256e6 (unas cuatro rachas de 8 000, unos 100 ms). Pasado el presupuesto, la cadena se sustituye por `[TRUNCATED]` (estricto: lanza). Texto normal con espacios no gasta nada y un payload de 100 kB en 100 cadenas de 1 000 caracteres cabe. Antes: una clave de 150 000 dígitos 11,3 s; 500 cadenas de 8 000 dígitos 16,5 s.
+- **`redactDeep` / `redactString`** (log de 20.2, corre en cada línea en el hilo principal): la cadena es cuadrática solo con una racha larga de dígitos o de `ddd.ddd.`; una cadena de más de 8 192 caracteres **con una racha de 64+ dígitos/puntos** se corta (`[TRUNCATED:n chars]`; lo cortado nunca se registra), un `redactDeep` gasta como mucho 32 768 caracteres en ese tipo de cadenas (el resto, `[Truncated]`) y las claves se cortan a 256. Un mensaje largo normal (1 MB de texto ordinario) no se toca ni gasta presupuesto (medido lineal). Medido en `test/guard-redact-bounds.perf.spec.ts` (`pnpm test:perf`): ver el reporte de la ronda.
+- **`CUSTOMER_PASSWORD_RESET` se pierde si la auditoría cae: aceptado.** BetterAuth cambia la contraseña con su propia conexión, no puede compartir nuestra transacción, y no se revierte un cambio de contraseña ya hecho por un fallo de auditoría (el cliente se quedaría sin acceso con un token ya gastado). Consecuencia: en esa ventana la contraseña cambia **sin evento** y queda solo un `logger.error`. Limitación documentada en 17.5.
 
 ## 18. Epic 20, Story 20.6: borrado (anonimización) de cuentas desde el admin, búsqueda de clientes y dominio reservado
 

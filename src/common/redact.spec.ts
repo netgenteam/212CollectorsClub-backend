@@ -5,6 +5,8 @@ import {
   REDACTED,
   REDACTED_ID_DOC,
   redactDeep,
+  MAX_STRING_CHARS,
+  MAX_KEY_CHARS,
   redactString,
 } from './redact.js';
 
@@ -351,5 +353,34 @@ describe('redactString: evasions found by QA of 20.3 (Story 20.3 fix)', () => {
   });
   it('non-ASCII text with nothing to hide is returned as it came', () => {
     expect(redactString('Ñandú pidió café 😀')).toBe('Ñandú pidió café 😀');
+  });
+});
+
+describe('redaction budget (Story 20.5 follow-up): bounded work on every log line', () => {
+  it('a string over the cap is cut with a marker, and a cedula in the kept part is still redacted', () => {
+    const out = redactString(`V-12345678 ${'1'.repeat(100_000)}`);
+    expect(out).toContain('[REDACTED_ID]');
+    expect(out).toMatch(/\[TRUNCATED:\d+ chars\]$/);
+    expect(out.length).toBeLessThan(MAX_STRING_CHARS + 200);
+  });
+  it('a long ORDINARY message is not cut (only a run of 64+ digits/dots is the quadratic case)', () => {
+    const big = 'linea ok '.repeat(20_000);
+    expect(redactString(big)).toBe(big);
+    expect(redactDeep({ big }).big).toBe(big);
+  });
+  it('redactDeep spends a total budget on risky strings: the ones past it become a marker', () => {
+    const many = Array.from({ length: 40 }, () => '7'.repeat(4_000));
+    const out = redactDeep({ many }).many;
+    expect(out.filter((s) => s === '[Truncated]').length).toBeGreaterThan(20);
+    expect(out[0]).not.toBe('[Truncated]');
+  });
+  it('a huge object key is cut', () => {
+    const out = redactDeep({ ['k'.repeat(5_000)]: 1 });
+    expect(Object.keys(out)[0].length).toBeLessThanOrEqual(MAX_KEY_CHARS + 3);
+  });
+  it('Error message and stack count against the budget too', () => {
+    const e = new Error('9'.repeat(100_000));
+    const out = redactDeep(e) as unknown as { message: string };
+    expect(out.message).toMatch(/TRUNCATED/);
   });
 });

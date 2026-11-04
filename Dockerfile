@@ -23,6 +23,13 @@ RUN pnpm build
 
 ENV NODE_ENV=production
 ENV PORT=3000
+# CLIENT IP BEHIND DOKPLOY (docs/deployment.md 17.8): Next and this container are different peers, so
+# the default `trust proxy loopback` IGNORES X-Forwarded-For and every client looks like the Next
+# container (one shared rate-limit bucket, wrong IP in every audit event). Set, in Dokploy's
+# environment, TRUST_PROXY to the NARROW subnet of the network shared with Next (never 0.0.0.0/0 and
+# avoid 172.16.0.0/12 / 10.0.0.0/8). The container must listen on all interfaces (HOST stays unset);
+# do not publish this port: only Next (and Traefik, if the Stripe webhook domain points here) reach it.
+# At boot the app logs a WARN when TRUST_PROXY is unset in production and HOST is not loopback.
 EXPOSE 3000
 
 # Migrations run as a separate command right before the app starts (single

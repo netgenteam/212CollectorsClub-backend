@@ -346,6 +346,24 @@ describe('AuditService: an unserializable payload in PRODUCTION never becomes a 
     });
   });
 
+  it('lenient: text over the scan budget is cut to markers (Story 20.5 follow-up), the action goes on', async () => {
+    await withMode('false', async () => {
+      const { calls, tx } = fakeTx();
+      const service = svc();
+      vi.spyOn(
+        (service as unknown as { logger: { warn: () => void } }).logger,
+        'warn',
+      ).mockImplementation(() => undefined);
+      await service.record(tx, {
+        ...ev,
+        after: { items: Array.from({ length: 40 }, () => 'y'.repeat(8000)) },
+      });
+      const written = String(insert(calls).values[8]);
+      expect(written).toContain('[TRUNCATED]');
+      expect(written).not.toContain('payloadError');
+    });
+  });
+
   it('a long unbroken string is cut BEFORE the value detectors run (they are quadratic: 150 000 characters blocked the loop for 11 s)', async () => {
     await withMode('false', async () => {
       const { calls, tx } = fakeTx();

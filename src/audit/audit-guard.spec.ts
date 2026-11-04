@@ -272,3 +272,45 @@ describe('PII / secret guard: modes', () => {
     expect(redactText('[REDACTED:EMAIL]').hits).toEqual([]); // idempotent
   });
 });
+
+describe('payload scan budget (Story 20.5 follow-up): keys and total text are bounded', () => {
+  it('strict: a key over 256 characters is a violation, thrown before any scan', () => {
+    expect(() => strict({ ['1'.repeat(150_000)]: 'x' })).toThrow(
+      /key longer than 256/,
+    );
+  });
+  it('lenient: the key is cut and reported, the walk stays fast', () => {
+    const t0 = Date.now();
+    const r = lenient({ ['1'.repeat(150_000)]: 'x' });
+    expect(Date.now() - t0).toBeLessThan(500);
+    expect(Object.keys(r.value as object)[0]).toHaveLength(256);
+    expect(r.issues[0].why).toMatch(/key longer/);
+  });
+  it('strict: many long unbroken strings exceed the total budget', () => {
+    const v: Record<string, string> = {};
+    for (let i = 0; i < 10; i++) v[`k${i}`] = '1'.repeat(7_000);
+    expect(() => strict(v)).toThrow(/payload text over the scan budget/);
+  });
+  it('lenient: 500 strings of 8 000 digits are bounded (marker after the budget)', () => {
+    const v: Record<string, string> = {};
+    for (let i = 0; i < 500; i++) v[`k${i}`] = '1'.repeat(8_000);
+    const t0 = Date.now();
+    const r = lenient(v);
+    expect(Date.now() - t0).toBeLessThan(3_000);
+    const vals = Object.values(r.value as Record<string, string>);
+    expect(vals.filter((s) => s === '[TRUNCATED]').length).toBeGreaterThan(400);
+  });
+  it('text with spaces costs nothing, and 100 tokens of 1 000 characters fit (100 kB payload)', () => {
+    const v = {
+      words: Array.from({ length: 100 }, () => 'y '.repeat(4_000)),
+      blobs: Array.from({ length: 100 }, () => 'y'.repeat(1_000)),
+    };
+    expect(() => strict(v)).not.toThrow();
+  });
+  it('a normal payload is unaffected', () => {
+    expect(strict({ a: 'x'.repeat(5_000), b: 'y'.repeat(5_000) })).toEqual({
+      a: 'x'.repeat(5_000),
+      b: 'y'.repeat(5_000),
+    });
+  });
+});

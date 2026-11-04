@@ -13,6 +13,10 @@ function isAuditUnavailable(err: unknown): boolean {
   );
 }
 
+/** Written in `errorSummary` when the run closed but its `DATA_IMPORT_RUN` event could not be written. */
+export const AUDIT_MISSING_NOTE =
+  'AUDIT: DATA_IMPORT_RUN event NOT written (audit log unavailable); the import itself finished';
+
 /** A `RUNNING` row older than this belongs to a dead instance (AD-58). */
 export const STALE_RUN_MS = 2 * 60 * 60 * 1000;
 
@@ -128,7 +132,17 @@ export class TcgSyncRunService {
       this.logger.error(
         `DATA_IMPORT_RUN for sync run ${id} could not be audited; closing the run without the event: ${String(err)}`,
       );
-      await this.prisma.tcgSyncRun.update({ where: { id }, data });
+      // The trace stays VISIBLE in the run row (`Tcg_Sync_Runs`, the admin's sync history): status
+      // is untouched (the import itself succeeded) but `errorSummary` says the event is missing.
+      await this.prisma.tcgSyncRun.update({
+        where: { id },
+        data: {
+          ...data,
+          errorSummary: [data.errorSummary, AUDIT_MISSING_NOTE]
+            .filter((x): x is string => typeof x === 'string' && x.length > 0)
+            .join(' | '),
+        },
+      });
     }
   }
 }

@@ -17,6 +17,15 @@ export const RequestContext = {
   run<T>(data: RequestContextData, fn: () => T): T {
     return storage.run(data, fn);
   },
+  /**
+   * Runs `fn` OUTSIDE any request context. `AsyncLocalStorage` is captured by whatever is created
+   * inside a request (a `setTimeout`, a promise chain): a timer armed by request A fires with A's
+   * `requestId` and `ip`. A background job (a timer, a flush) must not carry a stranger's address
+   * into the audit chain: wrap its callback with this.
+   */
+  detached<T>(fn: () => T): T {
+    return storage.exit(fn);
+  },
   get(): RequestContextData | undefined {
     return storage.getStore();
   },

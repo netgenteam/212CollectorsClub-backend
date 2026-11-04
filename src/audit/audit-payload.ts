@@ -395,6 +395,32 @@ export function redactReason(s: string): { text: string; hits: string[] } {
 const MAX_DEPTH = 8;
 /** Longest string a payload may carry (see the note in `sanitizeAuditPayload`). */
 const MAX_STRING_CHARS = 8_000;
+/**
+ * Longest KEY a payload may carry. A key goes through the same quadratic detectors as a value
+ * (measured: a 150 000-digit key took 11.3 s), and no real payload has a key longer than a field
+ * name.
+ */
+const MAX_KEY_CHARS = 256;
+/**
+ * Budget of detector WORK for ONE payload. The detectors are quadratic in the longest unbroken
+ * (no whitespace) run of a string (measured, dev machine: 8 000 characters 27-32 ms, 50 000 about
+ * 1.1 s, 150 000 about 11 s), and linear otherwise (`'y '.repeat(...)`: 0 ms). Each string is capped
+ * on its own, but 500 strings of 8 000 digits still took 16.5 s, so the SUM of the squares of the
+ * unbroken runs of 64+ characters is bounded: 256e6 is about four 8 000-character tokens (about
+ * 100 ms). Ordinary text (words, sentences, a 100 kB payload of 1 000-character tokens, 1e8)
+ * is unaffected. Past the budget a string becomes a marker (strict: violation, thrown; lenient:
+ * marker + issue) BEFORE any scan.
+ */
+const MAX_PAYLOAD_SCAN_COST = 256e6;
+const LONG_RUN = /\S{64,}/g;
+
+/** Quadratic cost of scanning `s`: the sum of the squares of its unbroken runs of 64+ characters. */
+function scanCost(s: string): number {
+  if (s.length < 64) return 0;
+  let cost = 0;
+  for (const m of s.matchAll(LONG_RUN)) cost += m[0].length * m[0].length;
+  return cost;
+}
 
 /** A key as shown in a path: capped, so a huge key cannot flood a log line. */
 const pathKey = (k: string): string =>
@@ -507,6 +533,13 @@ export function sanitizeAuditPayload(
     issues.push({ path, why });
   };
 
+  let scanned = 0;
+  /** Pays the cost of scanning `s` from the payload's budget; false: spent. */
+  const spend = (s: string): boolean => {
+    scanned += scanCost(s);
+    return scanned <= MAX_PAYLOAD_SCAN_COST;
+  };
+
   const text = (
     s: string,
     path: string,
@@ -518,6 +551,10 @@ export function sanitizeAuditPayload(
     if (s.length > MAX_STRING_CHARS) {
       violation(path, `string longer than ${MAX_STRING_CHARS} characters`);
       s = s.slice(0, MAX_STRING_CHARS);
+    }
+    if (!spend(s)) {
+      violation(path, 'payload text over the scan budget');
+      return '[TRUNCATED]';
     }
     const clean = pgText(s);
     const { text: out, hits } = redactText(clean, exempt);
@@ -562,7 +599,22 @@ export function sanitizeAuditPayload(
     ) {
       const out: { [key: string]: AuditPayload } = {};
       for (const [k, x] of Object.entries(v)) {
-        let key = pgText(k);
+        let rawKey = k;
+        if (rawKey.length > MAX_KEY_CHARS) {
+          violation(
+            `${path}.${pathKey(rawKey)}`,
+            `key longer than ${MAX_KEY_CHARS} characters`,
+          );
+          rawKey = rawKey.slice(0, MAX_KEY_CHARS);
+        }
+        if (!spend(rawKey)) {
+          violation(
+            `${path}.${pathKey(rawKey)}`,
+            'payload text over the scan budget',
+          );
+          rawKey = '[TRUNCATED]';
+        }
+        let key = pgText(rawKey);
         const keyHits = redactText(key).hits;
         if (keyHits.length > 0) {
           // The key itself is the sensitive value: it must reach neither the
