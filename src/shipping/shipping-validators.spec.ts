@@ -1,4 +1,5 @@
 import {
+  isMaskedIdDoc,
   canonicalRecipientIdDoc,
   normalizePhone,
   validateShippingInput,
@@ -100,4 +101,29 @@ describe('validateShippingInput', () => {
       code: 'REQUIRED',
     });
   });
+});
+
+describe('isMaskedIdDoc: only the real mask shape (Story 20.3 fix)', () => {
+  it.each([
+    'V-****5678',
+    'V-****',
+    '****5678',
+    '****',
+    'E-****0001',
+    ' V-****5678 ',
+  ])('%j is a mask', (v) => expect(isMaskedIdDoc(v)).toBe(true));
+  it.each([
+    'V-70123456*',
+    '*V-70123456',
+    'V-*******8',
+    'V-****56789',
+    'V-**5678',
+    'V-70*23456',
+    '*',
+    'x****5678',
+    'V-****-5678',
+    '',
+  ])('%j is NOT a mask (goes through the normal validation, 400)', (v) =>
+    expect(isMaskedIdDoc(v)).toBe(false),
+  );
 });

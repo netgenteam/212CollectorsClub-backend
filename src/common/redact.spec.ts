@@ -292,3 +292,53 @@ describe('shared ID pattern', () => {
     }
   });
 });
+
+describe('redactString: evasions found by QA of 20.3 (Story 20.3 fix)', () => {
+  const V = '70123456';
+  it.each([
+    [
+      'fullwidth letter and digits',
+      'recibe \uFF36-\uFF17\uFF10\uFF11\uFF12\uFF13\uFF14\uFF15\uFF16 hoy',
+    ],
+    ['zero-width space inside', 'recibe V\u200B-70123456 hoy'],
+    ['zero-width joiner between digits', 'recibe V-7012\u200D3456 hoy'],
+    ['ci: label', 'ci: 70123456'],
+    ['C.I. label', 'titular C.I. V-70123456'],
+    ['cedula without colon', 'cedula 70123456 verificada'],
+    ['cedula with type, no colon', 'cedula V70123456'],
+    ['grouped after a label', 'ci 70.123.456'],
+    ['RIF label', 'RIF J-70123456-9'],
+    ['array-style key', 'body idDoc[0]=70123456'],
+    ['array-style key with a name', 'recipientIdDoc[main]: 70123456'],
+    ['URL-encoded =', 'GET /x?recipientIdDoc%3D70123456&a=1'],
+    ['URL-encoded = lowercase', 'idDoc%3d70123456'],
+    ['URL-encoded : ', 'idDoc%3A70123456'],
+  ])('%s', (_n, line) => {
+    const out = redactString(line);
+    expect(out, line).not.toContain(V);
+    expect(out, line).not.toMatch(/7012\s*3456|70\.123\.456|\uFF17/);
+  });
+  it('the query string after a redacted value is kept', () => {
+    expect(redactString('GET /x?recipientIdDoc=70123456&page=2')).toBe(
+      'GET /x?recipientIdDoc=[REDACTED]&page=2',
+    );
+  });
+  it('harmless look-alikes stay untouched', () => {
+    for (const s of [
+      'iddoc:backfill started',
+      'iddoc:backfill --check',
+      'idDocType=V',
+      'idDocType: E',
+      'recipientIdDocEnc present',
+      'ci 5 items',
+      'cedula pending',
+      'ced. v',
+      'accion cifrada',
+    ]) {
+      expect(redactString(s), s).toBe(s);
+    }
+  });
+  it('non-ASCII text with nothing to hide is returned as it came', () => {
+    expect(redactString('Ñandú pidió café 😀')).toBe('Ñandú pidió café 😀');
+  });
+});

@@ -107,6 +107,10 @@ node dist/crypto/cli/check-keyring.js --env-file "$ENV_FILE" || fail "the ID doc
 # DATABASE_URL (loaded into the shell below), never an implicit boot-time
 # migration.
 log "applying database migrations (prisma migrate deploy)"
+# AUDIT NOTE (pre-existing, not introduced by Story 20.3): `source` EXECUTES $ENV_FILE as shell, so
+# anything in it runs with the deploy user's rights, and a '\r' at the end of a line becomes part of
+# the value. The file is root/deploy-owned and outside the git tree (docs/deployment.md section 1.5);
+# replacing `source` with a dotenv-style reader is a follow-up for the audit.
 set -a
 # shellcheck source=/dev/null
 source "$ENV_FILE"
@@ -184,13 +188,24 @@ sudo /usr/bin/systemctl restart "$SERVICE_NAME"
 # authoritative success signal and a slow first request (e.g. cold Prisma
 # connection) is not necessarily a broken deploy.
 PORT_VALUE="$(grep -E '^PORT=' "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
+# Story 20.3: a .env saved with Windows line ends gives 'PORT=3804\r', which turns the health check
+# URL into garbage (and used to be reported as a mere slow start). Normalize: CR, spaces, quotes.
+PORT_VALUE="$(printf '%s' "$PORT_VALUE" | tr -d '\r\n\t "'"'")"
 PORT_VALUE="${PORT_VALUE:-3000}"
+PORT_BAD=0
+case "$PORT_VALUE" in
+  ''|*[!0-9]*)
+    # Visible and fatal at the end of the deploy (the backfill below still runs: the service is up).
+    PORT_BAD=1
+    printf '[deploy] ERROR: PORT in %s is not a number (%d characters that do not form a valid port: stray characters or line ends?). The health check was NOT run.\n' "$ENV_FILE" "${#PORT_VALUE}" >&2
+    ;;
+esac
 
 log "waiting for health check on 127.0.0.1:${PORT_VALUE}/api/v1/health"
 attempt=0
 max_attempts=15
 HEALTH_OK=1
-until curl --fail --silent --max-time 3 "http://127.0.0.1:${PORT_VALUE}/api/v1/health" >/dev/null; do
+until [ "$PORT_BAD" -eq 1 ] || curl --fail --silent --max-time 3 "http://127.0.0.1:${PORT_VALUE}/api/v1/health" >/dev/null; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge "$max_attempts" ]; then
     log "WARNING: health check did not return 200 after ${max_attempts} attempts — check 'systemctl status ${SERVICE_NAME}' and 'journalctl -u ${SERVICE_NAME}' on the VPS"
@@ -227,6 +242,10 @@ if [ "$BACKFILL_OK" -ne 1 ]; then
   exit 1
 fi
 
+if [ "$PORT_BAD" -eq 1 ]; then
+  printf '[deploy] ERROR: the service %s was restarted and the backfill ran, but the health check could not run because PORT in %s is invalid. Fix it (docs/deployment.md section 15.7).\n' "$SERVICE_NAME" "$ENV_FILE" >&2
+  exit 1
+fi
 if [ "$HEALTH_OK" -ne 1 ]; then
   exit 0
 fi

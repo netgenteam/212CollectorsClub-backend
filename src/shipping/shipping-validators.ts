@@ -55,8 +55,15 @@ export function canonicalRecipientIdDoc(raw: string): string | null {
   return /^\d{6,9}$/.test(n.digits) ? n.canonical : null;
 }
 
-/** A value the API itself returns (`V-****5678`) and a client may echo back: never a new cedula. */
-export const isMaskedIdDoc = (raw: string): boolean => raw.includes('*');
+/**
+ * A value the API itself returns and a client may echo back: never a new cedula. ONLY the exact
+ * shapes `maskIdDoc` produces: `V-****5678`, `V-****` and the legacy `****5678` / `****`.
+ * Anything else with an asterisk (`V-70123456*`, `V-*******8`) is not a mask: it goes through the
+ * normal validation and answers 400 instead of being dropped silently.
+ */
+const MASK_SHAPE = /^(?:[VEJGP]-)?\*{4}(?:\d{4})?$/;
+export const isMaskedIdDoc = (raw: string): boolean =>
+  MASK_SHAPE.test(raw.trim());
 
 /** Strips separators; optional leading `+`; 10-15 digits, else null. */
 export function normalizePhone(raw: string): string | null {

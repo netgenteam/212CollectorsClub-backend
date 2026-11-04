@@ -3,15 +3,19 @@ import { Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import type { AuditPayload } from '../audit/audit-payload.js';
 import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
+import { splitIdDocFromName } from '../crypto/id-doc-in-name.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import {
   ALL_SETS,
   BACKFILL_SETS,
   ENC_SHAPE_SQL,
+  NAME_GATE_SQL,
+  NAME_SETS,
   NOT_BLANK_SQL,
   SCRUB_SETS,
   type IdDocColumnSet,
+  type NameColumnSet,
 } from './iddoc-columns.js';
 
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
@@ -71,6 +75,8 @@ export interface VerifyResult {
   undecryptable: number;
   plainMismatch: number;
   blindMismatch: number;
+  /** Rows whose NAME still carries a cedula (extraction/cleaning pending, or a conflict). */
+  nameHits: number;
   sampleIds: string[];
 }
 
@@ -80,6 +86,24 @@ export interface CheckResult {
   pending: Record<string, number>;
   /** A stored ciphertext column that does not have the shape of one, per set. */
   malformed: Record<string, number>;
+  /** Plain value that no longer matches its ciphertext (a rolled-back app edited the plain column), per set. */
+  plainMismatch: Record<string, number>;
+  /** Rows whose name still carries a cedula, per set. */
+  nameHits: Record<string, number>;
+  /** Row ids (never values) to look at, per problem, at most 20 each. */
+  sampleIds: {
+    malformed: string[];
+    plainMismatch: string[];
+    nameHits: string[];
+  };
+}
+
+/** What `--check` / `--verify` see in a recipient name; never the value, only that there is one. */
+interface NameRow {
+  id: string;
+  name: string;
+  enc: string | null;
+  blind: string | null;
 }
 
 export class IdDocMigrationError extends Error {
@@ -94,6 +118,7 @@ export class IdDocMigrationError extends Error {
 
 type Tx = Prisma.TransactionClient;
 const ident = (s: string): Prisma.Sql => Prisma.raw(`"${s}"`);
+const num = (v: unknown): number => (typeof v === 'number' ? v : 0);
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -197,7 +222,16 @@ export class IdDocMigrationService {
       );
       for (const { v } of versions) {
         if (v === null) {
-          problems.push(`${set.label}: a stored value is not a ciphertext`);
+          // Row ids only (never a value): enough to find and repair them (docs/deployment.md 15.7).
+          const bad = await this.prisma.$queryRaw<{ id: string }[]>(
+            Prisma.sql`SELECT id::text AS id FROM ${ident(set.table)}
+                        WHERE ${ident(set.enc)} IS NOT NULL
+                          AND substring(${ident(set.enc)} from '^v([0-9]+):') IS NULL
+                        ORDER BY id LIMIT ${SAMPLE_IDS}`,
+          );
+          problems.push(
+            `${set.label}: a stored ${set.enc} is not a ciphertext (row ids: ${bad.map((b) => b.id).join(', ')}${bad.length === SAMPLE_IDS ? ', ...' : ''}); repair them as described in docs/deployment.md section 15.7`,
+          );
           continue;
         }
         const n = Number(v);
@@ -249,14 +283,27 @@ export class IdDocMigrationService {
       await this.preflightKeys();
       // A pass can miss a row an old build inserted behind the cursor: look again until a pass
       // finds nothing to do (3 passes at most; a persistent remainder is reported by --check).
+      // Rows already counted as kept/failed in an earlier pass are not counted again.
+      const seen = new Set<string>();
       for (let pass = 1; pass <= 3; pass++) {
         m.passes = pass;
-        const before = m.encrypted;
-        for (const set of BACKFILL_SETS) await this.backfillSet(set, o, m);
-        if (m.encrypted === before) break; // nothing was written: nothing can have been missed
+        const before = m.encrypted + num(m['nameCleaned']);
+        for (const set of BACKFILL_SETS)
+          await this.backfillSet(set, o, m, seen);
+        // Names that carry a cedula (legacy storefront): extract into Enc, verify, then clean.
+        for (const ns of NAME_SETS) await this.cleanNames(ns, o, m, seen);
+        if (m.encrypted + num(m['nameCleaned']) === before) break; // nothing was written: nothing can have been missed
+      }
+      // Blank values (nothing to protect) are counted once, from the data, never per pass.
+      for (const set of BACKFILL_SETS) {
+        const blank = await this.countBlank(set);
+        m.blank += blank;
+        const by = (m.bySet[set.label] ??= zero());
+        by.blank = blank;
       }
       const left = await this.check();
-      if (!left.ok) m.outcome = 'PENDING_LEFT';
+      if (num(m['nameConflicts']) > 0) m.outcome = 'NAME_CONFLICTS';
+      else if (!left.ok) m.outcome = 'PENDING_LEFT';
     });
   }
 
@@ -264,15 +311,18 @@ export class IdDocMigrationService {
     set: IdDocColumnSet,
     o: ReturnType<IdDocMigrationService['opts']>,
     m: RunMetrics,
+    seen: Set<string>,
   ): Promise<void> {
     const plain = set.plain as string;
     const by = (m.bySet[set.label] ??= zero());
     let cursor = NIL_UUID;
     for (;;) {
+      // Blank values are left out of the scan (nothing to protect); `countBlank` reports them once.
       const rows = await this.prisma.$queryRaw<{ id: string; plain: string }[]>(
         Prisma.sql`SELECT id::text AS id, ${ident(plain)} AS plain
                      FROM ${ident(set.table)}
                     WHERE id > ${cursor}::uuid AND ${ident(plain)} IS NOT NULL AND ${ident(set.enc)} IS NULL
+                      AND ${ident(plain)} ~ ${NOT_BLANK_SQL}
                     ORDER BY id LIMIT ${o.batchSize}`,
       );
       if (rows.length === 0) return;
@@ -290,15 +340,14 @@ export class IdDocMigrationService {
         const p = prepared[i];
         if (this.crypto.isEncrypted(row.plain)) {
           // A ciphertext found in the plain column: not ours to rewrite (does not fit VarChar(12) anyway).
-          m.skipped++;
-          by.skipped = (by.skipped ?? 0) + 1;
+          if (!seen.has(`s:${set.label}:${row.id}`)) {
+            seen.add(`s:${set.label}:${row.id}`);
+            m.skipped++;
+            by.skipped = (by.skipped ?? 0) + 1;
+          }
           continue;
         }
-        if (p === null) {
-          m.blank++;
-          by.blank = (by.blank ?? 0) + 1;
-          continue;
-        }
+        if (p === null) continue; // not blank per SQL but blank per the normalizer: nothing to protect
         // Proof in memory before the write: the ciphertext holds the normalized value and the blind is right.
         if (
           this.crypto.checkStored(p.enc, {
@@ -306,8 +355,11 @@ export class IdDocMigrationService {
             blind: p.blind,
           }) !== 'ok'
         ) {
-          m.errors++;
-          by.errors = (by.errors ?? 0) + 1;
+          if (!seen.has(`e:${set.label}:${row.id}`)) {
+            seen.add(`e:${set.label}:${row.id}`);
+            m.errors++;
+            by.errors = (by.errors ?? 0) + 1;
+          }
           continue;
         }
         ids.push(row.id);
@@ -347,6 +399,192 @@ export class IdDocMigrationService {
     }
   }
 
+  /** Blank plain values without a ciphertext (nothing to protect), counted from the data. */
+  private async countBlank(set: IdDocColumnSet): Promise<number> {
+    const plain = set.plain as string;
+    const r = await this.prisma.$queryRaw<{ n: bigint }[]>(
+      Prisma.sql`SELECT count(*) AS n FROM ${ident(set.table)}
+                  WHERE ${ident(plain)} IS NOT NULL AND ${ident(set.enc)} IS NULL
+                    AND ${ident(plain)} !~ ${NOT_BLANK_SQL}`,
+    );
+    return Number(r[0].n);
+  }
+
+  // --- names that carry a cedula ---------------------------------------------------
+
+  /** Keyset scan of the rows whose NAME could hold a cedula (has a digit). Read-only. */
+  private async scanNames(
+    ns: NameColumnSet,
+    batchSize: number,
+    each: (rows: NameRow[]) => Promise<void>,
+  ): Promise<void> {
+    let cursor = NIL_UUID;
+    for (;;) {
+      const rows = await this.prisma.$queryRaw<NameRow[]>(
+        Prisma.sql`SELECT id::text AS id, ${ident(ns.nameCol)} AS name,
+                          ${ident(ns.set.enc)} AS enc, ${ident(ns.set.blind)} AS blind
+                     FROM ${ident(ns.set.table)}
+                    WHERE id > ${cursor}::uuid AND ${ident(ns.nameCol)} ~ ${NAME_GATE_SQL}
+                    ORDER BY id LIMIT ${batchSize}`,
+      );
+      if (rows.length === 0) return;
+      cursor = rows[rows.length - 1].id;
+      await each(rows);
+      await new Promise((res) => setImmediate(res));
+      if (rows.length < batchSize) return;
+    }
+  }
+
+  /**
+   * Story 20.3: a name that still carries a cedula (the legacy storefront sent `"Ana (V-70123456)"`
+   * in `recipientName`). For each such row, in ONE transaction under a row lock:
+   *   1. the cedula goes into the row's `Enc/Blind` (when the row has none), or the existing `Enc`
+   *      is checked to hold the SAME value (a different one is a CONFLICT: reported, never overwritten);
+   *   2. the `Enc` is read back from the database and verified BY DECRYPTION against the extracted value;
+   *   3. only for rows that passed 2, the name is cleaned (`recipientName` without the cedula), with a
+   *      compare-and-swap on the name and a SQL guard `Enc IS NOT NULL`.
+   * It never cleans a name without a valid `Enc`, so the cedula is never lost: this is not a purge.
+   */
+  private async cleanNames(
+    ns: NameColumnSet,
+    o: ReturnType<IdDocMigrationService['opts']>,
+    m: RunMetrics,
+    seen: Set<string>,
+  ): Promise<void> {
+    const set = ns.set;
+    const by = (m.bySet[`${set.label}.name`] ??= zero());
+    const bump = (key: string, n = 1): void => {
+      m[key] = num(m[key]) + n;
+    };
+    await this.scanNames(ns, o.batchSize, async (rows) => {
+      const items: {
+        id: string;
+        name: string;
+        idDoc: string;
+        clean: string;
+        enc: string;
+        blind: string | null;
+      }[] = [];
+      for (const row of rows) {
+        const split = splitIdDocFromName(row.name);
+        if (!split.found || split.idDoc === null) continue;
+        m.scanned++;
+        by.scanned = (by.scanned ?? 0) + 1;
+        const conflict = (): void => {
+          if (!seen.has(`n:${set.label}:${row.id}`)) {
+            seen.add(`n:${set.label}:${row.id}`);
+            bump('nameConflicts');
+          }
+        };
+        if (split.ambiguous) {
+          conflict();
+          continue;
+        }
+        const p = this.crypto.protect(split.idDoc);
+        if (
+          p === null ||
+          this.crypto.checkStored(p.enc, {
+            expectedPlain: split.idDoc,
+            blind: p.blind,
+          }) !== 'ok'
+        ) {
+          m.errors++;
+          continue;
+        }
+        items.push({
+          id: row.id,
+          name: row.name,
+          idDoc: split.idDoc,
+          clean: split.name,
+          enc: p.enc,
+          blind: p.blind,
+        });
+      }
+      if (items.length === 0) return;
+      const r = await this.inBatchTx(async (tx) => {
+        const locked = await tx.$queryRaw<NameRow[]>(
+          Prisma.sql`SELECT id::text AS id, ${ident(ns.nameCol)} AS name,
+                            ${ident(set.enc)} AS enc, ${ident(set.blind)} AS blind
+                       FROM ${ident(set.table)}
+                      WHERE id = ANY(${items.map((i) => i.id)}::uuid[])
+                      ORDER BY id FOR UPDATE`,
+        );
+        const byId = new Map(items.map((i) => [i.id, i]));
+        const result = { extracted: 0, cleaned: 0, conflicts: [] as string[] };
+        const toVerify: typeof items = [];
+        for (const row of locked) {
+          const item = byId.get(row.id);
+          if (!item || row.name !== item.name) continue; // changed meanwhile: the next pass sees it
+          if (row.enc === null) {
+            const w = await tx.$queryRaw<{ id: string }[]>(
+              Prisma.sql`UPDATE ${ident(set.table)}
+                            SET ${ident(set.enc)} = ${item.enc}, ${ident(set.blind)} = ${item.blind}
+                          WHERE id = ${item.id}::uuid AND ${ident(set.enc)} IS NULL
+                      RETURNING id::text AS id`,
+            );
+            if (w.length === 1) result.extracted++;
+            else continue;
+            toVerify.push(item);
+          } else if (
+            // The row already has a ciphertext: it must hold exactly the extracted value.
+            this.crypto.checkStored(row.enc, {
+              expectedPlain: item.idDoc,
+              blind: row.blind,
+            }) === 'ok'
+          ) {
+            toVerify.push(item);
+          } else {
+            result.conflicts.push(row.id); // a DIFFERENT (or unreadable) Enc: never overwritten
+          }
+        }
+        if (toVerify.length === 0) return result;
+        // Proof from the database itself, by decryption, right before the name is touched.
+        const stored = await tx.$queryRaw<
+          { id: string; enc: string | null; blind: string | null }[]
+        >(
+          Prisma.sql`SELECT id::text AS id, ${ident(set.enc)} AS enc, ${ident(set.blind)} AS blind
+                       FROM ${ident(set.table)}
+                      WHERE id = ANY(${toVerify.map((i) => i.id)}::uuid[])`,
+        );
+        const verified = toVerify.filter((item) => {
+          const row = stored.find((x) => x.id === item.id);
+          return (
+            row?.enc != null &&
+            this.crypto.checkStored(row.enc, {
+              expectedPlain: item.idDoc,
+              blind: row.blind,
+            }) === 'ok'
+          );
+        });
+        if (verified.length === 0) return result;
+        const cleaned = await tx.$queryRaw<{ id: string }[]>(
+          Prisma.sql`UPDATE ${ident(set.table)} AS t
+                        SET ${ident(ns.nameCol)} = v.clean_name
+                       FROM unnest(${verified.map((i) => i.id)}::uuid[], ${verified.map((i) => i.name)}::text[], ${verified.map((i) => i.clean)}::text[])
+                            AS v(id, old_name, clean_name)
+                      WHERE t.id = v.id
+                        AND t.${ident(ns.nameCol)} = v.old_name
+                        AND t.${ident(set.enc)} IS NOT NULL
+                  RETURNING t.id::text AS id`,
+        );
+        result.cleaned = cleaned.length;
+        return result;
+      });
+      bump('nameExtracted', r.extracted);
+      bump('nameCleaned', r.cleaned);
+      by.encrypted = (by.encrypted ?? 0) + r.extracted;
+      for (const id of r.conflicts) {
+        if (!seen.has(`n:${set.label}:${id}`)) {
+          seen.add(`n:${set.label}:${id}`);
+          bump('nameConflicts');
+        }
+      }
+      m.batches++;
+      await o.onBatch?.({ set: `${set.label}.name`, batch: m.batches });
+      if (o.pauseMs > 0) await sleep(o.pauseMs);
+    });
+  }
+
   // --- verify ------------------------------------------------------------------
 
   /**
@@ -363,6 +601,7 @@ export class IdDocMigrationService {
       undecryptable: 0,
       plainMismatch: 0,
       blindMismatch: 0,
+      nameHits: 0,
       sampleIds: [],
     };
     const flag = (id: string): void => {
@@ -420,6 +659,18 @@ export class IdDocMigrationService {
         if (rows.length < o.batchSize) break;
       }
     }
+    // A name that still carries a cedula fails the verification (counts and row ids only).
+    for (const ns of NAME_SETS) {
+      await this.scanNames(ns, o.batchSize, (rows) => {
+        for (const row of rows) {
+          if (splitIdDocFromName(row.name).found) {
+            r.nameHits++;
+            flag(row.id);
+          }
+        }
+        return Promise.resolve();
+      });
+    }
     return r;
   }
 
@@ -435,13 +686,18 @@ export class IdDocMigrationService {
         v.plainMismatch +
         v.blindMismatch;
       m.errors =
-        v.pending + v.undecryptable + v.plainMismatch + v.blindMismatch;
+        v.pending +
+        v.undecryptable +
+        v.plainMismatch +
+        v.blindMismatch +
+        v.nameHits;
       Object.assign(m, {
         verified: v.verified,
         pending: v.pending,
         undecryptable: v.undecryptable,
         plainMismatch: v.plainMismatch,
         blindMismatch: v.blindMismatch,
+        nameHits: v.nameHits,
         sampleIds: v.sampleIds,
       });
       if (!v.ok) m.outcome = 'VERIFY_FAILED';
@@ -450,9 +706,27 @@ export class IdDocMigrationService {
 
   // --- check (deploy healthcheck) --------------------------------------------
 
-  /** Plain value left without ciphertext (blank values excluded) and malformed ciphertext, per set. Read-only. */
-  async check(): Promise<CheckResult> {
-    const res: CheckResult = { ok: true, pending: {}, malformed: {} };
+  /**
+   * Deploy healthcheck, read-only, no value ever printed (counts and row ids). Fails on:
+   *  - a plain value (not blank) without a ciphertext (`pending`);
+   *  - a stored ciphertext that does not have the shape of one (`malformed`);
+   *  - a plain value that does NOT match its ciphertext (`plainMismatch`): an app rolled back to a
+   *    build that edits the plain column leaves the `Enc` stale, and nothing else would notice;
+   *  - a recipient name that still carries a cedula (`nameHits`).
+   */
+  async check(options: RunOptions = {}): Promise<CheckResult> {
+    const o = this.opts(options);
+    const res: CheckResult = {
+      ok: true,
+      pending: {},
+      malformed: {},
+      plainMismatch: {},
+      nameHits: {},
+      sampleIds: { malformed: [], plainMismatch: [], nameHits: [] },
+    };
+    const sample = (list: string[], id: string): void => {
+      if (list.length < SAMPLE_IDS) list.push(id);
+    };
     for (const set of ALL_SETS) {
       const pendingRows = set.plain
         ? await this.prisma.$queryRaw<{ n: bigint }[]>(
@@ -461,15 +735,66 @@ export class IdDocMigrationService {
                           AND ${ident(set.plain)} ~ ${NOT_BLANK_SQL}`,
           )
         : [{ n: 0n }];
-      const malformedRows = await this.prisma.$queryRaw<{ n: bigint }[]>(
-        Prisma.sql`SELECT count(*) AS n FROM ${ident(set.table)}
-                    WHERE ${ident(set.enc)} IS NOT NULL AND ${ident(set.enc)} !~ ${ENC_SHAPE_SQL}`,
+      const malformedIds = await this.prisma.$queryRaw<{ id: string }[]>(
+        Prisma.sql`SELECT id::text AS id FROM ${ident(set.table)}
+                    WHERE ${ident(set.enc)} IS NOT NULL AND ${ident(set.enc)} !~ ${ENC_SHAPE_SQL}
+                    ORDER BY id`,
       );
       res.pending[set.label] = Number(pendingRows[0].n);
-      res.malformed[set.label] = Number(malformedRows[0].n);
-      if (res.pending[set.label] > 0 || res.malformed[set.label] > 0) {
+      res.malformed[set.label] = malformedIds.length;
+      for (const r of malformedIds) sample(res.sampleIds.malformed, r.id);
+
+      // plain vs ciphertext, by decryption, only for rows that still have a plain value
+      let mismatch = 0;
+      if (set.plain) {
+        let cursor = NIL_UUID;
+        for (;;) {
+          const rows = await this.prisma.$queryRaw<
+            { id: string; plain: string; enc: string; blind: string | null }[]
+          >(
+            Prisma.sql`SELECT id::text AS id, ${ident(set.plain)} AS plain, ${ident(set.enc)} AS enc, ${ident(set.blind)} AS blind
+                         FROM ${ident(set.table)}
+                        WHERE id > ${cursor}::uuid AND ${ident(set.plain)} IS NOT NULL
+                          AND ${ident(set.plain)} ~ ${NOT_BLANK_SQL}
+                          AND ${ident(set.enc)} IS NOT NULL AND ${ident(set.enc)} ~ ${ENC_SHAPE_SQL}
+                        ORDER BY id LIMIT ${o.batchSize}`,
+          );
+          if (rows.length === 0) break;
+          cursor = rows[rows.length - 1].id;
+          for (const row of rows) {
+            if (
+              this.crypto.checkStored(row.enc, { expectedPlain: row.plain }) ===
+              'plain_mismatch'
+            ) {
+              mismatch++;
+              sample(res.sampleIds.plainMismatch, row.id);
+            }
+          }
+          if (rows.length < o.batchSize) break;
+        }
+      }
+      res.plainMismatch[set.label] = mismatch;
+      if (
+        res.pending[set.label] > 0 ||
+        res.malformed[set.label] > 0 ||
+        mismatch > 0
+      ) {
         res.ok = false;
       }
+    }
+    for (const ns of NAME_SETS) {
+      let n = 0;
+      await this.scanNames(ns, o.batchSize, (rows) => {
+        for (const row of rows) {
+          if (splitIdDocFromName(row.name).found) {
+            n++;
+            sample(res.sampleIds.nameHits, row.id);
+          }
+        }
+        return Promise.resolve();
+      });
+      res.nameHits[ns.set.label] = n;
+      if (n > 0) res.ok = false;
     }
     return res;
   }
@@ -488,7 +813,11 @@ export class IdDocMigrationService {
       const v = await this.verify(options);
       if (!v.ok) {
         m.errors =
-          v.pending + v.undecryptable + v.plainMismatch + v.blindMismatch;
+          v.pending +
+          v.undecryptable +
+          v.plainMismatch +
+          v.blindMismatch +
+          v.nameHits;
         m.outcome = 'VERIFY_FAILED';
         m.sampleIds = v.sampleIds;
         return; // nothing was touched
@@ -515,27 +844,33 @@ export class IdDocMigrationService {
                 plain: string;
                 enc: string | null;
                 blind: string | null;
+                blank: boolean;
               }[]
             >(
-              Prisma.sql`SELECT id::text AS id, ${ident(plain)} AS plain, ${ident(set.enc)} AS enc, ${ident(set.blind)} AS blind
+              Prisma.sql`SELECT id::text AS id, ${ident(plain)} AS plain, ${ident(set.enc)} AS enc, ${ident(set.blind)} AS blind,
+                                ${ident(plain)} !~ ${NOT_BLANK_SQL} AS blank
                            FROM ${ident(set.table)}
                           WHERE id = ANY(${ids}::uuid[]) AND ${ident(plain)} IS NOT NULL
                           ORDER BY id FOR UPDATE`,
             );
+            // A blank value (empty / only whitespace) has nothing to protect and no ciphertext: it
+            // is cleared too, otherwise it would stay for ever and fail every later run.
             const good = locked
               .filter(
                 (r) =>
-                  r.enc !== null &&
-                  this.crypto.checkStored(r.enc, {
-                    expectedPlain: r.plain,
-                    blind: r.blind,
-                  }) === 'ok',
+                  r.blank ||
+                  (r.enc !== null &&
+                    this.crypto.checkStored(r.enc, {
+                      expectedPlain: r.plain,
+                      blind: r.blind,
+                    }) === 'ok'),
               )
               .map((r) => r.id);
             if (good.length > 0) {
               await tx.$executeRaw(
                 Prisma.sql`UPDATE ${ident(set.table)} SET ${ident(plain)} = NULL
-                            WHERE id = ANY(${good}::uuid[]) AND ${ident(set.enc)} IS NOT NULL`,
+                            WHERE id = ANY(${good}::uuid[])
+                              AND (${ident(set.enc)} IS NOT NULL OR ${ident(plain)} !~ ${NOT_BLANK_SQL})`,
               );
             }
             return { good: good.length, locked: locked.length };
@@ -737,6 +1072,10 @@ export class IdDocMigrationService {
       'targetVersion',
       'verified',
       'pending',
+      'nameHits',
+      'nameExtracted',
+      'nameCleaned',
+      'nameConflicts',
     ] as const) {
       if (typeof m[k] === 'number') after[k] = m[k];
     }

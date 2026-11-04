@@ -120,4 +120,33 @@ describe('pnpm iddoc:keys (ensureIdDocKeys)', () => {
     expect(() => ensureIdDocKeys(path, {})).toThrow(KeysRefused);
     expect(readFileSync(path, 'utf8')).toBe('NODE_ENV=production\n');
   });
+
+  it.each([
+    'NODE_ENV = production # live',
+    'export NODE_ENV=production',
+    '  export   NODE_ENV = "production"   # x',
+    "NODE_ENV='production'",
+    'NODE_ENV=Production\r',
+    'FOO=1\r\nNODE_ENV=production\r\nBAR=2\r\n',
+  ])('refuses a target file with %j', (line) => {
+    const dir = tmp();
+    const path = join(dir, '.env');
+    writeFileSync(path, `${line}\n`);
+    chmodSync(path, 0o600);
+    expect(() => ensureIdDocKeys(path, {})).toThrow(KeysRefused);
+    expect(readFileSync(path, 'utf8')).toBe(`${line}\n`);
+  });
+
+  it.each([
+    'NODE_ENV=development',
+    '# NODE_ENV=production',
+    'NODE_ENV_X=production',
+    'NODE_ENV=production-like',
+  ])('does not mistake %j for production', (line) => {
+    const dir = tmp();
+    const path = join(dir, '.env');
+    writeFileSync(path, `${line}\n`);
+    chmodSync(path, 0o600);
+    expect(() => ensureIdDocKeys(path, {})).not.toThrow();
+  });
 });

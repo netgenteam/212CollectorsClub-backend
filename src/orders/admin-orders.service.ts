@@ -1,3 +1,4 @@
+import { stripIdDocFromName } from '../crypto/id-doc-in-name.js';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { Prisma } from '../generated/prisma/client.js';
@@ -166,7 +167,7 @@ export class AdminOrdersService {
       status: order.status.toLowerCase(),
       paymentRail: order.paymentRail.toLowerCase(),
       fulfillmentType: order.fulfillmentType.toLowerCase(),
-      recipientName: order.recipientName,
+      recipientName: stripIdDocFromName(order.recipientName),
       totalUsd: Number(order.totalUsd),
       totalVes: order.totalVes !== null ? Number(order.totalVes) : null,
       createdAt: order.createdAt.toISOString(),

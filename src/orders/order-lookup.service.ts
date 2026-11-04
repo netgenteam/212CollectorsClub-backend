@@ -1,3 +1,4 @@
+import { stripIdDocFromName } from '../crypto/id-doc-in-name.js';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
 import { buildTrackingUrl } from '../shipping/tracking-url.js';
@@ -159,7 +160,7 @@ export class OrderLookupService {
   private toDetailDto(order: OrderWithRelations): OrderDetailResponseDto {
     const fulfillment: OrderFulfillmentDto = {
       type: order.fulfillmentType.toLowerCase(),
-      recipientName: order.recipientName,
+      recipientName: stripIdDocFromName(order.recipientName),
       recipientPhone: order.recipientPhone,
       addressLine1: order.addressLine1,
       addressLine2: order.addressLine2,

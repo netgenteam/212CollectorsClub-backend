@@ -4,7 +4,7 @@ import { printMetrics, runCli, fail } from './run-cli.js';
 /**
  * `pnpm iddoc:backfill`            encrypt every plain cedula (idempotent, resumable)
  * `pnpm iddoc:backfill --verify`   decrypt ALL rows and compare (read-only; exit 1 on any difference)
- * `pnpm iddoc:backfill --check`    exit 1 if any plain value is left without a ciphertext (deploy healthcheck)
+ * `pnpm iddoc:backfill --check`    exit 1 if a plain value has no ciphertext, a ciphertext is malformed or stale (plain_mismatch) or a name carries a cedula (deploy healthcheck)
  * `pnpm iddoc:backfill --scrub`    OPTIONAL, address book only, after a full verify in the same run
  */
 let args;
@@ -23,7 +23,7 @@ if (args) {
       console.log(JSON.stringify({ mode: 'check', ...r }));
       if (!r.ok) {
         console.error(
-          '[iddoc] CHECK FAILED: plain ID documents without a ciphertext, or malformed ciphertext, remain. Run `pnpm iddoc:backfill` again.',
+          '[iddoc] CHECK FAILED (counts and row ids only, no values above): plain ID documents without a ciphertext, a malformed ciphertext, a plain value that no longer matches its ciphertext, or a recipient name that still carries a cedula. Run `pnpm iddoc:backfill` again; for malformed ciphertext or a mismatch see docs/deployment.md section 15.7.',
         );
         return 1;
       }

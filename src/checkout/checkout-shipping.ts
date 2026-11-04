@@ -4,6 +4,7 @@ import type { Prisma } from '../generated/prisma/client.js';
 import type { DeliveryMode } from '../generated/prisma/enums.js';
 import type { ShippingValidationService } from '../shipping/shipping-validation.service.js';
 import type { PreparedIdDoc } from '../crypto/id-doc-crypto.service.js';
+import { splitIdDocFromName } from '../crypto/id-doc-in-name.js';
 import {
   canonicalRecipientIdDoc,
   validateShippingInput,
@@ -67,9 +68,13 @@ export interface OrderShippingData {
   country: string;
 }
 
+/**
+ * `recipientIdDoc` is deliberately NOT here (Story 20.3): the flat format may carry the cedula in
+ * its own field, instead of inside `recipientName`. Alone it does not turn a body into the agency
+ * format; the agency fields below do.
+ */
 const NEW_FORMAT_KEYS = [
   'customerAddressId',
-  'recipientIdDoc',
   'deliveryMode',
   'shippingAgencyId',
   'agencyBranchName',
@@ -139,18 +144,50 @@ export function assertCheckoutShippingPreconditions(
 }
 
 /**
+ * Story 20.3 (FR-123, NFR-20.5): the recipient as the order will store it. The legacy storefront
+ * put the cedula INSIDE `recipientName` (`"Ana (V-70123456)"`): it is taken out of the name
+ * (`splitIdDocFromName`) so it can be encrypted, and the name is stored clean. An explicit
+ * `recipientIdDoc` always wins over the one found in the name. A name without a cedula
+ * (including "Ana 3era") is returned as is. Pure, no I/O.
+ */
+export function cleanCheckoutRecipient<T extends CheckoutShippingInput>(
+  dto: T,
+): { dto: T; ambiguous: boolean; fromName: boolean } {
+  const none = { dto, ambiguous: false, fromName: false };
+  if (typeof dto.recipientName !== 'string') return none;
+  const split = splitIdDocFromName(dto.recipientName);
+  if (!split.found) return none;
+  const explicit =
+    typeof dto.recipientIdDoc === 'string' && dto.recipientIdDoc.trim() !== '';
+  return {
+    dto: {
+      ...dto,
+      recipientName: split.name,
+      recipientIdDoc: explicit
+        ? dto.recipientIdDoc
+        : (split.idDoc ?? undefined),
+    },
+    ambiguous: split.ambiguous,
+    // True when the cedula in `dto.recipientIdDoc` is the one found in the name (already canonical).
+    fromName: !explicit && split.idDoc !== null,
+  };
+}
+
+/**
  * Pure and synchronous, no I/O: call it BEFORE `$transaction`. Mirrors the validation of the body
  * path (`canonicalRecipientIdDoc`); an invalid value yields `null` and the builder rejects it.
+ * Covers the flat format too (the cedula in its own field, or inside the name).
  */
 export function prepareCheckoutIdDoc(
-  dto: CheckoutShippingInput,
+  input: CheckoutShippingInput,
   crypto: IdDocProtector,
 ): PreparedIdDoc | null {
-  if (!isNewShippingFormat(dto) || dto.customerAddressId !== undefined) {
-    return null;
-  }
+  if (input.customerAddressId !== undefined) return null;
+  const { dto, fromName } = cleanCheckoutRecipient(input);
   if (typeof dto.recipientIdDoc !== 'string') return null;
-  const canonical = canonicalRecipientIdDoc(dto.recipientIdDoc.trim());
+  const canonical = fromName
+    ? dto.recipientIdDoc
+    : canonicalRecipientIdDoc(dto.recipientIdDoc.trim());
   return canonical === null ? null : crypto.protect(canonical);
 }
 
@@ -191,16 +228,52 @@ function fromValue(
 export async function resolveCheckoutShipping(
   tx: Prisma.TransactionClient,
   shipping: ShippingValidationService,
-  dto: CheckoutShippingInput & { city?: string },
+  rawDto: CheckoutShippingInput & { city?: string },
   customerId: string | null,
   idDoc: CheckoutIdDoc,
 ): Promise<OrderShippingData> {
+  const cleaned = cleanCheckoutRecipient(rawDto);
+  const dto = cleaned.dto;
+  if (cleaned.ambiguous) {
+    throw new ApiException(
+      HttpStatus.BAD_REQUEST,
+      'SHIPPING_INVALID',
+      'The shipping data is invalid.',
+      { errors: [{ field: 'recipientName', code: 'INVALID' }] },
+    );
+  }
   if (!isNewShippingFormat(dto)) {
+    const errors: ShippingFieldError[] = [];
+    const name = (dto.recipientName ?? '').trim();
+    if (name === '') errors.push({ field: 'recipientName', code: 'REQUIRED' });
+    const rawId =
+      typeof dto.recipientIdDoc === 'string' ? dto.recipientIdDoc.trim() : '';
+    let canonical: string | null = null;
+    if (rawId !== '') {
+      canonical = cleaned.fromName ? rawId : canonicalRecipientIdDoc(rawId);
+      if (canonical === null) {
+        errors.push({ field: 'recipientIdDoc', code: 'INVALID' });
+      }
+    }
+    if (errors.length > 0) {
+      throw new ApiException(
+        HttpStatus.BAD_REQUEST,
+        'SHIPPING_INVALID',
+        'The shipping data is invalid.',
+        { errors },
+      );
+    }
+    const p =
+      canonical === null
+        ? null
+        : idDoc.prepared !== null && idDoc.prepared.canonical === canonical
+          ? idDoc.prepared
+          : idDoc.crypto.protect(canonical);
     return {
-      recipientName: dto.recipientName as string,
+      recipientName: name,
       recipientPhone: dto.recipientPhone as string,
-      recipientIdDocEnc: null,
-      recipientIdDocBlind: null,
+      recipientIdDocEnc: p?.enc ?? null,
+      recipientIdDocBlind: p?.blind ?? null,
       deliveryMode: null,
       shippingAgencyId: null,
       agencyBranchName: null,
@@ -236,13 +309,19 @@ export async function resolveCheckoutShipping(
     // backfill has not reached yet (plain only) is encrypted here so the order never stores plain.
     let enc = addr.recipientIdDocEnc;
     let blind = addr.recipientIdDocBlind;
+    // An address saved by the old storefront may carry the cedula in its name (Story 20.3).
+    const addrName = splitIdDocFromName(addr.recipientName);
     if (!enc && addr.recipientIdDoc) {
       const p = idDoc.crypto.protect(addr.recipientIdDoc);
       enc = p?.enc ?? null;
       blind = p?.blind ?? null;
+    } else if (!enc && addrName.idDoc !== null && !addrName.ambiguous) {
+      const p = idDoc.crypto.protect(addrName.idDoc);
+      enc = p?.enc ?? null;
+      blind = p?.blind ?? null;
     }
     return {
-      recipientName: addr.recipientName,
+      recipientName: addrName.name,
       recipientPhone: addr.recipientPhone,
       recipientIdDocEnc: enc,
       recipientIdDocBlind: blind,

@@ -1,3 +1,4 @@
+import { stripIdDocFromName } from '../crypto/id-doc-in-name.js';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client.js';
 import { ApiException } from '../common/api-exception.js';
@@ -51,7 +52,7 @@ export function toAddressResponse(
   return {
     id: row.id,
     label: row.label,
-    recipientName: row.recipientName,
+    recipientName: stripIdDocFromName(row.recipientName),
     recipientPhone: row.recipientPhone,
     recipientIdDoc: crypto.serialize(row.recipientIdDocEnc, row.recipientIdDoc),
     deliveryMode: row.deliveryMode.toLowerCase(),
@@ -132,6 +133,8 @@ export class CustomerAddressesService {
             agencyId: dto.agencyId,
             label,
             ...value,
+            // The cedula has its own (encrypted) column: never inside the name (Story 20.3).
+            recipientName: stripIdDocFromName(value.recipientName),
             recipientIdDocEnc: protectedId?.enc ?? null,
             recipientIdDocBlind: protectedId?.blind ?? null,
             deliveryMode: toDbMode(value.deliveryMode),
@@ -276,6 +279,7 @@ export class CustomerAddressesService {
             agencyId: patch.agencyId ?? row.agencyId,
             label: 'label' in patch ? patch.label?.trim() || null : row.label,
             ...value,
+            recipientName: stripIdDocFromName(value.recipientName),
             deliveryMode: toDbMode(value.deliveryMode),
             // Only a NEW cedula touches the columns; the plain one it replaces is cleared.
             ...(protectedId

@@ -57,3 +57,21 @@ export const ENC_SHAPE_SQL =
   '^v[0-9]{1,4}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]+$';
 /** A plain value with something other than whitespace/invisible characters in it (blank values have nothing to protect). */
 export const NOT_BLANK_SQL = '[^[:space:]​-‍⁠﻿]';
+
+/**
+ * Columns whose TEXT may carry a cedula inside a person's name (the legacy storefront sent
+ * `"Ana (V-70123456)"` in `recipientName`). The name is extracted into the set's `Enc/Blind` and
+ * cleaned only after the ciphertext is verified by decryption (see `cleanNames`). This is NOT a
+ * purge: the cedula stays recoverable in `Enc`.
+ */
+export interface NameColumnSet {
+  set: IdDocColumnSet;
+  /** Always a constant: the only column name ever interpolated for the name phase. */
+  nameCol: 'recipientName';
+}
+export const NAME_SETS: readonly NameColumnSet[] = [
+  { set: ORDER_RECIPIENT, nameCol: 'recipientName' },
+  { set: ADDRESS_RECIPIENT, nameCol: 'recipientName' },
+];
+/** Loose SQL prefilter for the name scan: a name without any digit cannot hold a cedula. */
+export const NAME_GATE_SQL = '[[:digit:]０-９]';

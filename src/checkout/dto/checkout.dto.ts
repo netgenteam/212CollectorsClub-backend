@@ -188,7 +188,7 @@ export class CheckoutDto {
 
   @ApiPropertyOptional({
     description:
-      'Recipient national ID, e.g. V-12345678 (new shipping format).',
+      'Recipient national ID, e.g. V-12345678. Accepted in the legacy flat format too (alone it does not switch the body to the agency format). It is encrypted server-side and only ever returned masked. A cedula written inside recipientName (e.g. "Ana (V-12345678)") is moved here automatically; this field wins when both are sent. A masked value (V-****5678) is rejected.',
     maxLength: 30,
   })
   @IsOptional()

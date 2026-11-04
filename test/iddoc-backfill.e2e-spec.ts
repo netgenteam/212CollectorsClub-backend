@@ -630,3 +630,297 @@ describe('logs never carry a cedula (NFR-20.5)', () => {
     await q(`DELETE FROM t_dup`);
   });
 });
+
+// ---- Story 20.3 fix: cedula inside the recipient name (legacy storefront), stale Enc, malformed Enc ----
+
+const SENT = ['70123456', '70123457', '70123458', '81234567', '99999999'];
+const noValues = (text: string): void => {
+  for (const d of SENT) expect(text).not.toContain(d);
+};
+async function orderWith(
+  name: string,
+  plain: string | null = null,
+): Promise<string> {
+  const id = (
+    await q<{ id: string }>(
+      `INSERT INTO "Orders"(id,"accessTokenHash","fulfillmentType","paymentRail","recipientName","recipientPhone",status,"totalUsd","updatedAt","recipientIdDoc")
+       VALUES (gen_random_uuid(),'x','DELIVERY','PAGO_MOVIL',$1,'1','PENDING_VERIFICATION',1,now(),$2) RETURNING id::text id`,
+      name,
+      plain,
+    )
+  )[0].id;
+  return id;
+}
+async function addressWith(
+  name: string,
+  plain: string | null,
+): Promise<string> {
+  return (
+    await q<{ id: string }>(
+      `INSERT INTO "Customer_Addresses"(id,"customerId","agencyId","recipientName","recipientPhone","deliveryMode",state,municipality,"updatedAt","recipientIdDoc")
+       VALUES (gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),$1,'1','AGENCY_OFFICE','s','m',now(),$2) RETURNING id::text id`,
+      name,
+      plain,
+    )
+  )[0].id;
+}
+const row = async (table: string, id: string) =>
+  (
+    await q<{
+      name: string;
+      enc: string | null;
+      blind: string | null;
+      plain: string | null;
+    }>(
+      `SELECT "recipientName" name,"recipientIdDocEnc" enc,"recipientIdDocBlind" blind,"recipientIdDoc" plain FROM "${table}" WHERE id=$1`,
+      id,
+    )
+  )[0];
+
+describe('names that carry a cedula (legacy storefront format)', () => {
+  it('--check and --verify see them (exit-1 condition) without printing a value', async () => {
+    const id = await orderWith('Ana Prueba (V-70123456)');
+    const c = await svc().check();
+    expect(c.ok).toBe(false);
+    expect(c.nameHits['orders.recipient']).toBe(1);
+    expect(c.sampleIds.nameHits).toEqual([id]);
+    noValues(JSON.stringify(c));
+    const v = await svc().verify(opts);
+    expect(v.ok).toBe(false);
+    expect(v.nameHits).toBe(1);
+    const run = await svc().runVerify(opts);
+    expect(run.outcome).toBe('VERIFY_FAILED');
+    expect(run.errors).toBeGreaterThan(0);
+    noValues(JSON.stringify(run));
+  });
+
+  it('extracts into Enc/Blind, verifies by decryption, THEN cleans the name; idempotent; nothing is lost', async () => {
+    const names = [
+      'Ana Prueba (V-70123456)',
+      'Luis Rojo V70123457',
+      'Eva Soto, E-81234567',
+      'Ana 3era',
+      'Pedro Pérez',
+    ];
+    const ids: string[] = [];
+    for (const n of names) ids.push(await orderWith(n));
+    const addr = await addressWith('Marta (V-70123458)', null);
+    const m = await svc().backfill(opts);
+    expect(m.outcome).toBe('ok');
+    expect(m['nameExtracted']).toBe(4);
+    expect(m['nameCleaned']).toBe(4);
+    noValues(JSON.stringify(m));
+
+    const expected: Array<[string, string | null, string | null]> = [
+      ['Ana Prueba', 'V-70123456', null],
+      ['Luis Rojo', 'V-70123457', null],
+      ['Eva Soto', 'E-81234567', null],
+      ['Ana 3era', null, null],
+      ['Pedro Pérez', null, null],
+    ];
+    for (const [i, [name, ced]] of expected.entries()) {
+      const r = await row('Orders', ids[i]);
+      expect(r.name).toBe(name);
+      if (ced === null) {
+        expect(r.enc).toBeNull();
+        continue;
+      }
+      expect(r.enc).not.toBeNull();
+      expect(ringA.decrypt(r.enc as string)).toBe(ced); // recoverable: not a purge
+      expect(r.blind).toBe(ringA.blindIndexOf(ced));
+      expect(r.plain).toBeNull();
+    }
+    const a = await row('Customer_Addresses', addr);
+    expect(a.name).toBe('Marta');
+    expect(ringA.decrypt(a.enc as string)).toBe('V-70123458');
+
+    expect((await svc().check()).ok).toBe(true);
+    expect((await svc().verify(opts)).ok).toBe(true);
+    const again = await svc().backfill(opts);
+    expect(again['nameCleaned'] ?? 0).toBe(0);
+    expect(again.encrypted).toBe(0);
+  });
+
+  it('a row that already has the SAME Enc (from its plain column) only has its name cleaned', async () => {
+    const id = await orderWith('Luis (V-70123457)', 'V-70123457');
+    const m = await svc().backfill(opts);
+    expect(m.outcome).toBe('ok');
+    expect(m['nameExtracted'] ?? 0).toBe(0);
+    expect(m['nameCleaned']).toBe(1);
+    const r = await row('Orders', id);
+    expect(r.name).toBe('Luis');
+    expect(ringA.decrypt(r.enc as string)).toBe('V-70123457');
+    expect(r.plain).toBe('V-70123457'); // the plain column of an order is never touched
+  });
+
+  it('a row whose Enc is DIFFERENT is a conflict: nothing is overwritten, name kept, --check stays red', async () => {
+    const id = await orderWith('Luis (V-70123457)', 'V-70123458');
+    const addr = await addressWith('Marta (V-70123456)', 'V-81234567');
+    const m = await svc().backfill(opts);
+    expect(m.outcome).toBe('NAME_CONFLICTS');
+    expect(m['nameConflicts']).toBe(2);
+    expect(m['nameCleaned'] ?? 0).toBe(0);
+    noValues(JSON.stringify(m));
+    const r = await row('Orders', id);
+    expect(r.name).toBe('Luis (V-70123457)');
+    expect(ringA.decrypt(r.enc as string)).toBe('V-70123458'); // untouched
+    expect((await row('Customer_Addresses', addr)).name).toBe(
+      'Marta (V-70123456)',
+    );
+    const c = await svc().check();
+    expect(c.ok).toBe(false);
+    expect(c.sampleIds.nameHits).toContain(id);
+    noValues(JSON.stringify(c));
+    // a second run does not count the same conflict twice in its own pass, and still changes nothing
+    const m2 = await svc().backfill(opts);
+    expect(m2['nameConflicts']).toBe(2);
+    expect((await row('Orders', id)).name).toBe('Luis (V-70123457)');
+  });
+
+  it('two different cedulas in one name are a conflict, not a guess', async () => {
+    const id = await orderWith('Ana (V-70123456) y Luis (E-81234567)');
+    const m = await svc().backfill(opts);
+    expect(m['nameConflicts']).toBe(1);
+    const r = await row('Orders', id);
+    expect(r.enc).toBeNull();
+    expect(r.name).toBe('Ana (V-70123456) y Luis (E-81234567)');
+  });
+
+  it('a concurrent edit of the name between the read and the write is not overwritten', async () => {
+    const id = await orderWith('Ana Prueba (V-70123456)');
+    let edited = false;
+    const m = await svc().backfill({
+      ...opts,
+      onBatch: async () => {
+        if (edited) return;
+        edited = true;
+        await q(`UPDATE "Orders" SET "recipientName"='Nueva' WHERE id=$1`, id);
+      },
+    });
+    expect(m.errors).toBe(0);
+    // whatever the interleaving, the name is either the clean extraction or the edit, never garbage,
+    // and when the name was cleaned the Enc is there
+    const r = await row('Orders', id);
+    expect(['Ana Prueba', 'Nueva']).toContain(r.name);
+    if (r.name === 'Ana Prueba')
+      expect(ringA.decrypt(r.enc as string)).toBe('V-70123456');
+  });
+});
+
+describe('--check also detects a stale Enc (plain_mismatch) and malformed Enc gives row ids', () => {
+  it('a plain value edited by a rolled-back app fails --check with the row id, no value', async () => {
+    await seed(30, 0);
+    await svc().backfill(opts);
+    expect((await svc().check()).ok).toBe(true);
+    const id = (
+      await q<{ id: string }>(
+        `SELECT id::text id FROM "Orders" WHERE "recipientIdDoc" LIKE 'V-%' LIMIT 1`,
+      )
+    )[0].id;
+    await q(
+      `UPDATE "Orders" SET "recipientIdDoc"='V-99999999' WHERE id=$1`,
+      id,
+    );
+    const c = await svc().check();
+    expect(c.ok).toBe(false);
+    expect(c.plainMismatch['orders.recipient']).toBe(1);
+    expect(c.sampleIds.plainMismatch).toEqual([id]);
+    noValues(JSON.stringify(c));
+  });
+
+  it('a malformed Enc aborts the backfill BEFORE writing, naming the row ids (never the value)', async () => {
+    await seed(20, 0);
+    const bad = (
+      await q<{ id: string }>(
+        `SELECT id::text id FROM "Orders" WHERE "recipientIdDoc" LIKE 'V-%' LIMIT 1`,
+      )
+    )[0].id;
+    await q(
+      `UPDATE "Orders" SET "recipientIdDocEnc"='garbage-70123456' WHERE id=$1`,
+      bad,
+    );
+    const before = await plainOrders();
+    let err: unknown;
+    try {
+      await svc().backfill(opts);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(IdDocMigrationError);
+    const msg = (err as Error).message;
+    expect(msg).toContain(bad);
+    expect(msg).toContain('15.7');
+    expect(msg).not.toContain('garbage');
+    noValues(msg);
+    expect(
+      await count(
+        `SELECT count(*) n FROM "Orders" WHERE "recipientIdDocEnc" IS NOT NULL`,
+      ),
+    ).toBe(1); // nothing else was written
+    expect(await plainOrders()).toBe(before);
+    // the documented repair: clear Enc/Blind of those ids, run again
+    await q(
+      `UPDATE "Orders" SET "recipientIdDocEnc"=NULL,"recipientIdDocBlind"=NULL WHERE id=$1`,
+      bad,
+    );
+    expect((await svc().backfill(opts)).outcome).toBe('ok');
+  });
+
+  it('--check lists the ids of malformed ciphertext', async () => {
+    await seed(10, 0);
+    await svc().backfill(opts);
+    const bad = (
+      await q<{ id: string }>(
+        `SELECT id::text id FROM "Orders" WHERE "recipientIdDocEnc" IS NOT NULL LIMIT 1`,
+      )
+    )[0].id;
+    await q(`UPDATE "Orders" SET "recipientIdDocEnc"='x' WHERE id=$1`, bad);
+    const c = await svc().check();
+    expect(c.sampleIds.malformed).toEqual([bad]);
+  });
+});
+
+describe('scrub and blank counters (fix)', () => {
+  it('blank plain values in the address book are cleared (they used to stay for ever); a rerun is clean', async () => {
+    await seed(0, 20);
+    await addressWith('n', '');
+    await addressWith('n', '   ');
+    await addressWith('n', '\u200B');
+    await svc().backfill(opts);
+    const m = await svc().scrub(opts);
+    expect(m.outcome).toBe('ok');
+    expect(m['scrubbed']).toBe(23);
+    expect(
+      await count(
+        `SELECT count(*) n FROM "Customer_Addresses" WHERE "recipientIdDoc" IS NOT NULL`,
+      ),
+    ).toBe(0);
+    const m2 = await svc().scrub(opts);
+    expect(m2.outcome).toBe('ok');
+    expect(m2.skipped).toBe(0);
+  });
+
+  it('a blank value is never cleared when a REAL cedula without Enc sits next to it (verify refuses first)', async () => {
+    await addressWith('n', 'V-70123456'); // not backfilled
+    await addressWith('n', ' ');
+    const m = await svc().scrub(opts);
+    expect(m.outcome).toBe('VERIFY_FAILED');
+    expect(
+      await count(
+        `SELECT count(*) n FROM "Customer_Addresses" WHERE "recipientIdDoc" IS NOT NULL`,
+      ),
+    ).toBe(2);
+  });
+
+  it('blank counters are counted once, from the data, however many passes the run needs', async () => {
+    for (let i = 0; i < 5; i++) await orderWith('n', ' ');
+    for (let i = 0; i < 3; i++) await addressWith('n', '');
+    for (let i = 0; i < 50; i++) await orderWith('n', `V-${70100000 + i}`);
+    const m = await svc().backfill({ ...opts, batchSize: 7 });
+    expect(m.passes).toBeGreaterThanOrEqual(1);
+    expect(m.blank).toBe(8);
+    expect(m.bySet['orders.recipient'].blank).toBe(5);
+    expect(m.bySet['addresses.recipient'].blank).toBe(3);
+    expect(m.outcome).toBe('ok');
+  });
+});

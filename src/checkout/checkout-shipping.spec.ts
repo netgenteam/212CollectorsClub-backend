@@ -430,4 +430,121 @@ describe('checkout-shipping (Story 17.4)', () => {
       });
     });
   });
+
+  describe('flat format with the cedula inside recipientName (Story 20.3 fix)', () => {
+    const flat = (over: Record<string, unknown>) => ({
+      recipientName: 'Ana Prueba',
+      recipientPhone: '04121234567',
+      addressLine1: 'L1',
+      city: 'Caracas',
+      state: 'DC',
+      ...over,
+    });
+    const run = async (dto: Record<string, unknown>) => {
+      const prepared = prepareCheckoutIdDoc(dto, crypto);
+      return resolveCheckoutShipping({} as never, {} as never, dto, null, {
+        crypto,
+        prepared,
+      });
+    };
+    const plain = (enc: string | null) => (enc ? crypto.decrypt(enc) : null);
+
+    it.each([
+      'Ana Prueba (V-70123456)',
+      'Ana Prueba ( V70123456 )',
+      'Ana Prueba V-70123456',
+      'Ana Prueba, V-70.123.456',
+      'Ana Prueba (CI: V-70123456)',
+    ])('%j: name stored clean, cedula only in Enc/Blind', async (name) => {
+      const r = await run(flat({ recipientName: name }));
+      expect(r.recipientName).toBe('Ana Prueba');
+      expect(plain(r.recipientIdDocEnc)).toBe('V-70123456');
+      expect(r.recipientIdDocBlind).toBe(crypto.blindIndexOf('V-70123456'));
+      expect(JSON.stringify(r)).not.toMatch(/7012\s*3456/);
+    });
+
+    it('an explicit recipientIdDoc in its own field is accepted by the flat format and wins over the name', async () => {
+      const r = await run(
+        flat({
+          recipientIdDoc: 'v 81234567',
+          recipientName: 'Ana (V-70123456)',
+        }),
+      );
+      expect(r.recipientName).toBe('Ana');
+      expect(plain(r.recipientIdDocEnc)).toBe('V-81234567');
+      const r2 = await run(flat({ recipientIdDoc: 'V-70123456' }));
+      expect(r2.recipientName).toBe('Ana Prueba');
+      expect(plain(r2.recipientIdDocEnc)).toBe('V-70123456');
+      expect(r2.shippingAgencyId).toBeNull();
+      expect(r2.addressLine1).toBe('L1');
+    });
+
+    it('recipientIdDoc alone does not make the body the agency format', () => {
+      expect(isNewShippingFormat({ recipientIdDoc: 'V-70123456' })).toBe(false);
+      expect(
+        isNewShippingFormat({
+          recipientIdDoc: 'V-70123456',
+          deliveryMode: 'x',
+        }),
+      ).toBe(true);
+    });
+
+    it.each(['Ana Prueba', 'Ana 3era', 'Ana Prueba (hermana)', 'Calle 12345'])(
+      'a name without a cedula stays as it is: %j',
+      async (name) => {
+        const r = await run(flat({ recipientName: name }));
+        expect(r.recipientName).toBe(name);
+        expect(r.recipientIdDocEnc).toBeNull();
+        expect(r.recipientIdDocBlind).toBeNull();
+      },
+    );
+
+    it('an invalid explicit cedula (or a masked one) is 400 SHIPPING_INVALID, field only', async () => {
+      for (const bad of ['abc', 'V-123', 'V-****5678', 'V-70123456*']) {
+        await expect(run(flat({ recipientIdDoc: bad }))).rejects.toMatchObject({
+          response: {
+            errorCode: 'SHIPPING_INVALID',
+            details: { errors: [{ field: 'recipientIdDoc', code: 'INVALID' }] },
+          },
+        });
+      }
+    });
+
+    it('two different cedulas in the name, or a name that is only a cedula, are 400', async () => {
+      await expect(
+        run(flat({ recipientName: 'Ana (V-70123456) y Luis (E-81234567)' })),
+      ).rejects.toMatchObject({ response: { errorCode: 'SHIPPING_INVALID' } });
+      await expect(
+        run(flat({ recipientName: '(V-70123456)' })),
+      ).rejects.toMatchObject({
+        response: {
+          details: { errors: [{ field: 'recipientName', code: 'REQUIRED' }] },
+        },
+      });
+    });
+
+    it('the agency format also gets a clean name (explicit cedula wins)', async () => {
+      const usable = { assertAgencyUsable: vi.fn().mockResolvedValue({}) };
+      const dto = {
+        recipientName: 'Ana Perez (V-70123456)',
+        recipientPhone: '04121234567',
+        recipientIdDoc: 'V-81234567',
+        deliveryMode: 'agency_office',
+        shippingAgencyId: AGENCY,
+        agencyBranchName: 'Sucursal',
+        state: 'Miranda',
+        municipality: 'Baruta',
+      };
+      const prepared = prepareCheckoutIdDoc(dto, crypto);
+      const r = await resolveCheckoutShipping(
+        {} as never,
+        usable as never,
+        dto,
+        null,
+        { crypto, prepared },
+      );
+      expect(r.recipientName).toBe('Ana Perez');
+      expect(plain(r.recipientIdDocEnc)).toBe('V-81234567');
+    });
+  });
 });

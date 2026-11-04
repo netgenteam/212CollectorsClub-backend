@@ -504,6 +504,140 @@ describe('ID document masking (e2e, Story 20.3)', { timeout: 60000 }, () => {
       expect(logged.join('|')).toContain('IDDOC_ENC_MALFORMED');
     });
 
+    describe('flat format: the storefront put the cedula inside recipientName (the real path of the shop)', () => {
+      const flat = (over: Record<string, unknown>) => ({
+        paymentRail: 'pago_movil',
+        fulfillmentType: 'delivery',
+        recipientName: 'Ana Prueba',
+        recipientPhone: '04121234567',
+        addressLine1: 'Calle 1',
+        city: 'Caracas',
+        state: 'Miranda',
+        ...registerConsent(),
+        ...over,
+      });
+      const viewsOf = async (o: {
+        orderId: string;
+        orderAccessToken: string;
+      }) => {
+        const lookup = await request(server())
+          .get(`/api/v1/orders/${o.orderId}`)
+          .set('Authorization', `Bearer ${o.orderAccessToken}`)
+          .expect(200);
+        const admin = await request(server())
+          .get(`/api/v1/admin/orders/${o.orderId}`)
+          .set(auth())
+          .expect(200);
+        const list = await request(server())
+          .get('/api/v1/admin/orders?limit=100')
+          .set(auth())
+          .expect(200);
+        return {
+          lookup: lookup.body as unknown,
+          admin: admin.body as unknown,
+          list: list.body as unknown,
+        };
+      };
+
+      it.each([
+        [
+          'old frontend: "Name (V-…)"',
+          { recipientName: `Ana Prueba (${SENTINEL})` },
+        ],
+        [
+          'trailing, no parentheses',
+          { recipientName: `Ana Prueba ${SENTINEL}` },
+        ],
+        [
+          'spaces and lowercase',
+          { recipientName: 'Ana Prueba (  v 70123456 )' },
+        ],
+        ['new frontend: own field', { recipientIdDoc: SENTINEL }],
+      ])(
+        '%s: stored clean + encrypted, every view clean and masked',
+        async (_n, over) => {
+          const res = await checkout(null, flat(over));
+          expect(res.status).toBe(201);
+          noClearValue(res.body);
+          const o = res.body as { orderId: string; orderAccessToken: string };
+          orderIds.push(o.orderId);
+          const row = await prisma.order.findUniqueOrThrow({
+            where: { id: o.orderId },
+          });
+          expect(row.recipientName).toBe('Ana Prueba');
+          expectOnlyEncrypted(row, SENTINEL);
+          const v = await viewsOf(o);
+          for (const body of [v.lookup, v.admin, v.list]) noClearValue(body);
+          expect(
+            (
+              v.lookup as {
+                fulfillment: { recipientName: string; recipientIdDoc: string };
+              }
+            ).fulfillment,
+          ).toMatchObject({
+            recipientName: 'Ana Prueba',
+            recipientIdDoc: MASKED,
+          });
+          expect(
+            (
+              v.admin as {
+                fulfillment: { recipientName: string; recipientIdDoc: string };
+              }
+            ).fulfillment,
+          ).toMatchObject({
+            recipientName: 'Ana Prueba',
+            recipientIdDoc: MASKED,
+          });
+        },
+      );
+
+      it('a name without a cedula, even one with digits, is stored as typed', async () => {
+        const res = await checkout(null, flat({ recipientName: 'Ana 3era' }));
+        expect(res.status).toBe(201);
+        const o = res.body as { orderId: string };
+        orderIds.push(o.orderId);
+        const row = await prisma.order.findUniqueOrThrow({
+          where: { id: o.orderId },
+        });
+        expect(row.recipientName).toBe('Ana 3era');
+        expect(row.recipientIdDocEnc).toBeNull();
+      });
+
+      it('an invalid or masked recipientIdDoc in the flat format is 400 and creates no order', async () => {
+        const before = await prisma.order.count({
+          where: { recipientName: 'Flat Bad' },
+        });
+        for (const bad of ['abc', MASKED, `${SENTINEL}*`]) {
+          const res = await checkout(
+            null,
+            flat({ recipientName: 'Flat Bad', recipientIdDoc: bad }),
+          );
+          expect(res.status).toBe(400);
+          noClearValue(res.body);
+        }
+        expect(
+          await prisma.order.count({ where: { recipientName: 'Flat Bad' } }),
+        ).toBe(before);
+      });
+
+      it('an order saved BEFORE the backfill (cedula still in the name) is served clean by every view', async () => {
+        const res = await checkout(null, flat({}));
+        const o = res.body as { orderId: string; orderAccessToken: string };
+        orderIds.push(o.orderId);
+        await prisma.$executeRaw`UPDATE "Orders" SET "recipientName" = ${`Ana Prueba (${SENTINEL})`} WHERE id = ${o.orderId}::uuid`;
+        const v = await viewsOf(o);
+        for (const body of [v.lookup, v.admin, v.list]) noClearValue(body);
+        expect(
+          (v.lookup as { fulfillment: { recipientName: string } }).fulfillment
+            .recipientName,
+        ).toBe('Ana Prueba');
+        const item = (
+          v.list as { data: Array<{ orderId: string; recipientName: string }> }
+        ).data.find((x) => x.orderId === o.orderId);
+        expect(item?.recipientName).toBe('Ana Prueba');
+      });
+    });
+
     it('the order cedula is recoverable (decrypts to the value) and was never purged or masked in the table', async () => {
       const row = await prisma.order.findUniqueOrThrow({
         where: { id: guestOrder.orderId },

@@ -6,6 +6,7 @@ import {
   ADDRESS_RECIPIENT,
   ALL_SETS,
   BACKFILL_SETS,
+  NAME_SETS,
   SCRUB_SETS,
 } from './iddoc-columns.js';
 
@@ -83,6 +84,50 @@ describe('AC8: order ID documents are untouchable by the scripts', () => {
     expect(outside).not.toMatch(/=\s*''/);
     for (const s of SCRUB_SETS) expect(s.table).toBe('Customer_Addresses');
     expect(SCRUB_SETS).toEqual([ADDRESS_RECIPIENT]);
+  });
+
+  it('the one statement that rewrites a NAME (cedula extraction) only runs after a decryption proof and never without an Enc', () => {
+    const svcPath = join(
+      root,
+      'src',
+      'iddoc-migration',
+      'iddoc-migration.service.ts',
+    );
+    const code = stripComments(readFileSync(svcPath, 'utf8'));
+    const start = code.indexOf('private async cleanNames(');
+    const end = code.indexOf('async verify(');
+    expect(start).toBeGreaterThan(0);
+    const clean = code.slice(start, end);
+    // the name column is written in exactly ONE statement, and only there
+    const nameWrites = code.match(/SET\s+\$\{ident\(ns\.nameCol\)\}/g) ?? [];
+    expect(nameWrites).toHaveLength(1);
+    expect(code.replace(clean, '')).not.toMatch(/ident\(ns\.nameCol\)\}\s*=/);
+    expect(code).not.toMatch(/"recipientName"\s*=/);
+    // SQL guard: the UPDATE of the name requires a stored Enc and compares the old name
+    const upd = clean.slice(clean.lastIndexOf('SET ${ident(ns.nameCol)}'));
+    expect(upd).toMatch(/\$\{ident\(set\.enc\)\}\s+IS NOT NULL/);
+    expect(upd).toMatch(/t\.\$\{ident\(ns\.nameCol\)\}\s*=\s*v\.old_name/);
+    // JS guard: the name update is preceded by a read-back of Enc AND a decryption check of it
+    const before = clean.slice(
+      0,
+      clean.lastIndexOf('SET ${ident(ns.nameCol)}'),
+    );
+    expect(before).toContain('SELECT id::text AS id, ${ident(set.enc)} AS enc');
+    expect(before.lastIndexOf('checkStored')).toBeGreaterThan(
+      before.lastIndexOf('SELECT id::text AS id, ${ident(set.enc)} AS enc'),
+    );
+    expect(before).toContain("=== 'ok'");
+    // a different Enc already there is a conflict: the write of Enc is guarded by IS NULL
+    expect(before).toMatch(/\$\{ident\(set\.enc\)\} IS NULL/);
+    // names are cleaned, never nulled or blanked by a literal
+    expect(clean).not.toMatch(/=\s*NULL/);
+    expect(clean).not.toMatch(/=\s*''/);
+    // and only the two NAME_SETS exist: the order recipient and the address recipient
+    expect(NAME_SETS.map((n) => n.set.table).sort()).toEqual([
+      'Customer_Addresses',
+      'Orders',
+    ]);
+    for (const n of NAME_SETS) expect(n.nameCol).toBe('recipientName');
   });
 
   it('order columns are in every set that reads/encrypts, and in none that scrubs', () => {

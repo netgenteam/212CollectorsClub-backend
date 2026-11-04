@@ -22,16 +22,27 @@ const NAME = String.raw`[A-Za-z0-9_$.]*(?:id_?doc|cedula|buyer_?id|recipient_?id
 /** A quote (plain, escaped for JSON-in-JSON, or a backtick) or nothing. */
 const Q = String.raw`\\*["'\`]?`;
 /** The value after the name: quoted (may hold spaces) or a bare token. Never eats an already redacted marker. */
-const VALUE = String.raw`(?!\[REDACTED)(?:\\*"[^"]*"|\\*'[^']*'|\\*\`[^\`]*\`|[^\s,;)}\]"'\`\\]+)`;
+const VALUE = String.raw`(?!\[REDACTED)(?:\\*"[^"]*"|\\*'[^']*'|\\*\`[^\`]*\`|[^\s,;)}\]"'\`\\&]+)`;
 /**
  * `recipientIdDoc: 12345678`, `recipientIdDoc=V-1`, `{"recipientIdDoc":"1234"}`,
  * `{\"recipientIdDoc\":\"1234\"}`, `recipientIdDocEnc => v1:...`: name, optional quote,
  * `:` / `=` / `=>`, then the value. The label is kept (useful to read the log), the value is not.
  */
 const FIELD_VALUE = new RegExp(
-  `(${NAME})(${Q}\\s*(?::|=>?)\\s*)(\\(?)${VALUE}`,
+  // `idDoc[0]=…` / `idDoc[a]=…` (array / query-string style) and a URL-encoded separator
+  // (`idDoc%3D…`, `%3A`) are the same thing as `idDoc=…`.
+  `(${NAME}(?:\\[[^\\]]{0,20}\\])*)(${Q}\\s*(?::|=>?|%3[dDaA])\\s*)(\\(?)(${VALUE})`,
   'gi',
 );
+/**
+ * A label in prose followed by the number: `ci: 12345678`, `C.I. V-12345678`, `cedula 12345678`
+ * (no colon), `RIF J-12345678-9`, `pasaporte AB123456`. The label stays, the value goes.
+ */
+const LABEL_VALUE = new RegExp(
+  String.raw`(?<![\w])(c\.?\s?i\.?|c[eé]dula|ced\.?|rif|pasaporte)(\s*[:=#]?\s*)((?:[VEJGP][\s.-]?)?\d(?:[.\s-]?\d){4,10}(?:-\d)?|P[\s.-]?[A-Z]{1,3}\d{4,10})(?![\w])`,
+  'gi',
+);
+const INVISIBLE = new RegExp('[\u200B-\u200D\u2060\uFEFF]', 'g');
 /**
  * Postgres unique/foreign key detail: `Key (recipientIdDoc)=(12345678)` and the multi-column form
  * `Key (customerId, recipientIdDocBlind)=(<uuid>, abc...)`: if any column of the list is sensitive,
@@ -49,15 +60,40 @@ const MAX_NODES = 2_000;
 /** Cheap gate: every cedula token needs 5 digits in a row or a grouped `d.ddd.ddd`. */
 const MAYBE_ID =
   /\d{5}|\d[.\s]\d{3}[.\s]\d{3}|[pP][\s.-][A-Za-z0-9]{5}|iddoc|id_doc|cedula|buyerid|buyer_id|recipientid|recipient_id|v\d{1,4}:/i;
+/** Any non-ASCII character: the only strings that can hide a cedula behind NFKC / zero-width tricks. */
+// eslint-disable-next-line no-control-regex
+const NON_ASCII = /[^\x00-\x7F]/;
 
 /** Replaces cedula-shaped tokens in free text. A line without 5 digits skips the regex. */
 export function redactString(input: string): string {
+  if (input.length === 0) return input;
+  // `Ｖ-７０１２３４５６` (fullwidth) and `V<ZWSP>-…` are the same cedula once folded: look at the
+  // folded text, and if it holds one, return the folded-and-redacted text (never the original).
+  if (NON_ASCII.test(input)) {
+    const folded = input.normalize('NFKC').replace(INVISIBLE, '');
+    if (folded !== input) {
+      const r = redactAscii(folded);
+      if (r !== folded) return r;
+    }
+  }
+  return redactAscii(input);
+}
+
+function redactAscii(input: string): string {
   if (input.length === 0 || !MAYBE_ID.test(input)) return input;
-  // 1) by field name (catches values that have no cedula shape: `recipientIdDoc: 12345678`)
+  // 1) by field name (catches values that have no cedula shape: `recipientIdDoc: 12345678`).
+  // A bare word with no digit (`iddoc:backfill started`, `idDocType=V`) is not a cedula: kept.
   let out = input.replace(
     FIELD_VALUE,
-    (_m, name: string, sep: string, open: string) =>
-      `${name}${sep}${open}${REDACTED}`,
+    (m: string, name: string, sep: string, open: string, value: string) =>
+      /^[\\"'`]/.test(value) || /\d/.test(value)
+        ? `${name}${sep}${open}${REDACTED}`
+        : m,
+  );
+  // 1b) a label in prose followed by the number (`ci: …`, `C.I. …`, `cedula …`)
+  out = out.replace(
+    LABEL_VALUE,
+    (_m, label: string, sep: string) => `${label}${sep}${REDACTED_ID_DOC}`,
   );
   out = out.replace(
     PG_KEY,

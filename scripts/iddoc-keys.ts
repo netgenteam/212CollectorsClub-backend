@@ -56,7 +56,13 @@ export function assertLocalOnly(
       'the target is under /opt/212cc (a server): this helper never runs there',
     );
   }
-  if (/^\s*NODE_ENV\s*=\s*["']?production["']?\s*$/im.test(text)) {
+  // `NODE_ENV=production`, `export NODE_ENV = "production"  # live`, CRLF line ends. The LAST
+  // assignment is the one a shell/dotenv would end up with, but any production line refuses.
+  if (
+    /^\s*(?:export\s+)?NODE_ENV\s*=\s*(?:"production"|'production'|production)\s*(?:#.*)?$/im.test(
+      text,
+    )
+  ) {
     throw new KeysRefused('the target file declares NODE_ENV=production');
   }
 }
