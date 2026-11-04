@@ -13,6 +13,8 @@
 --                      password would end up in the server log. `pnpm db:roles` converts
 --                      APP_DB_PASSWORD (scripts/scram-verifier.mjs); this file refuses clear text.
 --   dbroles.owner      role whose FUTURE tables the app role gets privileges on (default: the current user)
+--   dbroles.revoke_temp  'off' to keep the TEMPORARY privilege that PUBLIC has on the database by default.
+--                      Anything else (the default) revokes it from PUBLIC: see "TEMPORARY" below.
 --
 -- The role: LOGIN, not SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS, owns nothing.
 -- It cannot run DDL, cannot ALTER/DISABLE a trigger and, for "Audit_Events", has
@@ -20,6 +22,18 @@
 -- from roles that existed when it ran). A superuser/DBA can still disable the
 -- triggers and rewrite the chain (A91): the mitigation is the external anchor
 -- of the chain head (docs/deployment.md 13).
+--
+-- TEMPORARY (Story 20.1, QA round 4): a role with TEMPORARY on the database can create
+-- temporary tables/views/types, which Postgres searches before the real ones for any
+-- statement that does not list `pg_temp` explicitly in its search_path. The trigger
+-- functions list it LAST (migration 20261107100000), so a temporary table can no longer
+-- stand in for "Audit_Events" or "Legal_Documents"; revoking TEMPORARY is the second layer:
+-- the app role cannot create the decoy at all. The privilege comes from PUBLIC (the
+-- default ACL of every database), so the REVOKE must be FROM PUBLIC: it also takes the
+-- privilege from every other non-owner role of THIS database (superusers and the owner keep
+-- it). The application does not use temporary tables (tested with the whole e2e suite
+-- under the limited role). Pass dbroles.revoke_temp = 'off' (DB_ROLES_REVOKE_TEMP=off) if
+-- another role of the database needs them, and GRANT TEMPORARY to that role instead.
 DO $$
 DECLARE
   env        text := current_setting('dbroles.env', true);
@@ -38,7 +52,7 @@ BEGIN
 
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = app) THEN
     IF pw IS NULL OR pw = '' THEN
-      RAISE EXCEPTION 'dbroles.password is required to create the role %', app;
+      RAISE EXCEPTION 'dbroles.password is required to create the role % (a new server or database does not have it yet: set APP_DB_PASSWORD; omit it only to re-run on a role that already exists)', app;
     END IF;
     EXECUTE format(
       'CREATE ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT',
@@ -57,6 +71,10 @@ BEGIN
 
   EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', db, app);
   EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', app);
+  IF coalesce(current_setting('dbroles.revoke_temp', true), 'on') <> 'off' THEN
+    EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', db);
+    EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM %I', db, app);
+  END IF;
   EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I', app);
   EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', app);
 

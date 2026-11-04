@@ -345,12 +345,24 @@ describe('public seller fields: explicit per action, never general', () => {
     expect(publicFieldsOf('CUSTOMER_ANONYMIZED')).toBeUndefined();
   });
 
-  it('no CUSTOMER_*, ORDER_*, ID_DOC_* or CONSENT_* action has an allowance (guard rail on the catalog)', () => {
-    for (const a of Object.keys(AUDIT_ACTIONS) as AuditAction[]) {
-      if (/^(CUSTOMER_|ORDER_|ID_DOC_|CONSENT_|LOGIN_|ADMIN_)/.test(a)) {
-        expect(publicFieldsOf(a), a).toBeUndefined();
-      }
-    }
+  // A POSITIVE list: a new action (or any existing one) with `publicFields` fails here until a
+  // reviewer adds it on purpose. (A deny list by prefix let `STRIPE_PAYMENT_STATE_CHANGED`
+  // declare one with every test green.)
+  const MAY_DECLARE_PUBLIC_FIELDS: readonly AuditAction[] = [
+    'PAYMENT_PAGO_MOVIL_CONFIRMED',
+    'PAYMENT_PAGO_MOVIL_REJECTED',
+    'SELLER_IDENTITY_UPDATED',
+    'SHIPPING_AGENCY_CHANGED',
+  ];
+
+  it('only the allow-listed actions declare publicFields (guard rail on the catalog)', () => {
+    const withAllowance = (Object.keys(AUDIT_ACTIONS) as AuditAction[])
+      .filter((a) => publicFieldsOf(a) !== undefined)
+      .sort();
+    expect(withAllowance).toEqual([...MAY_DECLARE_PUBLIC_FIELDS].sort());
+  });
+
+  it('no declared path names a secret or an identity document', () => {
     for (const a of Object.keys(AUDIT_ACTIONS) as AuditAction[]) {
       const pf = publicFieldsOf(a) ?? {};
       for (const k of Object.keys(pf)) {
@@ -359,6 +371,66 @@ describe('public seller fields: explicit per action, never general', () => {
         );
       }
     }
+  });
+
+  it('publicFields apply at the FIRST level only, or at a declared full path', () => {
+    const rif = { rif: 'V-12345678', address: 'Av. Principal 1' };
+    // first level: allowed on the seller action
+    expect(() => run('SELLER_IDENTITY_UPDATED', rif, 'strict')).not.toThrow();
+    // one level down: the same keys are NOT exempt (a customer's data can look like this)
+    for (const nested of [
+      { customer: rif },
+      { customer: { profile: rif } },
+      { list: [rif] },
+      { branches: [{ address: 'Av. Principal 1' }] },
+    ]) {
+      expect(() => run('SELLER_IDENTITY_UPDATED', nested, 'strict')).toThrow(
+        /personal data|looks like|key/i,
+      );
+    }
+    // lenient mode redacts instead
+    const r = sanitizeAuditPayload(
+      { customer: rif },
+      'lenient',
+      '$',
+      publicFieldsOf('SELLER_IDENTITY_UPDATED'),
+    );
+    expect(JSON.stringify(r.value)).not.toContain('V-12345678');
+    expect(r.issues.length).toBeGreaterThan(0);
+    // a declared full path (what a story would add for `branches[].address`) works, and only there
+    const declared = { 'branches[].address': [] } as const;
+    const ok = sanitizeAuditPayload(
+      { branches: [{ address: 'Av. Principal 1' }] },
+      'strict',
+      '$',
+      declared,
+    );
+    expect(ok.value).toEqual({ branches: [{ address: 'Av. Principal 1' }] });
+    expect(() =>
+      sanitizeAuditPayload(
+        { other: [{ address: 'Av. Principal 1' }] },
+        'strict',
+        '$',
+        declared,
+      ),
+    ).toThrow();
+    expect(() =>
+      sanitizeAuditPayload(
+        { address: 'Av. Principal 1' },
+        'strict',
+        '$',
+        declared,
+      ),
+    ).toThrow();
+    // a key with a dot is one segment, not a path
+    expect(() =>
+      sanitizeAuditPayload(
+        { 'branches[]': { address: 'Av. Principal 1' } },
+        'strict',
+        '$',
+        declared,
+      ),
+    ).toThrow();
   });
 });
 

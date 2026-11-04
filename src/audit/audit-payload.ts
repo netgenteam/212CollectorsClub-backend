@@ -79,7 +79,11 @@ export type PublicValueClass = 'EMAIL' | 'PHONE' | 'CEDULA';
 
 /**
  * Per-action allowance of PUBLIC business data (Story 20.1 fix, for 20.5): key
- * name -> value detectors that key is exempt from. The sellers' RIF, fiscal
+ * PATH -> value detectors that key is exempt from. A path is the key name for a
+ * first-level key of the payload (`address`) and a dotted path with `[]` for array
+ * elements for anything deeper (`branches[].address`); a key that is not at its declared
+ * path is not exempt (`{ customer: { rif } }` is not `rif`). Dots, brackets and backslashes
+ * inside a key name are escaped with a backslash. The sellers' RIF, fiscal
  * address, contact email/phone and Pago Movil account are published by the
  * seller itself; what the guard protects is the CUSTOMERS' personal data. The
  * allowance lives in the catalog (`AUDIT_ACTIONS[action].publicFields`) so it is
@@ -509,7 +513,15 @@ export function sanitizeAuditPayload(
     return clean;
   };
 
-  const walk = (v: unknown, path: string, depth: number): AuditPayload => {
+  /** One segment of a declared public-field path (`.` `[` `]` `\\` in a key are escaped). */
+  const seg = (k: string): string => k.replace(/[.[\]\\]/g, (c) => `\\${c}`);
+
+  const walk = (
+    v: unknown,
+    path: string,
+    depth: number,
+    logical: string,
+  ): AuditPayload => {
     if (depth > MAX_DEPTH) throw new AuditPayloadError(path, 'nested too deep');
     if (v === null || typeof v === 'boolean') return v;
     if (typeof v === 'number') {
@@ -525,7 +537,7 @@ export function sanitizeAuditPayload(
       return v.map((x, i) =>
         x === undefined
           ? (violation(`${path}[${i}]`, 'undefined'), null)
-          : walk(x, `${path}[${i}]`, depth + 1),
+          : walk(x, `${path}[${i}]`, depth + 1, `${logical}[]`),
       );
     }
     if (
@@ -543,6 +555,10 @@ export function sanitizeAuditPayload(
           key = redactText(key).text;
         }
         const kPath = `${path}.${pathKey(key)}`;
+        // Where this key sits, for the public-field catalog: `address` at the first level,
+        // `branches[].address` inside an array of objects. A nested key is public only if
+        // its FULL path is declared: `{ customer: { rif } }` is not `rif`.
+        const lPath = logical === '' ? seg(key) : `${logical}.${seg(key)}`;
         if (keyHits.length > 0) {
           violation(kPath, `key looks like ${labels(keyHits)}`);
         }
@@ -562,8 +578,8 @@ export function sanitizeAuditPayload(
         const pub =
           keyHits.length === 0 &&
           publicFields !== undefined &&
-          Object.prototype.hasOwnProperty.call(publicFields, key)
-            ? publicFields[key]
+          Object.prototype.hasOwnProperty.call(publicFields, lPath)
+            ? publicFields[lPath]
             : undefined;
         const kv = pub === undefined ? keyViolation(key) : null;
         if (x === undefined) {
@@ -581,7 +597,7 @@ export function sanitizeAuditPayload(
             item = '[REDACTED:KEY]';
           }
         } else {
-          item = walk(x, kPath, depth + 1);
+          item = walk(x, kPath, depth + 1, lPath);
         }
         // defineProperty: a `__proto__` key must stay an own property.
         Object.defineProperty(out, key, {
@@ -596,7 +612,7 @@ export function sanitizeAuditPayload(
     throw new AuditPayloadError(path, unsupportedWhy(v));
   };
 
-  return { value: walk(value, rootPath, 0), issues };
+  return { value: walk(value, rootPath, 0, ''), issues };
 }
 
 /** Strict check (throws `AuditPayloadError`); kept for callers and tests that only validate. */

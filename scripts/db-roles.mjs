@@ -2,6 +2,10 @@
 //
 //   DB_ROLES_ENV=production APP_DB_PASSWORD='...' pnpm db:roles
 //
+// APP_DB_PASSWORD is REQUIRED the first time (the role does not exist yet: a new server,
+// a restore on another server); without it an existing role keeps its password.
+// DB_ROLES_REVOKE_TEMP=off keeps the TEMPORARY privilege of PUBLIC (see scripts/db-roles.sql).
+//
 // Connects with MIGRATE_DATABASE_URL (the owner/migrator), falling back to
 // DATABASE_URL. It runs scripts/db-roles.sql, which is idempotent. It prints the
 // role name only: never the connection string or the password.
@@ -43,8 +47,8 @@ client.on('notice', (n) => console.log(`[db:roles] ${n.message}`));
 try {
   await client.connect();
   await client.query(
-    `SELECT set_config('dbroles.env', $1, false), set_config('dbroles.password', $2, false), set_config('dbroles.owner', '', false)`,
-    [env, password],
+    `SELECT set_config('dbroles.env', $1, false), set_config('dbroles.password', $2, false), set_config('dbroles.owner', '', false), set_config('dbroles.revoke_temp', $3, false)`,
+    [env, password, process.env.DB_ROLES_REVOKE_TEMP === 'off' ? 'off' : 'on'],
   );
   await client.query(sql);
   console.log(`[db:roles] done: collectorsclub_${env}_app on database ${(await client.query('SELECT current_database() AS d')).rows[0].d}`);

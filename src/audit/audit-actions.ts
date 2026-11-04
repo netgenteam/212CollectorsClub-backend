@@ -35,8 +35,9 @@ const PAGO_MOVIL_PUBLIC = {
  * only checks `action ~ '^[A-Z0-9_]+$'`). `emittedBy` is the story of Epic 20
  * that wires the emission. `publicFields` (optional) is the explicit, per-action
  * allowance of public business data the payload guard would otherwise reject
- * (see `PublicFields` in `audit-payload.ts`). No action has it by default, and
- * `CUSTOMER_*` / `ORDER_*` / `ID_DOC_*` never do.
+ * (see `PublicFields` in `audit-payload.ts`; keys are first-level names or full
+ * paths). No action has it by default, and only the actions in the allow-list of
+ * `audit-catalog-payloads.spec.ts` may declare one.
  */
 export const AUDIT_ACTIONS = {
   // Admin session
@@ -80,10 +81,12 @@ export const AUDIT_ACTIONS = {
   CONSENT_RECORDED: { emittedBy: '20.5' },
   // Operations
   DATA_EXPORTED: { emittedBy: '20.5' },
-  // A carrier branch address is a public office, not a person's.
+  // A carrier branch address is a public office, not a person's. `address` at the first
+  // level (one branch) and `branches[].address` (a list of branches): any OTHER nesting
+  // is not exempt (the allowance is by full path, see `PublicFields`).
   SHIPPING_AGENCY_CHANGED: {
     emittedBy: '20.5',
-    publicFields: { address: [] },
+    publicFields: { address: [], 'branches[].address': [] },
   },
   RETENTION_PURGE_RUN: { emittedBy: '20.8' },
   DATA_MIGRATION_RUN: { emittedBy: '20.3' },

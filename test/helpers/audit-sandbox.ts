@@ -49,15 +49,41 @@ export function auditMigrationSql(): string {
 }
 
 /** The later migrations that change the audit objects (applied after the first one, in order). */
-export function auditHardeningSql(): string[] {
+export function auditHardeningSql(schema: string): string[] {
   return readdirSync(MIGRATIONS)
     .filter(
       (d) =>
         d.endsWith('_audit_chain_hardening') ||
-        d.endsWith('_audit_restore_safe'),
+        d.endsWith('_audit_restore_safe') ||
+        d.endsWith('_pin_trigger_functions_pg_temp_last'),
     )
     .sort()
-    .map((d) => readFileSync(join(MIGRATIONS, d, 'migration.sql'), 'utf8'));
+    .map((d) =>
+      sandboxize(
+        readFileSync(join(MIGRATIONS, d, 'migration.sql'), 'utf8'),
+        schema,
+      ),
+    );
+}
+
+/**
+ * `20261107100000_pin_trigger_functions_pg_temp_last` names `public` literally and also
+ * alters the Epic 19 functions, which do not exist in a sandbox (and unqualified they would
+ * resolve to the REAL ones in `public`: the sandbox must never touch them). So replay only
+ * its `audit_*` lines, with `public` replaced by the sandbox schema. Any other migration is
+ * returned unchanged.
+ */
+export function sandboxize(sql: string, schema: string): string {
+  const literal = 'SET search_path = pg_catalog, public, pg_temp';
+  if (!sql.includes(literal)) return sql;
+  const lines = sql.split('\n').filter((l) => {
+    if (!/^ALTER FUNCTION /.test(l)) return true;
+    return /^ALTER FUNCTION "audit_/.test(l);
+  });
+  return lines
+    .join('\n')
+    .split(literal)
+    .join(`SET search_path = pg_catalog, "${schema}", pg_temp`);
 }
 
 /** The migration without its own BEGIN/COMMIT (to run inside a caller's transaction). */
@@ -127,7 +153,7 @@ export async function createAuditSandbox(
     let sql = auditMigrationSql();
     if (opts.noTriggers) sql = withoutTriggers(sql);
     await client.query(sql);
-    for (const more of auditHardeningSql()) await client.query(more);
+    for (const more of auditHardeningSql(schema)) await client.query(more);
     if (opts.extraSql) await client.query(opts.extraSql);
   } catch (err) {
     await client

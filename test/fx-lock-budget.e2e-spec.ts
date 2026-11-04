@@ -13,6 +13,7 @@ import { createGlobalValidationPipe } from './../src/common/global-validation-pi
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { FX_LOCK_BUDGET_MS } from './../src/fx/admin-fx.service.js';
 import { restoreFx, snapshotFx, type FxState } from './helpers/db-snapshot.js';
+import { startClockProbe } from './helpers/clock-probe.js';
 
 /**
  * Story 19.1 (QA 18.12 observation, same cause as D1): PUT /admin/fx/settings
@@ -29,14 +30,27 @@ import { restoreFx, snapshotFx, type FxState } from './helpers/db-snapshot.js';
 // (budget + request/transaction overhead), so the upper bound is budget + 3 s
 // (still far below Nginx's 60 s); the old +1.5 s only held because the wall
 // clock was losing time.
-// Story 20.1 round 3 (NOT fixed, cause open): the run still fails sometimes with
-// 23.8 s measured for the 25 s budget (two runs: 23 782 and 23 806 ms), with the
-// monotonic clock on the test side. `LockBudget` was switched to `performance.now()`
-// as an experiment and the failure persisted, so it was reverted. Most likely
-// suspect: Postgres arms `lock_timeout`/`statement_timeout` from the WALL clock
-// (gettimeofday) of its own container, and a forward step of ~1.2 s of the WSL2 VM
-// clock during the 25 s wait makes it fire early. Not verified. Do not loosen the
-// bound until that is confirmed.
+// Story 20.1 round 4 (CAUSE FOUND, measured): the run failed now and then with 23.7-23.8 s
+// for the 25 s budget. Nothing is wrong in the product. The WSL2 wall clock (`Date.now()`,
+// and the one Postgres uses for `lock_timeout` / `statement_timeout`: the container shares
+// the kernel) steps FORWARD ~1.2 s about every 32 s relative to the monotonic clock
+// (`performance.now()`): a bare Node timer over 120 s measured 120 041 ms monotonic vs
+// 123 575 ms wall, in three steps of 1 208 / 1 177 / 1 149 ms at 23.6, 55.8 and 88.1 s. A
+// 25 s wait therefore contains one step in ~78 % of the runs, Postgres counts 25.0 s of WALL
+// time (the `clocks` probe below: pgSpan 25 010 ms, the waiter seen for 24 974 ms after a
+// 26 ms start) while only 23.8 s of monotonic time went by. It is not a budget split with
+// earlier work either: the lock statement started 26 ms into the request and was armed with
+// the full 24 974 ms. So the floor is judged on the clock the database counts (wall) OR the
+// monotonic one, whichever has run more: the budget is spent when either says so. The CEILING
+// is unchanged (monotonic budget + 3 s) because a step makes the wall clock run FAST, never
+// slow, and the monotonic figure is the real time the caller waited. A backward step (seen in
+// an earlier session, D3) lowers the wall figure and leaves the monotonic one, hence `max`.
+// If the floor were hit by a real defect (budget consumed by earlier work) both clocks would
+// miss it by seconds, not by one 1.2 s step: that is what the 500 ms margin still catches.
+/** The budget has been spent when EITHER clock says so (see the cause above). */
+const spentMs = (mono0: number, wall0: number): number =>
+  Math.max(performance.now() - mono0, Date.now() - wall0);
+
 const TAG = randomUUID().slice(0, 8);
 const USER = `e2e-fxlock-${TAG}`;
 const PASS = 'correct-horse-battery-staple-19-1';
@@ -74,6 +88,11 @@ describe('FX admin lock budget (e2e, Story 19.1)', () => {
         ? `SELECT pg_advisory_xact_lock(hashtextextended('fx:refresh', 0))`
         : `SELECT 1 FROM "Fx_Rate_Settings" WHERE id = 'default' FOR UPDATE`,
     );
+  };
+  const probeUrl = () => {
+    const url = new URL(process.env.DATABASE_URL ?? '');
+    url.search = '';
+    return url.toString();
   };
   const release = async () => {
     if (!locker) return;
@@ -146,15 +165,19 @@ describe('FX admin lock budget (e2e, Story 19.1)', () => {
       await prisma.$queryRaw`SELECT * FROM "Fx_Rate_Settings"`,
     );
     await hold('advisory');
+    const probe = await startClockProbe(probeUrl());
     const t0 = performance.now();
+    const w0 = Date.now();
     const res = await put();
     const elapsed = performance.now() - t0;
+    const spent = spentMs(t0, w0);
+    const clocks = (await probe.stop()).summary;
     console.log(
-      `[19.1] FX PUT, advisory lock held: HTTP ${res.status} in ${elapsed} ms`,
+      `[19.1] FX PUT, advisory lock held: HTTP ${res.status} in ${elapsed} ms; clocks ${JSON.stringify(clocks)}`,
     );
     expect(res.status).toBe(409);
     expect(code(res)).toBe('FX_SETTINGS_BUSY');
-    expect(elapsed).toBeGreaterThanOrEqual(FX_LOCK_BUDGET_MS - 500);
+    expect(spent).toBeGreaterThanOrEqual(FX_LOCK_BUDGET_MS - 500);
     expect(elapsed).toBeLessThanOrEqual(FX_LOCK_BUDGET_MS + 3_000);
     expect(await audits()).toBe(before);
     expect(
@@ -177,7 +200,9 @@ describe('FX admin lock budget (e2e, Story 19.1)', () => {
     await setRejected();
     const before = await audits();
     await hold('row');
+    const probe = await startClockProbe(probeUrl());
     const t0 = performance.now();
+    const w0 = Date.now();
     const timed = async (r: request.Test) => {
       const res = await r;
       return { res, ms: performance.now() - t0 };
@@ -187,15 +212,17 @@ describe('FX admin lock budget (e2e, Story 19.1)', () => {
     const a = at.res;
     console.log(`[19.1] FX row lock: PUT ${pt.ms} ms, accept ${at.ms} ms`);
     const elapsed = performance.now() - t0;
+    const spent = spentMs(t0, w0);
+    const clocks = (await probe.stop()).summary;
     console.log(
-      `[19.1] FX row lock held: PUT ${p.status}, accept-rejected ${a.status} in ${elapsed} ms`,
+      `[19.1] FX row lock held: PUT ${p.status}, accept-rejected ${a.status} in ${elapsed} ms; clocks ${JSON.stringify(clocks)}`,
     );
     expect([p.status, a.status]).toEqual([409, 409]);
     expect([code(p), code(a)]).toEqual([
       'FX_SETTINGS_BUSY',
       'FX_SETTINGS_BUSY',
     ]);
-    expect(elapsed).toBeGreaterThanOrEqual(FX_LOCK_BUDGET_MS - 500);
+    expect(spent).toBeGreaterThanOrEqual(FX_LOCK_BUDGET_MS - 500);
     expect(elapsed).toBeLessThanOrEqual(FX_LOCK_BUDGET_MS + 3_000);
     expect(await audits()).toBe(before);
     await release();
