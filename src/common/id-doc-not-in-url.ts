@@ -46,7 +46,7 @@ const strip = (s: string): string => s.normalize('NFKD').replace(/[̀-ͯ]/g, '')
 function keyWords(key: string): string[] {
   return strip(key)
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/(?<=[A-Z])(?=[A-Z][a-z])/g, ' ')
     .split(/[^A-Za-z0-9]+/)
     .filter(Boolean)
     .map((w) => w.toLowerCase());
@@ -69,9 +69,23 @@ const CEDULA_SHAPES = [
   /(?<![\w])(?:c[eé]dula|c\.i\.?|ci|rif|dni|pasaporte)(?![\w])\W{0,6}[VEJGP]?[\s.-]?\d{6,9}(?!\d)/i,
 ];
 
+/**
+ * Removes every whitespace-delimited token that holds an `@` with something on each side (what
+ * `/\S+@\S+/g` removed, but that regex is QUADRATIC on a long run without whitespace: about 90 ms
+ * for 15 000 characters in a query value). Linear: one pass over the tokens.
+ */
+export function withoutEmailTokens(text: string): string {
+  if (text.indexOf('@') < 0) return text;
+  return text.replace(/\S+/g, (tok) => {
+    // the first '@' that is not the first character must not be the last one either
+    const i = tok.indexOf('@', 1);
+    return i >= 1 && i <= tok.length - 2 ? ' ' : tok;
+  });
+}
+
 /** True when free text holds something shaped like a cedula (an email token is ignored). */
 export function looksLikeIdDocInText(value: string): boolean {
-  const text = value.normalize('NFKC').replace(/\S+@\S+/g, ' ');
+  const text = withoutEmailTokens(value.normalize('NFKC'));
   return CEDULA_SHAPES.some((re) => re.test(text));
 }
 

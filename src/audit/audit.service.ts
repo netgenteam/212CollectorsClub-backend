@@ -19,7 +19,7 @@ import {
 import {
   AuditPayloadError,
   auditPayloadMode,
-  redactReason,
+  redactReasonCut,
   sanitizeAuditPayload,
 } from './audit-payload.js';
 import type { AuditPayload } from './audit-payload.js';
@@ -413,7 +413,7 @@ export class AuditService {
       if (typeof ev.reason !== 'string') {
         throw new AuditEventError('reason must be a string');
       }
-      const r = redactReason(truncateCodePoints(ev.reason, 2_000));
+      const r = redactReasonCut(ev.reason, 2_000);
       this.logIssues(
         ev.action,
         'reason',

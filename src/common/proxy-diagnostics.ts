@@ -12,9 +12,15 @@ import type { NextFunction, Request, Response } from 'express';
  *
  * 1. At boot (`proxyStartupWarning`): production, `TRUST_PROXY` not set and the server not bound
  *    to loopback only. The default `loopback` is only right when every hop is on this host.
- * 2. At run time (`applyClientIpMonitor`): many CONSECUTIVE requests whose `req.ip` is a private
- *    address, or whose `X-Forwarded-For` was ignored (`req.ip` is the socket peer). One WARN, then
- *    silence for a cool-down, so a flood cannot fill the log.
+ * 2. At run time (`applyClientIpMonitor`): half of the last 100 requests that EXPECT the real client
+ *    address have a `req.ip` that is a private address, or an `X-Forwarded-For` that was ignored
+ *    (`req.ip` is the socket peer). One WARN, then silence for a cool-down, so a flood cannot fill
+ *    the log. It looks at a WINDOW, not a streak (a health check or a request that is fine in the
+ *    middle of the bad ones used to reset a streak and hide the problem), and it skips the routes
+ *    that never carry the client address (QA round 3): the public cached reads Next calls without
+ *    forwarding it (`/fx/current`, `/legal/current-versions`: 60 of them used to raise the warning
+ *    on a correct TRUST_PROXY), the health checks and the Stripe webhook (the caller is Stripe, not
+ *    a visitor).
  */
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
@@ -73,8 +79,33 @@ export function isPrivateIp(ip: string | undefined | null): boolean {
 /** The little of an Express request the diagnostics read (also what the tests pass). */
 export interface ClientIpRequest {
   ip?: string;
+  /** Express' `req.path` (no query string); `originalUrl` / `url` are read when it is absent. */
+  path?: string;
+  originalUrl?: string;
+  url?: string;
   headers: Record<string, string | string[] | undefined>;
   socket?: { remoteAddress?: string };
+}
+
+/**
+ * Routes whose requests do not carry (or do not need) the client address: they say nothing about
+ * whether `TRUST_PROXY` covers the proxy. Mounted under any prefix (`/api/v1/...`).
+ */
+const IP_AGNOSTIC_PATHS: readonly RegExp[] = [
+  /\/health\/?$/i,
+  /\/(?:livez|readyz|healthz|ping)\/?$/i,
+  /\/fx\/current\/?$/i,
+  /\/legal\/current-versions\/?$/i,
+  /\/payments\/stripe\/webhook\/?$/i,
+  /^\/uploads\//i,
+];
+
+/** True when this request is one where a correct setup puts the REAL client address in `req.ip`. */
+export function expectsClientIp(req: ClientIpRequest): boolean {
+  const raw = req.path ?? req.originalUrl ?? req.url ?? '';
+  const q = raw.indexOf('?');
+  const path = q < 0 ? raw : raw.slice(0, q);
+  return !IP_AGNOSTIC_PATHS.some((re) => re.test(path));
 }
 
 export type SuspicionKind = 'private-ip' | 'forwarded-for-ignored';
@@ -104,8 +135,10 @@ function isLoopback(ip: string): boolean {
 }
 
 export interface ClientIpMonitorOptions {
-  /** Consecutive suspicious requests before the warning. */
+  /** Suspicious requests, among the last `windowSize` that expect the client address, before the warning. */
   threshold?: number;
+  /** How many of the latest requests that expect the client address are looked at. */
+  windowSize?: number;
   /** Minimum time between two warnings. */
   cooldownMs?: number;
   now?: () => number;
@@ -114,35 +147,46 @@ export interface ClientIpMonitorOptions {
 }
 
 export const MONITOR_THRESHOLD = 50;
+export const MONITOR_WINDOW = 100;
 export const MONITOR_COOLDOWN_MS = 10 * 60 * 1000;
 
 export function createClientIpMonitor(opts: ClientIpMonitorOptions = {}) {
   const threshold = opts.threshold ?? MONITOR_THRESHOLD;
+  const size = Math.max(opts.windowSize ?? MONITOR_WINDOW, threshold);
   const cooldown = opts.cooldownMs ?? MONITOR_COOLDOWN_MS;
   const now = opts.now ?? Date.now;
   const logger = new Logger('ClientIpMonitor');
   const warn = opts.warn ?? ((m: string) => logger.warn(m));
-  let streak = 0;
+  // Ring of the latest verdicts: 0 fine, 1 private-ip, 2 forwarded-for-ignored.
+  const ring = new Uint8Array(size);
+  const counts = [0, 0, 0];
+  let next = 0;
+  let seen = 0;
   let lastWarnAt = -Infinity;
-  let kinds = new Set<SuspicionKind>();
 
   const state = {
-    get streak() {
-      return streak;
+    /** Suspicious requests among the window right now. */
+    get suspicious() {
+      return counts[1] + counts[2];
     },
     observe(req: ClientIpRequest): void {
+      if (!expectsClientIp(req)) return;
       const s = suspicion(req);
-      if (s === null) {
-        streak = 0;
-        kinds = new Set();
-        return;
-      }
-      streak += 1;
-      kinds.add(s);
-      if (streak < threshold || now() - lastWarnAt < cooldown) return;
+      const verdict = s === null ? 0 : s === 'private-ip' ? 1 : 2;
+      if (seen >= size) counts[ring[next]] -= 1;
+      ring[next] = verdict;
+      counts[verdict] += 1;
+      next = (next + 1) % size;
+      seen += 1;
+      const bad = counts[1] + counts[2];
+      if (bad < threshold || now() - lastWarnAt < cooldown) return;
       lastWarnAt = now();
+      const kinds = [
+        counts[1] > 0 ? 'private-ip' : null,
+        counts[2] > 0 ? 'forwarded-for-ignored' : null,
+      ].filter((k) => k !== null);
       warn(
-        `${streak} consecutive requests resolved to ${[...kinds].join(' / ')} as the client address ` +
+        `${bad} of the last ${Math.min(seen, size)} requests that carry the client address resolved to ${kinds.join(' / ')} as the client address ` +
           `(${opts.hasExplicitTrustProxy ? 'TRUST_PROXY is set but does not cover the proxy' : 'TRUST_PROXY is not set'}). ` +
           'The proxy in front of this server is probably not trusted: every client shares one rate-limit bucket and ' +
           'audit events carry the proxy address. Set TRUST_PROXY to the proxy network (docs/deployment.md 9.4). ' +

@@ -1,4 +1,5 @@
-import { pgText } from './audit-normalize.js';
+import { pgText, truncateCodePoints } from './audit-normalize.js';
+import { CUT_MARGIN, commonPrefix } from '../common/redact-cut.js';
 
 /**
  * Story 20.1 (AD-99, FR-139, NFR-20.5): the `before`/`after` of an audit event
@@ -239,7 +240,7 @@ function words(key: string): string[] {
     .normalize('NFD')
     .replace(/[̀-ͯ]/g, '')
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/(?<=[A-Z])(?=[A-Z][a-z])/g, ' ')
     .replace(/([A-Za-z])([0-9])/g, '$1 $2')
     .split(/[^A-Za-z0-9]+/)
     .filter(Boolean)
@@ -271,8 +272,69 @@ export function keyViolation(key: string): string | null {
 
 interface Detector {
   name: string;
-  re: RegExp;
+  /** A regex (replaced with `String.replace`) ... */
+  re?: RegExp;
   accept?: (match: string) => boolean;
+  /**
+   * ... or a hand-written LINEAR scanner: the `[start, end)` spans of the matches, in order and not
+   * overlapping (for what a regex cannot do in linear time).
+   */
+  spans?: (s: string) => Array<[number, number]>;
+}
+
+/**
+ * Spans of email-looking tokens: `[^\s@]+@[^\s@]+\.[^\s@]+`. As a regex it is QUADRATIC on any long
+ * run without whitespace (every start scans to the end of the run looking for an `@`: measured,
+ * 8 000 characters 30 ms, 32 000 characters 0.5 s, for EVERY input shape, and 15 000 characters
+ * about 90 ms in the query-string check). Here the text is split in whitespace-free tokens and each
+ * token on its `@`s: the local part is the non-empty piece before an `@`, the domain the piece after
+ * it, which needs a `.` with a character on each side. Every character is looked at a constant
+ * number of times. Same matches as the regex (differential test in `audit-payload.spec.ts`).
+ */
+export function emailSpans(s: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  if (s.indexOf('@') < 0) return spans;
+  const isSpace = (c: number): boolean =>
+    c === 32 ||
+    (c >= 9 && c <= 13) ||
+    c === 0xa0 ||
+    c === 0x1680 ||
+    (c >= 0x2000 && c <= 0x200a) ||
+    c === 0x2028 ||
+    c === 0x2029 ||
+    c === 0x202f ||
+    c === 0x205f ||
+    c === 0x3000 ||
+    c === 0xfeff;
+  const n = s.length;
+  let i = 0;
+  while (i < n) {
+    while (i < n && isSpace(s.charCodeAt(i))) i += 1;
+    const tokStart = i;
+    while (i < n && !isSpace(s.charCodeAt(i))) i += 1;
+    const tokEnd = i;
+    if (tokEnd - tokStart < 3) continue;
+    // pieces between '@'s: [tokStart, a1), (a1, a2), ...
+    let consumedUntil = tokStart; // text before this index belongs to an earlier match
+    let pieceStart = tokStart;
+    let at = s.indexOf('@', pieceStart);
+    while (at >= 0 && at < tokEnd) {
+      const localStart = Math.max(pieceStart, consumedUntil);
+      const next = s.indexOf('@', at + 1);
+      const domainEnd = next >= 0 && next < tokEnd ? next : tokEnd;
+      if (at > localStart && domainEnd - (at + 1) >= 3) {
+        // a '.' inside the domain with something on both sides
+        const dot = s.indexOf('.', at + 2);
+        if (dot >= 0 && dot < domainEnd - 1) {
+          spans.push([localStart, domainEnd]);
+          consumedUntil = domainEnd;
+        }
+      }
+      pieceStart = at + 1;
+      at = next;
+    }
+  }
+  return spans;
 }
 
 const luhn = (digits: string): boolean => {
@@ -307,7 +369,7 @@ const CEDULA_P = String.raw`P[\s.-]?\d{8,11}`;
 
 /** Order matters only for readability: markers contain nothing a later detector matches. */
 const DETECTORS: Detector[] = [
-  { name: 'EMAIL', re: /[^\s@]+@[^\s@]+\.[^\s@]+/g },
+  { name: 'EMAIL', spans: emailSpans },
   { name: 'JWT', re: /(?<![\w-])eyJ[\w-]{4,}\.[\w-]{4,}\.[\w-]*/g },
   {
     name: 'SECRET',
@@ -321,7 +383,7 @@ const DETECTORS: Detector[] = [
         String.raw`\bxox[baprs]-[\w-]{10,}`,
         String.raw`-----BEGIN [A-Z ]*PRIVATE KEY-----`,
         String.raw`\b(?:password|passwd|pwd|passphrase|secret)\s*[:=]\s*\S{3,}`,
-        String.raw`\b(?:api[_-]?key|access[_-]?token|token)\s*[:=]\s*(?=\S*\d)\S{8,}`,
+        String.raw`\b(?:api[_-]?key|access[_-]?token|token)\s*[:=]\s*(?=\S{0,256}\d)\S{8,}`,
       ].join('|'),
       'gi',
     ),
@@ -331,7 +393,7 @@ const DETECTORS: Detector[] = [
     re: new RegExp(
       [
         String.raw`(?<![\w+])\+\d{1,3}[\s.()-]*\d(?:[\s.()-]*\d){6,11}(?!\w)`,
-        String.raw`(?<![\w.+-])(?:58[\s.-]?0?|0)(?:4(?:12|14|16|24|26)|2\d\d)[\s.-]?\d{3}[\s.-]?\d{4}(?!\w)`,
+        String.raw`(?<![\w.+-])(?:58[\s.-]?0?|0)(?:4(?:12|14|16|24|26)|2\d\d)[\s.-]?\d{3}[\s.-]?\d{4}(?!\w|-\w)`,
         String.raw`(?<![\w.+-])\(\d{3}\)\s?\d{3}[\s.-]\d{4}(?!\w)`,
         String.raw`(?<![\w.+-])\d{3}[\s.-]\d{3}[\s.-]\d{4}(?![\w-])`,
       ].join('|'),
@@ -376,7 +438,20 @@ export function redactText(
   let text = s;
   for (const d of DETECTORS) {
     if (exempt.includes(d.name)) continue;
-    text = text.replace(d.re, (m) => {
+    if (d.spans !== undefined) {
+      const spans = d.spans(text);
+      if (spans.length === 0) continue;
+      let out = '';
+      let pos = 0;
+      for (const [from, to] of spans) {
+        out += `${text.slice(pos, from)}[REDACTED:${d.name}]`;
+        pos = to;
+        hits.push(d.name);
+      }
+      text = out + text.slice(pos);
+      continue;
+    }
+    text = text.replace(d.re as RegExp, (m) => {
       if (d.accept && !d.accept(m)) return m;
       hits.push(d.name);
       return `[REDACTED:${d.name}]`;
@@ -390,26 +465,43 @@ export function redactReason(s: string): { text: string; hits: string[] } {
   return redactText(pgText(s));
 }
 
+/**
+ * The `reason` as the audit log stores it: at most `maxCodePoints` code points, sensitive tokens
+ * masked, and the cut made AFTER masking (`V-123456` of a cedula cut at the limit, or `maria@gmail`
+ * of an email, stays out of the immutable row: the window is `CUT_MARGIN` longer than the cut).
+ * `hits` are those of the wide window (a token that straddles the cut counts).
+ */
+export function redactReasonCut(
+  s: string,
+  maxCodePoints: number,
+): { text: string; hits: string[] } {
+  const cut = truncateCodePoints(s, maxCodePoints);
+  if (cut.length === s.length) return redactReason(s);
+  const wide = redactReason(truncateCodePoints(s, maxCodePoints + CUT_MARGIN));
+  const narrow = redactReason(cut);
+  return { text: commonPrefix(wide.text, narrow.text), hits: wide.hits };
+}
+
 // ─── the walk ─────────────────────────────────────────────────────────────
 
 const MAX_DEPTH = 8;
 /** Longest string a payload may carry (see the note in `sanitizeAuditPayload`). */
 const MAX_STRING_CHARS = 8_000;
 /**
- * Longest KEY a payload may carry. A key goes through the same quadratic detectors as a value
- * (measured: a 150 000-digit key took 11.3 s), and no real payload has a key longer than a field
- * name.
+ * Longest KEY a payload may carry. No real payload has a key longer than a field name. (A 150 000-digit
+ * key took 11.3 s with the old quadratic detectors; see `emailSpans`.)
  */
 const MAX_KEY_CHARS = 256;
 /**
- * Budget of detector WORK for ONE payload. The detectors are quadratic in the longest unbroken
- * (no whitespace) run of a string (measured, dev machine: 8 000 characters 27-32 ms, 50 000 about
- * 1.1 s, 150 000 about 11 s), and linear otherwise (`'y '.repeat(...)`: 0 ms). Each string is capped
- * on its own, but 500 strings of 8 000 digits still took 16.5 s, so the SUM of the squares of the
- * unbroken runs of 64+ characters is bounded: 256e6 is about four 8 000-character tokens (about
- * 100 ms). Ordinary text (words, sentences, a 100 kB payload of 1 000-character tokens, 1e8)
- * is unaffected. Past the budget a string becomes a marker (strict: violation, thrown; lenient:
- * marker + issue) BEFORE any scan.
+ * Budget of detector WORK for ONE payload, kept as a second line of defence. The detectors were
+ * quadratic in the longest unbroken (no whitespace) run of a string (the email regex: measured, dev
+ * machine, 8 000 characters 27-32 ms, 50 000 about 1.1 s, 150 000 about 11 s); since QA round 3 they
+ * are linear (`emailSpans`, a bounded lookahead in SECRET; `test/guard-redact-bounds.perf.spec.ts`
+ * fuzzes 70 shapes and fixes a ceiling), so this budget is no longer what keeps a payload fast. It
+ * still bounds the TOTAL work: the SUM of the squares of the unbroken runs of 64+ characters; 256e6
+ * is about four 8 000-character tokens. Ordinary text (words, sentences, a 100 kB payload of
+ * 1 000-character tokens, 1e8) is unaffected. Past the budget a string becomes a marker (strict:
+ * violation, thrown; lenient: marker + issue) BEFORE any scan.
  */
 const MAX_PAYLOAD_SCAN_COST = 256e6;
 const LONG_RUN = /\S{64,}/g;
@@ -545,24 +637,32 @@ export function sanitizeAuditPayload(
     path: string,
     exempt: readonly PublicValueClass[] = [],
   ): string => {
-    // The value detectors are quadratic on one long unbroken token (measured: 50 000 characters
-    // take 1.1 s, 150 000 take 11 s of blocked event loop). An audit event is a diff, not a
-    // document: a longer string is a violation (strict: thrown; lenient: cut) BEFORE any scan.
-    if (s.length > MAX_STRING_CHARS) {
+    // An audit event is a diff, not a document: a longer string is a violation (strict: thrown;
+    // lenient: cut) BEFORE any scan. The cut is made AFTER redacting (QA round 3): cutting first
+    // left `V-123456` (a cedula whose last digits were cut) in an IMMUTABLE row. The window is
+    // `CUT_MARGIN` longer than the cut, so a token that straddles it is recognised and replaced.
+    const over = s.length > MAX_STRING_CHARS;
+    if (over) {
       violation(path, `string longer than ${MAX_STRING_CHARS} characters`);
-      s = s.slice(0, MAX_STRING_CHARS);
+      s = s.slice(0, MAX_STRING_CHARS + CUT_MARGIN);
     }
     if (!spend(s)) {
       violation(path, 'payload text over the scan budget');
       return '[TRUNCATED]';
     }
     const clean = pgText(s);
-    const { text: out, hits } = redactText(clean, exempt);
+    const { text: wide, hits } = redactText(clean, exempt);
+    const out = over
+      ? commonPrefix(
+          wide,
+          redactText(pgText(s.slice(0, MAX_STRING_CHARS)), exempt).text,
+        )
+      : wide;
     if (hits.length > 0) {
       violation(path, `looks like ${labels(hits)}`);
       return out;
     }
-    return clean;
+    return over ? out : clean;
   };
 
   /** One segment of a declared public-field path (`.` `[` `]` `\\` in a key are escaped). */
@@ -600,12 +700,14 @@ export function sanitizeAuditPayload(
       const out: { [key: string]: AuditPayload } = {};
       for (const [k, x] of Object.entries(v)) {
         let rawKey = k;
-        if (rawKey.length > MAX_KEY_CHARS) {
+        const longKey = rawKey.length > MAX_KEY_CHARS;
+        if (longKey) {
           violation(
             `${path}.${pathKey(rawKey)}`,
             `key longer than ${MAX_KEY_CHARS} characters`,
           );
-          rawKey = rawKey.slice(0, MAX_KEY_CHARS);
+          // Redact BEFORE cutting (see `text`): the window is longer than the cut.
+          rawKey = rawKey.slice(0, MAX_KEY_CHARS + CUT_MARGIN);
         }
         if (!spend(rawKey)) {
           violation(
@@ -615,11 +717,18 @@ export function sanitizeAuditPayload(
           rawKey = '[TRUNCATED]';
         }
         let key = pgText(rawKey);
-        const keyHits = redactText(key).hits;
-        if (keyHits.length > 0) {
+        const wideKey = redactText(key);
+        const keyHits = wideKey.hits;
+        if (keyHits.length > 0 || longKey) {
           // The key itself is the sensitive value: it must reach neither the
           // payload, the path of the error/warning nor the log.
-          key = redactText(key).text;
+          key = wideKey.text;
+        }
+        if (longKey && rawKey !== '[TRUNCATED]') {
+          key = commonPrefix(
+            key,
+            redactText(pgText(rawKey.slice(0, MAX_KEY_CHARS))).text,
+          );
         }
         const kPath = `${path}.${pathKey(key)}`;
         // Where this key sits, for the public-field catalog: `address` at the first level,

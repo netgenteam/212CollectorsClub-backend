@@ -5,7 +5,10 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module.js';
-import { applyTrustProxy } from './common/trust-proxy.js';
+import {
+  TrustProxyConfigError,
+  applyTrustProxy,
+} from './common/trust-proxy.js';
 import {
   applyClientIpMonitor,
   proxyStartupWarning,
@@ -148,4 +151,13 @@ async function bootstrap() {
   if (host && host.trim() !== '') await app.listen(port, host.trim());
   else await app.listen(port);
 }
-await bootstrap();
+try {
+  await bootstrap();
+} catch (err) {
+  // A bad TRUST_PROXY is an operator mistake: say which variable, not a stack of Express internals.
+  if (err instanceof TrustProxyConfigError) {
+    new Logger('Bootstrap').error(err.message);
+    process.exit(1);
+  }
+  throw err;
+}

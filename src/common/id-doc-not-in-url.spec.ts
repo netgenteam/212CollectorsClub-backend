@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { ApiException } from './api-exception.js';
-import { assertNoIdDocInQuery } from './id-doc-not-in-url.js';
+import {
+  assertNoIdDocInQuery,
+  isIdDocKey,
+  looksLikeIdDocInText,
+  withoutEmailTokens,
+} from './id-doc-not-in-url.js';
 
 const run = (q: Record<string, unknown> | undefined) =>
   assertNoIdDocInQuery(q, 'POST /x');
@@ -94,5 +99,33 @@ describe('assertNoIdDocInQuery (FR-124: a cedula never travels in a URL)', () =>
     { amount: '1.234.567,89' },
   ])('lets %j through', (q) => {
     expect(() => run(q)).not.toThrow();
+  });
+});
+
+describe('withoutEmailTokens is the linear twin of replace(/\\S+@\\S+/g, " ")', () => {
+  it('gives the same text on 100 000 generated strings', () => {
+    const vocabulary = ['a', '@', '.', ' ', 'b@c', 'x', '@@', '\n', '-', '1'];
+    let seed = 7;
+    const rnd = (): number => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    for (let i = 0; i < 100_000; i += 1) {
+      const n = 1 + Math.floor(rnd() * 12);
+      let s = '';
+      for (let j = 0; j < n; j += 1) {
+        s += vocabulary[Math.floor(rnd() * vocabulary.length)];
+      }
+      expect(withoutEmailTokens(s), JSON.stringify(s)).toBe(
+        s.replace(/\S+@\S+/g, ' '),
+      );
+    }
+  });
+  it('a legitimate email search is still not a cedula; a long run is bounded', () => {
+    expect(looksLikeIdDocInText('v12345678@gmail.com')).toBe(false);
+    const t0 = performance.now();
+    looksLikeIdDocInText('a'.repeat(200_000));
+    isIdDocKey('A'.repeat(200_000));
+    expect(performance.now() - t0).toBeLessThan(250);
   });
 });

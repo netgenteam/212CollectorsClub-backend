@@ -1,7 +1,13 @@
 import express from 'express';
 import type { Request } from 'express';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_TRUST_PROXY, resolveTrustProxy } from './trust-proxy.js';
+import {
+  DEFAULT_TRUST_PROXY,
+  TrustProxyConfigError,
+  applyTrustProxy,
+  checkTrustProxy,
+  resolveTrustProxy,
+} from './trust-proxy.js';
 
 /** `req.ip` exactly as Express computes it for a peer address and an `X-Forwarded-For`. */
 function ipSeenBy(
@@ -120,5 +126,106 @@ describe('trust proxy (Story 20.5 follow-up): what IP does the backend see?', ()
         '203.0.113.7',
       );
     });
+  });
+});
+
+describe('TRUST_PROXY validation (Story 20.5, QA round 3)', () => {
+  const check = (v: string) => checkTrustProxy(resolveTrustProxy(v) as string);
+  const fakeApp = () => {
+    const calls: unknown[][] = [];
+    return {
+      app: { set: (...a: unknown[]) => calls.push(a) } as never,
+      calls,
+    };
+  };
+
+  it('a range that covers the public Internet is refused, even when it is split in two halves', () => {
+    for (const v of [
+      '0.0.0.0/0',
+      '0.0.0.0/1,128.0.0.0/1',
+      '::/0',
+      '8.0.0.0/8',
+      '2000::/3',
+      'loopback,0.0.0.0/1,128.0.0.0/1',
+    ]) {
+      const r = check(v);
+      expect(r.errors, v).toHaveLength(1);
+      expect(r.errors[0], v).toMatch(/TRUST_PROXY/);
+      expect(r.errors[0], v).toMatch(/Internet/);
+    }
+  });
+  it('applyTrustProxy throws TrustProxyConfigError for them and never sets the value', () => {
+    const { app, calls } = fakeApp();
+    expect(() => applyTrustProxy(app, '0.0.0.0/1,128.0.0.0/1')).toThrow(
+      TrustProxyConfigError,
+    );
+    expect(calls).toHaveLength(0);
+  });
+  it('a small public range (a CDN, a proxy with a public address) is a warning, not an error', () => {
+    for (const v of ['203.0.113.5', '203.0.113.0/24', '104.16.0.0/13']) {
+      const r = check(v);
+      expect(r.errors, v).toEqual([]);
+      expect(r.warnings, v).toHaveLength(1);
+      expect(r.warnings[0], v).toMatch(/TRUST_PROXY includes public addresses/);
+    }
+  });
+  it('private, loopback, link-local, CGNAT and their keywords are silent', () => {
+    for (const v of [
+      'loopback',
+      'loopback,172.30.212.0/28',
+      '10.0.0.0/8',
+      '172.16.0.0/12',
+      '192.168.0.0/16',
+      'linklocal,uniquelocal',
+      '100.64.0.0/10',
+      'fd00::/8',
+      '::ffff:10.0.0.0/104',
+      'loopback,10.0.0.0/255.0.0.0',
+    ]) {
+      expect(check(v), v).toEqual({ errors: [], warnings: [] });
+    }
+  });
+  it('an invalid value stops with a message that NAMES the variable (not Express "invalid IP address")', () => {
+    for (const v of [
+      'bogus',
+      '1.2.3.4/33',
+      'loopback,10.0.0.0/x',
+      'true',
+      '300.1.1.1',
+    ]) {
+      const { app } = fakeApp();
+      let message = '';
+      try {
+        applyTrustProxy(app, v);
+      } catch (e) {
+        expect(e).toBeInstanceOf(TrustProxyConfigError);
+        message = (e as Error).message;
+      }
+      expect(message, v).toMatch(/^TRUST_PROXY/);
+      expect(message, v).not.toMatch(/^invalid IP address/);
+    }
+  });
+  it('Express itself rejecting the value is wrapped with the name of the variable', () => {
+    const app = {
+      set: () => {
+        throw new TypeError('invalid IP address: x');
+      },
+    } as never;
+    expect(() => applyTrustProxy(app, 'loopback')).toThrow(
+      /^TRUST_PROXY=loopback was rejected by Express: invalid IP address/,
+    );
+  });
+  it('the usual values go to Express untouched', () => {
+    for (const [raw, value] of [
+      [undefined, 'loopback'],
+      ['', 'loopback'],
+      ['false', false],
+      ['2', 2],
+      ['loopback, 172.30.212.0/28', 'loopback,172.30.212.0/28'],
+    ] as const) {
+      const { app, calls } = fakeApp();
+      applyTrustProxy(app, raw);
+      expect(calls, String(raw)).toEqual([['trust proxy', value]]);
+    }
   });
 });
