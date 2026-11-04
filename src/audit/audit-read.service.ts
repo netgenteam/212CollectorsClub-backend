@@ -336,18 +336,30 @@ export class AuditReadService {
       headHash: r.headHash,
       partial: r.partial === true,
     }));
-    const complete = await this.prisma.$queryRaw<{ at: Date }[]>`
-      SELECT "startedAt" AS "at" FROM "Audit_Verifications"
-       WHERE "result" = 'OK' AND NOT "partial" ORDER BY "startedAt" DESC LIMIT 1`;
-    // The flag follows the LATEST verification: a BROKEN result stays visible
-    // until a later verification says otherwise (it cannot silently disappear).
-    const latest = items[0];
+    const state = await this.prisma.$queryRaw<
+      { broken: Date | null; complete: Date | null }[]
+    >`
+      SELECT (SELECT max("startedAt") FROM "Audit_Verifications" WHERE "result" = 'BROKEN') AS "broken",
+             (SELECT max("startedAt") FROM "Audit_Verifications" WHERE "result" = 'OK' AND NOT "partial") AS "complete"`;
+    const lastBroken = state[0]?.broken ?? null;
+    const lastComplete = state[0]?.complete ?? null;
+    // The alert follows the chain, not the latest row: a BROKEN verification
+    // stays visible until a LATER verification that covered the WHOLE chain
+    // (not partial) came back OK. A partial OK (`fromSeq`, an incremental run
+    // that trusts the rows before its anchor, a run cut by `limit`) proves
+    // nothing about the rows it did not read, so it can never clear the alert.
+    // Re-running a verification over an unchanged broken chain is BROKEN again,
+    // so a full OK is evidence the chain verifies now, never a way to dismiss it.
+    const chainBroken =
+      lastBroken !== null &&
+      (lastComplete === null || lastComplete < lastBroken);
     return {
       items,
-      chainBroken: latest?.result === 'BROKEN',
-      lastBrokenAt:
-        (items.find((i) => i.result === 'BROKEN')?.startedAt as string) ?? null,
-      lastCompleteVerificationAt: complete[0]?.at.toISOString() ?? null,
+      chainBroken,
+      lastBrokenAt: lastBroken ? lastBroken.toISOString() : null,
+      lastCompleteVerificationAt: lastComplete
+        ? lastComplete.toISOString()
+        : null,
       anchorEmailConfigured: this.anchorEmailConfigured(),
     };
   }

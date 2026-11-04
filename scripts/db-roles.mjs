@@ -16,7 +16,13 @@ const env = process.env.DB_ROLES_ENV;
 // The server only ever sees a SCRAM-SHA-256 verifier, never the password: a failing
 // CREATE/ALTER ROLE is written to the Postgres log with its text (Story 20.1, QA round 2).
 const given = process.env.APP_DB_PASSWORD ?? '';
-const password = given === '' || given.startsWith(SCRAM_PREFIX) ? given : scramVerifier(given);
+let password;
+try {
+  password = given === '' || given.startsWith(SCRAM_PREFIX) ? given : scramVerifier(given);
+} catch (err) {
+  console.error(`[db:roles] APP_DB_PASSWORD refused: ${err.message}`);
+  process.exit(2);
+}
 const raw = process.env.MIGRATE_DATABASE_URL || process.env.DATABASE_URL;
 
 if (!env || !/^[a-z0-9_]{1,30}$/.test(env)) {

@@ -24,6 +24,22 @@ import { pgText } from './audit-normalize.js';
  *   the code, not of the data (a `Date`/`BigInt`/class instance, nesting > 8,
  *   two keys that collapse into one) throw in both modes.
  *
+ * ## Public business data (per action, explicit)
+ *
+ * The guard exists for the CUSTOMERS' personal data. The seller's own RIF, fiscal
+ * address, contact email/phone and Pago Movil account are published by the seller,
+ * and `SELLER_IDENTITY_UPDATED` has to carry them. Each action may list, in the
+ * catalog (`AUDIT_ACTIONS[action].publicFields`), the exact keys it may carry and
+ * the value classes each is exempt from (see `PublicFields`). Everything else keeps
+ * being checked on that action, and no `CUSTOMER_*` / `ORDER_*` action has a list.
+ *
+ * ## Dates, BigInt, Decimal
+ *
+ * They throw in both modes (a code bug, seen by the call site's test). Build the
+ * payload from a database row with `toAuditPayload(row)`, or convert one value with
+ * `auditDate` / `auditBigInt` / `auditDecimal`. A path in an error or a warning never
+ * shows a key that is itself sensitive (`[REDACTED:EMAIL]`), and is capped.
+ *
  * ## What is detected (precision first: a sale must not break)
  *
  * KEY NAMES are split in words (`camelCase`, `snake_case`, `kebab-case`,
@@ -57,6 +73,28 @@ import { pgText } from './audit-normalize.js';
  * document), nor a bare run of digits without letter or keyword.
  */
 export type AuditScalar = string | number | boolean | null;
+
+/** Value detectors a public field may legitimately trip (see `PublicFields`). */
+export type PublicValueClass = 'EMAIL' | 'PHONE' | 'CEDULA';
+
+/**
+ * Per-action allowance of PUBLIC business data (Story 20.1 fix, for 20.5): key
+ * name -> value detectors that key is exempt from. The sellers' RIF, fiscal
+ * address, contact email/phone and Pago Movil account are published by the
+ * seller itself; what the guard protects is the CUSTOMERS' personal data. The
+ * allowance lives in the catalog (`AUDIT_ACTIONS[action].publicFields`) so it is
+ * explicit, reviewed per action and invisible to every other action: a
+ * `CUSTOMER_*` / `ORDER_*` event still rejects `rif`, `address`, `phone`...
+ * An exempt key is matched EXACTLY (case-sensitive), its value must be a string
+ * or null (never an object/array that could smuggle nested keys), and it is
+ * exempt only from the listed classes: a card number, a JWT, a secret or any
+ * other detector still trips on its value. Secret key names (`password`,
+ * `token`...) are never exempt. `cedula`, `idDoc` and the like are not public
+ * data of anybody and are not in any list.
+ */
+export type PublicFields = Readonly<
+  Record<string, readonly PublicValueClass[]>
+>;
 export type AuditPayload =
   AuditScalar | AuditPayload[] | { [key: string]: AuditPayload };
 
@@ -326,10 +364,14 @@ const labels = (hits: string[]): string =>
   [...new Set(hits)].map((h) => LABEL[h] ?? h).join(' / ');
 
 /** Replaces every detected sensitive token; returns the names found (empty: nothing changed). */
-export function redactText(s: string): { text: string; hits: string[] } {
+export function redactText(
+  s: string,
+  exempt: readonly string[] = [],
+): { text: string; hits: string[] } {
   const hits: string[] = [];
   let text = s;
   for (const d of DETECTORS) {
+    if (exempt.includes(d.name)) continue;
     text = text.replace(d.re, (m) => {
       if (d.accept && !d.accept(m)) return m;
       hits.push(d.name);
@@ -348,6 +390,89 @@ export function redactReason(s: string): { text: string; hits: string[] } {
 
 const MAX_DEPTH = 8;
 
+/** A key as shown in a path: capped, so a huge key cannot flood a log line. */
+const pathKey = (k: string): string =>
+  k.length > 64 ? `${k.slice(0, 64)}...` : k;
+
+const isDecimal = (v: unknown): v is { toFixed(): string } =>
+  typeof v === 'object' &&
+  v !== null &&
+  (v as { constructor?: { name?: string } }).constructor?.name === 'Decimal' &&
+  typeof (v as { toFixed?: unknown }).toFixed === 'function';
+
+function unsupportedWhy(v: unknown): string {
+  if (v instanceof Date) {
+    return 'a Date is not allowed (use auditDate(d) or toAuditPayload(obj))';
+  }
+  if (typeof v === 'bigint') {
+    return 'a BigInt is not allowed (use auditBigInt(n) or toAuditPayload(obj))';
+  }
+  if (isDecimal(v)) {
+    return 'a Decimal is not allowed (use auditDecimal(d) or toAuditPayload(obj))';
+  }
+  const ctor =
+    typeof v === 'object' && v !== null
+      ? ((v as { constructor?: { name?: string } }).constructor?.name ??
+        'object')
+      : typeof v;
+  return `unsupported value (${ctor}); only plain objects, arrays, strings, safe integers, booleans and null are allowed`;
+}
+
+// ─── helpers for the emitters (Story 20.5) ────────────────────────────────
+
+/** `Date` -> ISO-8601 string (UTC). Invalid dates throw `AuditPayloadError`. */
+export function auditDate(d: Date): string {
+  if (Number.isNaN(d.getTime())) {
+    throw new AuditPayloadError('$', 'invalid Date');
+  }
+  return d.toISOString();
+}
+
+/** `bigint` -> decimal string. */
+export const auditBigInt = (n: bigint): string => n.toString();
+
+/** Prisma `Decimal` (money, rates) -> plain decimal string, never exponent form. */
+export function auditDecimal(d: { toFixed(): string }): string {
+  return d.toFixed();
+}
+
+/**
+ * Deep-converts what Prisma returns (`Date`, `bigint`, `Decimal`) into what the
+ * guard accepts (strings); `undefined` keys are dropped. Everything else is
+ * passed through untouched for `sanitizeAuditPayload` to judge. Use it on any
+ * payload built from a database row: the guard throws on those types in BOTH
+ * modes (a programming error must fail the test, never production), and a
+ * `Decimal`/`Date` typed value does not compile as an `AuditPayload` either.
+ */
+export function toAuditPayload(v: unknown): AuditPayload {
+  const conv = (x: unknown): unknown => {
+    if (x instanceof Date) return auditDate(x);
+    if (typeof x === 'bigint') return auditBigInt(x);
+    if (isDecimal(x)) return auditDecimal(x);
+    if (Array.isArray(x)) return x.map(conv);
+    if (
+      typeof x === 'object' &&
+      x !== null &&
+      (Object.getPrototypeOf(x) === Object.prototype ||
+        Object.getPrototypeOf(x) === null)
+    ) {
+      const out: Record<string, unknown> = {};
+      for (const [k, y] of Object.entries(x)) {
+        if (y === undefined) continue;
+        Object.defineProperty(out, k, {
+          value: conv(y),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+      }
+      return out;
+    }
+    return x;
+  };
+  return conv(v) as AuditPayload;
+}
+
 export interface SanitizeResult {
   value: AuditPayload;
   issues: PayloadIssue[];
@@ -362,6 +487,7 @@ export function sanitizeAuditPayload(
   value: unknown,
   mode: AuditPayloadMode = auditPayloadMode(),
   rootPath = '$',
+  publicFields?: PublicFields,
 ): SanitizeResult {
   const issues: PayloadIssue[] = [];
   const violation = (path: string, why: string): void => {
@@ -369,9 +495,13 @@ export function sanitizeAuditPayload(
     issues.push({ path, why });
   };
 
-  const text = (s: string, path: string): string => {
+  const text = (
+    s: string,
+    path: string,
+    exempt: readonly PublicValueClass[] = [],
+  ): string => {
     const clean = pgText(s);
-    const { text: out, hits } = redactText(clean);
+    const { text: out, hits } = redactText(clean, exempt);
     if (hits.length > 0) {
       violation(path, `looks like ${labels(hits)}`);
       return out;
@@ -406,11 +536,15 @@ export function sanitizeAuditPayload(
       const out: { [key: string]: AuditPayload } = {};
       for (const [k, x] of Object.entries(v)) {
         let key = pgText(k);
-        const kPath = `${path}.${key}`;
         const keyHits = redactText(key).hits;
         if (keyHits.length > 0) {
-          violation(kPath, `key looks like ${labels(keyHits)}`);
+          // The key itself is the sensitive value: it must reach neither the
+          // payload, the path of the error/warning nor the log.
           key = redactText(key).text;
+        }
+        const kPath = `${path}.${pathKey(key)}`;
+        if (keyHits.length > 0) {
+          violation(kPath, `key looks like ${labels(keyHits)}`);
         }
         if (Object.prototype.hasOwnProperty.call(out, key)) {
           // Two different keys that Postgres cannot tell apart (`a\ud800` / `a\ud801`)
@@ -425,13 +559,27 @@ export function sanitizeAuditPayload(
           key = `${key}#${n}`;
         }
         let item: AuditPayload;
-        const kv = keyViolation(key);
+        const pub =
+          keyHits.length === 0 &&
+          publicFields !== undefined &&
+          Object.prototype.hasOwnProperty.call(publicFields, key)
+            ? publicFields[key]
+            : undefined;
+        const kv = pub === undefined ? keyViolation(key) : null;
         if (x === undefined) {
           violation(kPath, 'undefined (omit the key)');
           continue;
         } else if (kv !== null) {
           violation(kPath, kv);
           item = '[REDACTED:KEY]';
+        } else if (pub !== undefined) {
+          // Public business data: scalar text only, exempt just from its classes.
+          if (x === null) item = null;
+          else if (typeof x === 'string') item = text(x, kPath, pub);
+          else {
+            violation(kPath, 'a public field must be a string or null');
+            item = '[REDACTED:KEY]';
+          }
         } else {
           item = walk(x, kPath, depth + 1);
         }
@@ -445,10 +593,7 @@ export function sanitizeAuditPayload(
       }
       return out;
     }
-    throw new AuditPayloadError(
-      path,
-      `unsupported value (${typeof v}); Date/BigInt/class instances are not allowed`,
-    );
+    throw new AuditPayloadError(path, unsupportedWhy(v));
   };
 
   return { value: walk(value, rootPath, 0), issues };

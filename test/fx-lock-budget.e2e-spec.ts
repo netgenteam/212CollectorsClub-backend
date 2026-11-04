@@ -29,6 +29,14 @@ import { restoreFx, snapshotFx, type FxState } from './helpers/db-snapshot.js';
 // (budget + request/transaction overhead), so the upper bound is budget + 3 s
 // (still far below Nginx's 60 s); the old +1.5 s only held because the wall
 // clock was losing time.
+// Story 20.1 round 3 (NOT fixed, cause open): the run still fails sometimes with
+// 23.8 s measured for the 25 s budget (two runs: 23 782 and 23 806 ms), with the
+// monotonic clock on the test side. `LockBudget` was switched to `performance.now()`
+// as an experiment and the failure persisted, so it was reverted. Most likely
+// suspect: Postgres arms `lock_timeout`/`statement_timeout` from the WALL clock
+// (gettimeofday) of its own container, and a forward step of ~1.2 s of the WSL2 VM
+// clock during the 25 s wait makes it fire early. Not verified. Do not loosen the
+// bound until that is confirmed.
 const TAG = randomUUID().slice(0, 8);
 const USER = `e2e-fxlock-${TAG}`;
 const PASS = 'correct-horse-battery-staple-19-1';

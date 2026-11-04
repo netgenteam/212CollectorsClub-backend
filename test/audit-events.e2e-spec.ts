@@ -431,6 +431,91 @@ describe('AuditService / chain / immutability on sandbox schemas (e2e, Story 20.
     ); // duplicate seq: the chain guard (BEFORE INSERT) fires before the PK
   });
 
+  it('restore: the trigger functions carry their own search_path (pg_dump sets an EMPTY one), and only an explicit owner session may replay an old non-monotonic pair', async () => {
+    const b = await make();
+    await b.audit.transaction(async (_tx, audit) => {
+      audit.add({
+        actorType: 'SYSTEM',
+        action: 'AUDIT_VERIFIED',
+        entityType: 'T',
+        entityId: '1',
+      });
+    });
+    const cfg = await b.sb.exec(
+      `SELECT p."proname", p."proconfig"::text AS cfg FROM pg_proc p
+         JOIN pg_namespace n ON n."oid" = p."pronamespace"
+        WHERE n."nspname" = $1 ORDER BY 1`,
+      [b.sb.schema],
+    );
+    expect(cfg.map((r) => r.proname)).toEqual([
+      'audit_events_chain_guard',
+      'audit_events_immutable',
+      'audit_normalize_ip',
+    ]);
+    for (const r of cfg) expect(String(r.cfg)).toContain(b.sb.schema);
+
+    const head = (
+      await b.sb.exec(
+        `SELECT "seq"::int AS seq, "hash", "occurredAt" FROM "Audit_Events"`,
+      )
+    )[0];
+    const row = (seq: number, prev: string, at: Date) => {
+      const content = {
+        seq,
+        occurredAt: at,
+        actorType: 'SYSTEM',
+        actorId: null,
+        action: 'AUDIT_VERIFIED',
+        entityType: 'T',
+        entityId: String(seq),
+        before: null,
+        after: null,
+        reason: null,
+        requestId: null,
+        ip: null,
+      };
+      return { content, hash: computeAuditHash(prev, content) };
+    };
+    const insert = (r: ReturnType<typeof row>, prev: string) =>
+      b.sb.exec(
+        `INSERT INTO "${b.sb.schema}"."Audit_Events"
+           ("seq","occurredAt","actorType","action","entityType","entityId","hashVersion","prevHash","hash")
+         VALUES ($1, $2, 'SYSTEM', 'AUDIT_VERIFIED', 'T', $3, 1, $4, $5)`,
+        [r.content.seq, r.content.occurredAt, r.content.entityId, prev, r.hash],
+      );
+    const back = new Date((head.occurredAt as Date).getTime() - 1500);
+    const r2 = row(2, head.hash as string, back);
+
+    // 1. a session with an EMPTY search_path (what pg_dump sets): the trigger still finds its table.
+    await b.sb.exec(`SET search_path TO ''`);
+    // 2. without the restore flag a backwards pair is rejected, even for the owner.
+    expect(
+      sqlstate(await insert(r2, head.hash as string).catch((x: unknown) => x)),
+    ).toBe('23000');
+    // 3. with the flag, the owner can replay it ...
+    await b.sb.exec(
+      `SELECT set_config('audit.allow_unordered_restore', 'on', false)`,
+    );
+    await insert(r2, head.hash as string);
+    // ... but seq/prevHash continuity stays enforced under the flag.
+    const r3bad = row(9, r2.hash, new Date());
+    expect(
+      sqlstate(await insert(r3bad, r2.hash).catch((x: unknown) => x)),
+    ).toBe('23000');
+    await b.sb.exec(
+      `SELECT set_config('audit.allow_unordered_restore', 'off', false)`,
+    );
+    const r3 = row(3, r2.hash, new Date(back.getTime() - 1000));
+    expect(sqlstate(await insert(r3, r2.hash).catch((x: unknown) => x))).toBe(
+      '23000',
+    ); // flag off again: still backwards
+    await b.sb.exec(`SET search_path TO "${b.sb.schema}", public`);
+    const v = await new AuditChainVerifier().verify(b.runner, {
+      mode: 'full',
+    });
+    expect(v).toMatchObject({ ok: true, rows: 2 });
+  });
+
   it('AC2: the application role gets 42501 on UPDATE/DELETE/TRUNCATE, can still SELECT/INSERT; all inside a rolled-back transaction (no role, schema or row survives)', async () => {
     const c = new pg.Client({
       connectionString: (() => {

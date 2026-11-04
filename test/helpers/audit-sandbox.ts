@@ -51,7 +51,11 @@ export function auditMigrationSql(): string {
 /** The later migrations that change the audit objects (applied after the first one, in order). */
 export function auditHardeningSql(): string[] {
   return readdirSync(MIGRATIONS)
-    .filter((d) => d.endsWith('_audit_chain_hardening'))
+    .filter(
+      (d) =>
+        d.endsWith('_audit_chain_hardening') ||
+        d.endsWith('_audit_restore_safe'),
+    )
     .sort()
     .map((d) => readFileSync(join(MIGRATIONS, d, 'migration.sql'), 'utf8'));
 }
@@ -73,6 +77,26 @@ export function sandboxName(): string {
     '',
   );
   return `${SANDBOX_PREFIX}${Math.floor(Date.now() / 1000).toString(36)}_${run}_${randomBytes(4).toString('hex')}`;
+}
+
+const SANDBOX_NAME = /^audit_t_([0-9a-z]{6,8})_([0-9a-z]{1,16})_([0-9a-f]{8})$/;
+
+/**
+ * Parses a name made by `sandboxName()`; null for anything else (a foreign
+ * `audit_t_foo` schema is NOT ours and must never be dropped: `parseInt('foo', 36)`
+ * would read it as an ancient timestamp).
+ */
+export function parseSandboxName(
+  name: string,
+): { createdAtSeconds: number; run: string } | null {
+  const m = SANDBOX_NAME.exec(name);
+  if (!m) return null;
+  const at = parseInt(m[1], 36);
+  // Plausible epoch seconds: after 2020 and before 2100.
+  if (!Number.isFinite(at) || at < 1_577_836_800 || at > 4_102_444_800) {
+    return null;
+  }
+  return { createdAtSeconds: at, run: m[2] };
 }
 
 export interface AuditSandbox {

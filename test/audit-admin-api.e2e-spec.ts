@@ -719,7 +719,11 @@ describe('Weekly verification job (e2e, Story 20.1 AC10) on a sandbox without tr
     const err = vi
       .spyOn(Logger.prototype, 'error')
       .mockImplementation(() => undefined);
-    // Tamper (the sandbox has no triggers): alter row 9 and delete row 12.
+    // Tamper (the sandbox has no triggers): alter row 9.
+    const original = await c.sb.exec(
+      `SELECT "after"::text AS "a" FROM "Audit_Events" WHERE "seq" = 9`,
+    );
+    const originalAfter = (original[0] as { a: string }).a;
     await c.sb.exec(
       `UPDATE "Audit_Events" SET "after" = '{"k":999}'::jsonb WHERE "seq" = 9`,
     );
@@ -754,6 +758,50 @@ describe('Weekly verification job (e2e, Story 20.1 AC10) on a sandbox without tr
       ok: false,
       brokenAt: { seq: 9, reason: 'HASH_MISMATCH' },
     });
+    // A PARTIAL verification that reads only clean rows must not clear the alert.
+    const partial = await server()
+      .post(`${BASE}/verify`)
+      .set(auth())
+      .send({ mode: 'full', fromSeq: 10 })
+      .expect(200);
+    expect(partial.body).toMatchObject({ ok: true, partial: true });
+    const stillBroken = await server()
+      .get(`${BASE}/verifications`)
+      .set(auth())
+      .expect(200);
+    expect(stillBroken.body.chainBroken).toBe(true);
+    // ... nor an incremental one (it trusts the rows before its anchor).
+    await server().post(`${BASE}/verify`).set(auth()).send({}).expect(200);
+    expect(
+      (await server().get(`${BASE}/verifications`).set(auth())).body
+        .chainBroken,
+    ).toBe(true);
+    // A full verification over the UNCHANGED chain is BROKEN again: still broken.
+    await server()
+      .post(`${BASE}/verify`)
+      .set(auth())
+      .send({ mode: 'full' })
+      .expect(200);
+    expect(
+      (await server().get(`${BASE}/verifications`).set(auth())).body
+        .chainBroken,
+    ).toBe(true);
+    // Only a later COMPLETE OK clears it (here: the row was put back).
+    await c.sb.exec(
+      `UPDATE "Audit_Events" SET "after" = '${originalAfter.replace(/'/g, "''")}'::jsonb WHERE "seq" = 9`,
+    );
+    const full = await server()
+      .post(`${BASE}/verify`)
+      .set(auth())
+      .send({ mode: 'full' })
+      .expect(200);
+    expect(full.body).toMatchObject({ ok: true, partial: false });
+    const cleared = await server()
+      .get(`${BASE}/verifications`)
+      .set(auth())
+      .expect(200);
+    expect(cleared.body.chainBroken).toBe(false);
+    expect(cleared.body.lastBrokenAt).not.toBeNull(); // the history keeps it
     err.mockRestore();
   });
 

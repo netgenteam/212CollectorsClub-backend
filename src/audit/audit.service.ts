@@ -8,7 +8,7 @@ import {
 import { RequestContext } from '../common/request-context.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
-import { isAuditAction } from './audit-actions.js';
+import { isAuditAction, publicFieldsOf } from './audit-actions.js';
 import type { AuditAction } from './audit-actions.js';
 import {
   codePointLength,
@@ -129,7 +129,7 @@ const unavailable = (reason: string, cause?: unknown): ApiException => {
  *     Stripe/HTTP/mail/file call, no `sleep`, no heavy query, no other `await` than
  *     the commit itself. Prisma has no pre-commit hook, so the lock cannot be
  *     deferred for a transaction this service does not open; the rule is enforced
- *     by `findRecordMisuse` (`audit-static.spec.ts`), a static test that fails on
+ *     by `findRecordMisuse` (`test/helpers/find-record-misuse.ts`, run by `audit-static.spec.ts`), a static test (TypeScript AST) that fails on
  *     any `await` after a `record(...)` in the same callback.
  *   Measured why (8 audited actions/s, a 300 ms call after `record`): p50 7.5 s and
  *   503s; a Stripe call there would stall the whole site. Do the external work
@@ -330,7 +330,12 @@ export class AuditService {
       what: string,
     ): AuditPayload | null => {
       if (v === undefined || v === null) return null;
-      const { value, issues } = sanitizeAuditPayload(v, mode, `$${what}`);
+      const { value, issues } = sanitizeAuditPayload(
+        v,
+        mode,
+        `$${what}`,
+        publicFieldsOf(ev.action),
+      );
       if (value !== null && JSON.stringify(value).length > MAX_PAYLOAD_CHARS) {
         throw new AuditEventError(
           `${what} is larger than ${MAX_PAYLOAD_CHARS} characters`,

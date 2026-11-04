@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { findRecordMisuse } from '../../test/helpers/find-record-misuse.js';
 
 const ROOT = resolve(__dirname, '..', '..');
 const SRC = resolve(ROOT, 'src');
@@ -15,80 +16,6 @@ const walk = (dir: string): string[] =>
 /** A Prisma write on the model, or a raw INSERT/UPDATE/DELETE/TRUNCATE on the table. */
 export const FORBIDDEN =
   /auditEvent\s*\.\s*(create|createMany|update|updateMany|delete|deleteMany|upsert)\b|(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(\s+TABLE)?)\s+"?Audit_Events"?/i;
-
-/**
- * `AuditService.record(tx, ev)` holds the chain-head lock until the transaction
- * commits, so after it NOTHING slow may run in the same callback (Stripe, mail,
- * HTTP, sleep, more queries). Heuristic, on source text: for every `.record(tx, ...)`
- * statement, the rest of the ENCLOSING FUNCTION (the nearest arrow/function body)
- * must contain no `await` (another `.record(` is fine: it is the same lock) and no
- * `.then(`. Returns one message per offending call. Prefer `AuditService.transaction`,
- * which flushes by construction after the callback.
- */
-export function findRecordMisuse(src: string): string[] {
-  const out: string[] = [];
-  const re = /\.record\(\s*\w+\s*,/g;
-  for (let m = re.exec(src); m; m = re.exec(src)) {
-    // end of the statement: matching ')' of the call
-    let i = m.index + m[0].length - 1;
-    let depth = 1;
-    for (; i < src.length && depth > 0; i += 1) {
-      if (src[i] === '(') depth += 1;
-      else if (src[i] === ')') depth -= 1;
-    }
-    const stmtEnd = i;
-    // enclosing function: walk back to the nearest unmatched `{` that opens a function body
-    let open = -1;
-    let back = 0;
-    for (let j = m.index; j >= 0; j -= 1) {
-      if (src[j] === '}') back += 1;
-      else if (src[j] === '{') {
-        if (back > 0) {
-          back -= 1;
-          continue;
-        }
-        const pre = src.slice(0, j).trimEnd();
-        if (pre.endsWith('=>')) {
-          open = j;
-          break;
-        }
-        if (pre.endsWith(')')) {
-          let k = pre.length - 1;
-          let d = 0;
-          for (; k >= 0; k -= 1) {
-            if (pre[k] === ')') d += 1;
-            else if (pre[k] === '(') {
-              d -= 1;
-              if (d === 0) break;
-            }
-          }
-          const head = /([A-Za-z_$][\w$]*)\s*$/.exec(pre.slice(0, k).trimEnd());
-          if (!head || !/^(if|for|while|switch|catch|with)$/.test(head[1])) {
-            open = j;
-            break;
-          }
-        }
-      }
-    }
-    if (open < 0) continue;
-    let end = open + 1;
-    for (let d = 1; end < src.length && d > 0; end += 1) {
-      if (src[end] === '{') d += 1;
-      else if (src[end] === '}') d -= 1;
-    }
-    const tail = src.slice(stmtEnd, end);
-    if (
-      /\bawait\b(?!\s+[\w.]*\brecord\s*\()/.test(tail) ||
-      /\.then\(/.test(tail)
-    ) {
-      const line = src.slice(0, m.index).split('\n').length;
-      out.push(
-        `line ${line}: work after record(); the chain lock is held until commit`,
-      );
-    }
-  }
-  return out;
-}
 
 describe('record() must be the last thing a transaction does (Story 20.1, safe use)', () => {
   const bad = `
@@ -128,6 +55,177 @@ describe('record() must be the last thing a transaction does (Story 20.1, safe u
     expect(findRecordMisuse(badThen)).toHaveLength(1);
     expect(findRecordMisuse(good)).toEqual([]);
     expect(findRecordMisuse(goodTransaction)).toEqual([]);
+  });
+
+  // The shapes the first (regex) version missed. Each wraps `body` in a callback.
+  const wrap = (body: string, extra = '') => `
+    class S {
+      ${extra}
+      async run() {
+        await this.prisma.$transaction(async (tx) => {
+          ${body}
+        });
+      }
+    }`;
+
+  it.each([
+    [
+      'await in a helper that records',
+      wrap(
+        `await this.emit(tx, ev);
+         await this.stripe.refund(id);`,
+        `async emit(tx, ev) { await this.audit.record(tx, ev); }`,
+      ),
+    ],
+    [
+      'Promise.all next to record',
+      wrap(
+        `await Promise.all([this.audit.record(tx, ev), this.stripe.refund(id)]);`,
+      ),
+    ],
+    [
+      'alias of record',
+      wrap(
+        `const rec = this.audit.record.bind(this.audit);
+         await rec(tx, ev);
+         await this.mailer.send(m);`,
+      ),
+    ],
+    [
+      'destructured record',
+      wrap(
+        `const { record } = this.audit;
+         await record(tx, ev);
+         await this.mailer.send(m);`,
+      ),
+    ],
+    [
+      'destructured and renamed record',
+      wrap(
+        `const { record: rec } = this.audit;
+         await rec(tx, ev);
+         await slow();`,
+      ),
+    ],
+    [
+      "element access this.audit['record']",
+      wrap(
+        `await this.audit['record'](tx, ev);
+         await this.stripe.refund(id);`,
+      ),
+    ],
+    [
+      'the transaction handed to another function',
+      wrap(
+        `await this.audit.record(tx, ev);
+         await this.helper(tx);`,
+      ),
+    ],
+    [
+      'the transaction used without await',
+      wrap(
+        `await this.audit.record(tx, ev);
+         void tx.order.findMany();`,
+      ),
+    ],
+    [
+      'await in finally',
+      wrap(
+        `try { await this.audit.record(tx, ev); } finally { await this.cleanup(); }`,
+      ),
+    ],
+    [
+      'await earlier in the same loop (the next iteration runs after record)',
+      wrap(
+        `for (const ev of evs) { await this.stripe.call(ev); await this.audit.record(tx, ev); }`,
+      ),
+    ],
+    [
+      'await after the if that contains record',
+      wrap(
+        `if (x) { await this.audit.record(tx, ev); }
+         await this.mailer.send(m);`,
+      ),
+    ],
+    [
+      'for await',
+      wrap(
+        `await this.audit.record(tx, ev);
+         for await (const x of stream()) { use(x); }`,
+      ),
+    ],
+  ])('catches: %s', (_what, src) => {
+    expect(findRecordMisuse(src).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    [
+      'an await in the OTHER branch of the if',
+      wrap(
+        `if (ok) { await this.audit.record(tx, ev); } else { await this.mailer.send(m); }`,
+      ),
+    ],
+    [
+      'an await in the catch of the try that holds record (the transaction is dead)',
+      wrap(
+        `try { await this.audit.record(tx, ev); } catch (e) { await this.log(e); throw e; }`,
+      ),
+    ],
+    [
+      'an await after an early return',
+      wrap(
+        `if (x) { await this.audit.record(tx, ev); return 1; }
+         await this.other(tx);`,
+      ),
+    ],
+    [
+      'the word await in a comment or a string',
+      wrap(
+        `await this.audit.record(tx, ev);
+         // await this.stripe.refund(id)
+         const s = 'await this.mailer.send(m); .then(x)';
+         return s.length;`,
+      ),
+    ],
+    [
+      'two records in a row, with the same transaction',
+      wrap(
+        `await this.audit.record(tx, a);
+         await this.audit.record(tx, b);`,
+      ),
+    ],
+    [
+      'Promise.all of records only',
+      wrap(
+        `await Promise.all([this.audit.record(tx, a), this.audit.record(tx, b)]);`,
+      ),
+    ],
+    [
+      'work BEFORE record and a plain return after',
+      wrap(
+        `await this.stripe.refund(id);
+         await tx.order.update({ where: { id }, data: {} });
+         await this.audit.record(tx, ev);
+         return { ok: true };`,
+      ),
+    ],
+    [
+      'an await inside a nested callback that is not run inline',
+      wrap(
+        `await this.audit.record(tx, ev);
+         setImmediate(async () => { await later(); });`,
+      ),
+    ],
+    [
+      'a helper that records, used as the last thing',
+      wrap(
+        `await tx.order.update({ where: { id }, data: {} });
+         await this.emit(tx, ev);`,
+        `async emit(tx, ev) { await this.audit.record(tx, ev); }`,
+      ),
+    ],
+  ])('accepts: %s', (_what, src) => {
+    expect(findRecordMisuse(src)).toEqual([]);
   });
 
   it('no call site in src has work after record()', () => {
