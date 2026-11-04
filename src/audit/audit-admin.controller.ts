@@ -71,12 +71,14 @@ export class AuditAdminController {
   @ApiQuery({
     name: 'from',
     required: false,
-    description: 'ISO 8601 date or date-time (inclusive)',
+    description:
+      'ISO 8601 date (YYYY-MM-DD) or date-time with offset, inclusive; a real calendar date between 2000-01-01 and 2999-12-31',
   })
   @ApiQuery({
     name: 'to',
     required: false,
-    description: 'ISO 8601 date or date-time',
+    description:
+      'ISO 8601 date or date-time (same rules as `from`); a date covers that whole UTC day',
   })
   @ApiQuery({
     name: 'action',
@@ -119,7 +121,7 @@ export class AuditAdminController {
   })
   @ApiResponse(UNAUTH)
   async event(@Param('seq') seq: string): Promise<AuditEventDetailDto> {
-    if (!/^[1-9]\d{0,15}$/.test(seq)) {
+    if (!/^[1-9]\d{0,15}$/.test(seq) || Number(seq) > Number.MAX_SAFE_INTEGER) {
       throw new ApiException(
         HttpStatus.BAD_REQUEST,
         'AUDIT_FILTER_INVALID',

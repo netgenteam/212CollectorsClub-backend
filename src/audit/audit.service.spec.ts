@@ -2,7 +2,11 @@ import { HttpStatus } from '@nestjs/common';
 import { describe, expect, it } from 'vitest';
 import { ApiException } from '../common/api-exception.js';
 import { RequestContext } from '../common/request-context.js';
-import { AuditEventError, AuditService } from './audit.service.js';
+import {
+  AuditEventError,
+  AuditRoundTripError,
+  AuditService,
+} from './audit.service.js';
 import { GENESIS_HASH, computeAuditHash } from './canonical-json.js';
 
 type Call = { kind: 'exec' | 'query'; sql: string; values: unknown[] };
@@ -13,6 +17,8 @@ function fakeTx(
     head?: { seq: bigint; hash: string };
     failOn?: RegExp;
     failWith?: unknown;
+    /** Columns the "database" returns different from what was bound. */
+    mutateStored?: Record<string, unknown>;
   } = {},
 ) {
   const calls: Call[] = [];
@@ -27,11 +33,37 @@ function fakeTx(
           opts.failWith instanceof Error ? opts.failWith : new Error('db down'),
         );
       if (/FROM "Audit_Events" ORDER BY "seq" DESC/.test(sql)) {
-        return Promise.resolve(opts.head ? [{ ...opts.head, now: clock }] : []);
+        return Promise.resolve(
+          opts.head ? [{ ...opts.head, last: clock, now: clock }] : [],
+        );
       }
       if (/clock_timestamp/.test(sql)) return Promise.resolve([{ now: clock }]);
-      if (/host\(/.test(sql))
+      if (/audit_normalize_ip/.test(sql))
         return Promise.resolve([{ ip: String(values[0]).toLowerCase() }]);
+      if (/^INSERT INTO "Audit_Events"/.test(sql.trim())) {
+        // RETURNING: what Postgres would hand back for the values just bound.
+        const [seq, at, actorType, actorId, action, entityType, entityId] =
+          values;
+        const json = (v: unknown): unknown =>
+          typeof v === 'string' ? (JSON.parse(v) as unknown) : null;
+        return Promise.resolve([
+          {
+            seq,
+            occurredAt: at,
+            actorType,
+            actorId,
+            action,
+            entityType,
+            entityId,
+            before: json(values[7]),
+            after: json(values[8]),
+            reason: values[9],
+            requestId: values[10],
+            ip: values[11],
+            ...(opts.mutateStored ?? {}),
+          },
+        ]);
+      }
       return Promise.resolve([]);
     };
   return {
@@ -249,5 +281,130 @@ describe('AuditService.record (Story 20.1)', () => {
       svc().record(tx, { ...ev, action: 'NOPE' } as never),
     ).rejects.toBeInstanceOf(AuditEventError);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('AuditService: what is hashed is what is stored (Story 20.1, QA round 2)', () => {
+  const insert = (calls: Call[]) =>
+    calls.find((c) => /INSERT INTO "Audit_Events"/.test(c.sql))!;
+
+  it('lone surrogates and NUL are replaced by U+FFFD in columns, reason and payload BEFORE hashing and inserting', async () => {
+    const { calls, tx } = fakeTx();
+    const out = await svc().record(tx, {
+      ...ev,
+      entityId: 'x\ud800y\u0000z',
+      reason: 'emoji cut \ud83d',
+      before: { 'k\ud800': 'v\u0000' },
+      after: { n: -0 },
+    });
+    const v = insert(calls).values;
+    expect(v[6]).toBe('x\ufffdy\ufffdz'); // entityId
+    expect(v[9]).toBe('emoji cut \ufffd'); // reason
+    expect(JSON.parse(v[7] as string)).toEqual({ 'k\ufffd': 'v\ufffd' });
+    expect(v[8]).toBe('{"n":0}');
+    expect(out.hash).toBe(v[13]);
+  });
+
+  it('reason is cut to 500 CODE POINTS (an astral char is never split), an empty one is NULL, PII in it is masked', async () => {
+    const { calls, tx } = fakeTx();
+    await svc().record(tx, { ...ev, reason: '😀'.repeat(900) });
+    expect(insert(calls).values[9]).toBe('😀'.repeat(500));
+    const again = fakeTx();
+    await svc().record(again.tx, { ...ev, reason: '' });
+    expect(insert(again.calls).values[9]).toBeNull();
+    const pii = fakeTx();
+    await svc().record(pii.tx, { ...ev, reason: 'cliente maria@example.com' });
+    expect(insert(pii.calls).values[9]).toBe('cliente [REDACTED:EMAIL]');
+  });
+
+  it('entityType/entityId limits count characters like varchar(n), not UTF-16 units', async () => {
+    const { tx } = fakeTx();
+    await expect(
+      svc().record(tx, { ...ev, entityId: '😀'.repeat(128) }),
+    ).resolves.toBeDefined();
+    await expect(
+      svc().record(tx, { ...ev, entityId: '😀'.repeat(129) }),
+    ).rejects.toBeInstanceOf(AuditEventError);
+    await expect(
+      svc().record(tx, { ...ev, entityType: 'é'.repeat(65) }),
+    ).rejects.toBeInstanceOf(AuditEventError);
+  });
+
+  it('an IP that is not an inet (zone id, garbage) never reaches the database as an inet cast and never fails the action', async () => {
+    for (const ip of [
+      'fe80::1%eth0',
+      'unknown',
+      '1.2.3.4, 5.6.7.8',
+      '[::1]:80',
+    ]) {
+      const { calls, tx } = fakeTx();
+      await expect(svc().record(tx, { ...ev, ip })).resolves.toBeDefined();
+      const norm = calls.filter((c) => /audit_normalize_ip/.test(c.sql));
+      const stored = insert(calls).values[11];
+      if (ip === 'fe80::1%eth0') expect(stored).toBe('fe80::1');
+      if (ip === '[::1]:80') expect(stored).toBe('::1');
+      if (ip === 'unknown' || ip.includes(',')) {
+        expect(stored).toBeNull();
+        expect(norm).toHaveLength(0);
+      }
+    }
+  });
+
+  it('occurredAt never goes before the previous row (a clock that stepped back)', async () => {
+    const { calls, tx } = fakeTx({ head: { seq: 1n, hash: 'a'.repeat(64) } });
+    // the fake head says last == clock; make the head later than the clock
+    const later = new Date('2026-11-04T13:00:00.000Z');
+    type Q = (
+      s: TemplateStringsArray,
+      ...v: unknown[]
+    ) => Promise<Record<string, unknown>[]>;
+    const inner = tx as unknown as { $executeRaw: unknown; $queryRaw: Q };
+    const wrapped = {
+      $executeRaw: inner.$executeRaw,
+      $queryRaw: (s: TemplateStringsArray, ...v: unknown[]) =>
+        inner
+          .$queryRaw(s, ...v)
+          .then((rows) =>
+            /FROM "Audit_Events" ORDER BY "seq" DESC/.test(s.join('?'))
+              ? rows.map((r) => ({ ...r, last: later }))
+              : rows,
+          ),
+    };
+    await svc().record(wrapped as never, ev);
+    expect(insert(calls).values[1]).toEqual(later);
+  });
+
+  it('a stored row that does not hash to what was written aborts the action with AuditRoundTripError (never a chain that cannot verify)', async () => {
+    const { tx } = fakeTx({ mutateStored: { entityId: 'something else' } });
+    const e = await svc()
+      .record(tx, ev)
+      .catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(AuditRoundTripError);
+    expect(String(e)).toContain('entityId');
+    expect(e).not.toBeInstanceOf(ApiException); // a bug (500), not an outage
+  });
+
+  it('payload guard: strict in the suite (throws AuditPayloadError), lenient in production (masks, the action goes on)', async () => {
+    const saved = process.env.NODE_ENV;
+    try {
+      const { tx } = fakeTx();
+      await expect(
+        svc().record(tx, { ...ev, after: { note: 'maria@example.com' } }),
+      ).rejects.toThrow(/Invalid audit payload/);
+      process.env.NODE_ENV = 'production';
+      const prod = fakeTx();
+      await expect(
+        svc().record(prod.tx, {
+          ...ev,
+          after: { note: 'maria@example.com', price: 1.5 },
+        }),
+      ).resolves.toBeDefined();
+      expect(JSON.parse(insert(prod.calls).values[8] as string)).toEqual({
+        note: '[REDACTED:EMAIL]',
+        price: '1.5',
+      });
+    } finally {
+      process.env.NODE_ENV = saved;
+    }
   });
 });

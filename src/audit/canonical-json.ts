@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { pgText } from './audit-normalize.js';
 
 /**
  * Story 20.1 (AD-99): deterministic JSON for the audit hash chain. PURE.
@@ -7,6 +8,9 @@ import { createHash } from 'node:crypto';
  * - `Date` -> ISO string with milliseconds, `BigInt` -> string;
  * - `undefined` is omitted from objects (and is `null` in an array, like JSON);
  * - `null` is kept;
+ * - strings and keys are hashed as Postgres will STORE them (`pgText`: lone
+ *   surrogates and NUL become U+FFFD), so the hash of what was written equals the
+ *   hash of what is read back; well-formed text is unchanged;
  * - numbers must be finite (the audit payload validator additionally restricts
  *   `before`/`after` to integers: `jsonb` normalizes numbers, money goes as string).
  */
@@ -18,7 +22,7 @@ function serialize(v: unknown): string {
   if (v === null) return 'null';
   switch (typeof v) {
     case 'string':
-      return JSON.stringify(v);
+      return JSON.stringify(pgText(v));
     case 'boolean':
       return v ? 'true' : 'false';
     case 'number':
@@ -46,9 +50,12 @@ function serialize(v: unknown): string {
   }
   const obj = v as Record<string, unknown>;
   const parts: string[] = [];
-  for (const key of Object.keys(obj).sort()) {
-    if (obj[key] === undefined) continue;
-    parts.push(`${JSON.stringify(key)}:${serialize(obj[key])}`);
+  const keys = Object.keys(obj)
+    .filter((k) => obj[k] !== undefined)
+    .map((k) => [pgText(k), k] as const)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  for (const [nk, k] of keys) {
+    parts.push(`${JSON.stringify(nk)}:${serialize(obj[k])}`);
   }
   return `{${parts.join(',')}}`;
 }

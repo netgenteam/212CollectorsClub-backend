@@ -24,6 +24,8 @@ export default defineConfig({
       './test/helpers/global-landing-snapshot.ts',
       // Story 19.4: orphaned (append-only) consent rows created by the run.
       './test/helpers/global-consent-orphans.ts',
+      // Story 20.1: no audit_t_* sandbox schema outlives the run.
+      './test/helpers/global-audit-sandbox.ts',
     ],
   },
 });

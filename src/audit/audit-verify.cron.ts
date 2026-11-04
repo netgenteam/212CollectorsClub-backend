@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import type { OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { ApiException } from '../common/api-exception.js';
@@ -8,15 +9,19 @@ import { AuditVerifyService } from './audit-verify.service.js';
 import type { VerifyResponse } from './audit-verify.service.js';
 
 export interface ScheduledVerifyResult {
-  status: 'OK' | 'BROKEN' | 'BUSY' | 'FAILED';
+  /**
+   * `INCOMPLETE`: every slice was fine but the chain was NOT read to its end (or
+   * a `full` run did not start at row 1); it is never reported as `OK`.
+   */
+  status: 'OK' | 'BROKEN' | 'BUSY' | 'FAILED' | 'INCOMPLETE';
   slices: number;
   rows: number;
   brokenSeq?: number;
   anchorEmailSent: boolean;
 }
 
-/** Never run more slices than this in one cron run (200.000 rows each). */
-const MAX_SLICES = 50;
+/** Never run more slices than this in one cron run (200.000 rows each = 10 M rows). */
+export const MAX_SLICES = 50;
 
 /**
  * Story 20.1 (AC10, A100): weekly verification of the chain
@@ -29,7 +34,7 @@ const MAX_SLICES = 50;
  * when the class is decorated (export it to the process, not only the .env file).
  */
 @Injectable()
-export class AuditVerifyCron {
+export class AuditVerifyCron implements OnApplicationBootstrap {
   private readonly logger = new Logger(AuditVerifyCron.name);
 
   constructor(
@@ -38,6 +43,23 @@ export class AuditVerifyCron {
     private readonly mailer: MailerService,
     private readonly config: ConfigService,
   ) {}
+
+  /**
+   * Without `AUDIT_ANCHOR_EMAIL` nobody outside the database keeps the chain head
+   * (A100): a DBA with full privileges could rewrite the whole chain unseen.
+   * Warn at boot in production; `GET /admin/audit/head` exposes the same fact
+   * (`anchorEmailConfigured`) for the admin screen.
+   */
+  onApplicationBootstrap(): void {
+    if (
+      process.env.NODE_ENV === 'production' &&
+      !this.reader.anchorEmailConfigured()
+    ) {
+      this.logger.warn(
+        'AUDIT_ANCHOR_EMAIL is not set: the audit chain head is not sent outside the database, so a rewrite of the whole chain by a DBA would go unnoticed (docs/deployment.md 13).',
+      );
+    }
+  }
 
   /** `AUDIT_VERIFY_ENABLED=false` disables it; default on (off under NODE_ENV=test). */
   isEnabled(): boolean {
@@ -81,6 +103,7 @@ export class AuditVerifyCron {
     let rows = 0;
     let fromSeq: number | undefined;
     let last: VerifyResponse | undefined;
+    let startedAtGenesis = false;
     try {
       do {
         last = await this.verifier.run({
@@ -90,6 +113,7 @@ export class AuditVerifyCron {
           actor: { actorType: 'SYSTEM', actorId: null },
         });
         slices += 1;
+        if (slices === 1) startedAtGenesis = last.checkedFrom === 1;
         rows += last.rows;
         fromSeq = last.nextFromSeq;
       } while (last.ok && !last.done && slices < MAX_SLICES);
@@ -110,9 +134,23 @@ export class AuditVerifyCron {
         `AUDIT CHAIN BROKEN at seq ${last.brokenAt?.seq} (${last.brokenAt?.reason}); see GET /admin/audit/verifications`,
       );
     }
-    const anchorEmailSent = await this.sendAnchor(last.ok);
+    // Fine so far, but not the whole chain: never an OK. (a) the slice cap was hit
+    // before the end; (b) a `full` run must start at row 1.
+    const complete =
+      last.ok &&
+      last.done &&
+      (this.mode() === 'incremental' || startedAtGenesis);
+    if (last.ok && !complete) {
+      this.logger.error(
+        `AUDIT VERIFICATION INCOMPLETE: ${slices} slice(s), ${rows} rows, stopped at seq ${last.checkedTo}` +
+          (last.done
+            ? ' (a full run did not start at row 1)'
+            : ` (the cap of ${MAX_SLICES} slices was reached before the end of the chain; set AUDIT_VERIFY_CRON_MODE=incremental or verify the rest with POST /admin/audit/verify)`),
+      );
+    }
+    const anchorEmailSent = await this.sendAnchor(last.ok, complete);
     return {
-      status: last.ok ? 'OK' : 'BROKEN',
+      status: !last.ok ? 'BROKEN' : complete ? 'OK' : 'INCOMPLETE',
       slices,
       rows,
       ...(last.brokenAt ? { brokenSeq: last.brokenAt.seq } : {}),
@@ -120,17 +158,17 @@ export class AuditVerifyCron {
     };
   }
 
-  private async sendAnchor(ok: boolean): Promise<boolean> {
+  private async sendAnchor(ok: boolean, complete: boolean): Promise<boolean> {
     const to = String(this.config.get('AUDIT_ANCHOR_EMAIL') ?? '').trim();
     if (!to) return false;
     try {
       const head = await this.reader.head();
       await this.mailer.sendMail({
         to,
-        subject: `[212 Collectors Club] Audit chain anchor: seq ${head.seq}${ok ? '' : ' (VERIFICATION FAILED)'}`,
+        subject: `[212 Collectors Club] Audit chain anchor: seq ${head.seq}${ok ? (complete ? '' : ' (VERIFICATION INCOMPLETE)') : ' (VERIFICATION FAILED)'}`,
         text:
           `Audit chain head\nseq: ${head.seq}\nhash: ${head.hash}\nrows: ${head.count}\n` +
-          `at: ${head.at ?? '-'}\nlast verification: ${ok ? 'OK' : 'BROKEN'}\n\n` +
+          `at: ${head.at ?? '-'}\nlast verification: ${ok ? (complete ? 'OK' : 'INCOMPLETE (the whole chain was not verified)') : 'BROKEN'}\n\n` +
           `Keep this message outside the database: it is the external anchor of the chain.`,
       });
       return true;

@@ -12,6 +12,7 @@ export default defineConfig({
     include: ['**/*.perf.spec.ts'],
     // Story 20.2: run-time generated, throw-away ID document keys.
     env: generateIdDocTestEnv(),
+    globalSetup: ['./test/helpers/global-audit-sandbox.ts'],
     fileParallelism: false,
     maxWorkers: 1,
     pool: 'forks',

@@ -89,14 +89,14 @@ export class AuditVerifyService {
       const rows = await tx.$queryRaw<{ id: string }[]>`
         INSERT INTO "Audit_Verifications"
           ("startedAt","finishedAt","mode","source","fromSeq","toSeq","rows","result",
-           "brokenSeq","expectedHash","foundHash","headSeq","headHash")
+           "brokenSeq","expectedHash","foundHash","headSeq","headHash","partial")
         VALUES (${startedAt}::timestamptz, now(), ${r.mode}, ${req.source},
                 ${r.checkedFrom}::bigint, ${r.checkedTo}::bigint, ${r.rows}::int,
                 ${r.ok ? 'OK' : 'BROKEN'},
                 ${r.brokenAt?.seq ?? null}::bigint,
                 ${r.brokenAt && /^[0-9a-f]{64}$/.test(r.brokenAt.expected) ? r.brokenAt.expected : null},
                 ${r.brokenAt?.found && /^[0-9a-f]{64}$/.test(r.brokenAt.found) ? r.brokenAt.found : null},
-                ${r.lastSeq}::bigint, ${lastHash})
+                ${r.lastSeq}::bigint, ${lastHash}, ${r.partial})
         RETURNING "id"::text AS "id"`;
       const id = rows[0].id;
       audit.add({
@@ -112,6 +112,7 @@ export class AuditVerifyService {
           toSeq: r.checkedTo,
           rows: r.rows,
           result: r.ok ? 'OK' : 'BROKEN',
+          partial: r.partial,
           ...(r.brokenAt
             ? { brokenSeq: r.brokenAt.seq, reason: r.brokenAt.reason }
             : {}),

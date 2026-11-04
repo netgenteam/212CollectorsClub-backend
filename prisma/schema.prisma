@@ -1539,6 +1539,8 @@ model AuditVerification {
   foundHash    String?   @db.Char(64)
   headSeq      BigInt
   headHash     String    @db.Char(64)
+  /// True when the run did not cover the chain from the genesis to its end (`fromSeq` > 1, stopped by `limit`, incremental).
+  partial      Boolean   @default(false)
 
   @@index([startedAt])
   @@map("Audit_Verifications")

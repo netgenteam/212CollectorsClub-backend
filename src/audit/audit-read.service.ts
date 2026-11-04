@@ -1,6 +1,8 @@
-import { HttpStatus, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { ApiException } from '../common/api-exception.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { codePointLength, pgText } from './audit-normalize.js';
 import { GENESIS_HASH } from './canonical-json.js';
 
 export const AUDIT_PAGE_SIZE = 50;
@@ -10,9 +12,16 @@ const UUID_RE =
 const ACTION_RE = /^[A-Z0-9_]{1,64}$/;
 const ENTITY_TYPE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
 const CURSOR_RE = /^[1-9]\d{0,15}$/;
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const DATETIME_RE =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})$/;
+/** Filters outside this window cannot match anything (the chain starts in 2020) and some are not valid timestamptz. */
+export const FILTER_MIN_DATE = Date.UTC(2000, 0, 1);
+export const FILTER_MAX_DATE = Date.UTC(2999, 11, 31, 23, 59, 59, 999);
+/** Largest seq/cursor accepted: above 2^53 a JS number is no longer exact. */
+const MAX_SEQ = Number.MAX_SAFE_INTEGER;
+const daysInMonth = (y: number, m: number): number =>
+  new Date(Date.UTC(y, m, 0)).getUTCDate(); // m is 1-based: day 0 of the next month
 
 export interface AuditEventsFilter {
   from?: Date;
@@ -43,13 +52,43 @@ export function parseAuditEventsQuery(
     return v;
   };
   const f: AuditEventsFilter = {};
+  /** Strict calendar check: `2026-02-30` is NOT 2 March, `24:00`, `:60` and `+24:00` are not accepted. */
   const date = (k: string, v: string): Date => {
-    if (!DATE_RE.test(v) && !DATETIME_RE.test(v)) {
-      throw invalid(`${k} must be an ISO 8601 date or date-time.`);
+    const bad = (): ApiException =>
+      invalid(
+        `${k} must be a valid ISO 8601 date (YYYY-MM-DD) or date-time with offset.`,
+      );
+    const d = DATE_RE.exec(v);
+    const dt = d ? null : DATETIME_RE.exec(v);
+    const m = d ?? dt;
+    if (!m) throw bad();
+    const [y, mo, da] = [Number(m[1]), Number(m[2]), Number(m[3])];
+    if (mo < 1 || mo > 12 || da < 1 || da > daysInMonth(y, mo)) throw bad();
+    let ms: number;
+    if (d) {
+      ms = Date.UTC(y, mo - 1, da);
+    } else {
+      const [h, mi, se, frac, off] = [
+        Number(dt![4]),
+        Number(dt![5]),
+        Number(dt![6] ?? 0),
+        dt![7] ? Number(dt![7].padEnd(3, '0')) : 0,
+        dt![8],
+      ];
+      if (h > 23 || mi > 59 || se > 59) throw bad();
+      let offsetMin = 0;
+      if (off !== 'Z') {
+        const oh = Number(off.slice(1, 3));
+        const om = Number(off.slice(4, 6));
+        if (oh > 23 || om > 59) throw bad();
+        offsetMin = (off[0] === '-' ? -1 : 1) * (oh * 60 + om);
+      }
+      ms = Date.UTC(y, mo - 1, da, h, mi, se, frac) - offsetMin * 60_000;
     }
-    const d = new Date(DATE_RE.test(v) ? `${v}T00:00:00.000Z` : v);
-    if (Number.isNaN(d.getTime())) throw invalid(`${k} is not a valid date.`);
-    return d;
+    if (!Number.isFinite(ms) || ms < FILTER_MIN_DATE || ms > FILTER_MAX_DATE) {
+      throw invalid(`${k} must be between 2000-01-01 and 2999-12-31.`);
+    }
+    return new Date(ms);
   };
   const from = one('from');
   if (from !== undefined) f.from = date('from', from);
@@ -84,7 +123,14 @@ export function parseAuditEventsQuery(
   }
   const entityId = one('entityId');
   if (entityId !== undefined) {
-    if (entityId.length > 128) throw invalid('entityId is too long.');
+    // Same rule as the column: at most 128 characters; NUL and lone surrogates
+    // (a percent-decoded `%00`, `%ED%A0%80`) are not text Postgres can compare.
+    if (codePointLength(entityId) > 128) throw invalid('entityId is too long.');
+    if (pgText(entityId) !== entityId) {
+      throw invalid(
+        'entityId has characters that cannot be stored (NUL or lone surrogate).',
+      );
+    }
     f.entityId = entityId;
   }
   const cursor = one('cursor');
@@ -94,6 +140,7 @@ export function parseAuditEventsQuery(
         'cursor must be the seq of the last row of the previous page.',
       );
     }
+    if (Number(cursor) > MAX_SEQ) throw invalid('cursor is out of range.');
     f.cursor = Number(cursor);
   }
   return f;
@@ -165,12 +212,23 @@ export interface AuditHead {
   hash: string;
   count: number;
   at: string | null;
+  anchorEmailConfigured: boolean;
 }
 
 /** Story 20.1 (FR-140): read-only queries over `Audit_Events` / `Audit_Verifications` (raw SQL, unqualified names). */
 @Injectable()
 export class AuditReadService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly config?: ConfigService,
+  ) {}
+
+  /** `AUDIT_ANCHOR_EMAIL` is set: somebody OUTSIDE the database gets the head every week. */
+  anchorEmailConfigured(): boolean {
+    return (
+      String(this.config?.get('AUDIT_ANCHOR_EMAIL') ?? '').trim().length > 0
+    );
+  }
 
   async list(
     f: AuditEventsFilter,
@@ -210,6 +268,7 @@ export class AuditReadService {
   async bySeq(
     seq: number,
   ): Promise<(AuditEventView & { entityLink: string | null }) | null> {
+    if (!Number.isSafeInteger(seq) || seq < 1) return null;
     const rows = await this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
       `SELECT ${COLUMNS} FROM "Audit_Events" WHERE "seq" = $1::bigint`,
       seq,
@@ -219,19 +278,33 @@ export class AuditReadService {
     return { ...v, entityLink: entityLink(v.entityType, v.entityId) };
   }
 
+  /**
+   * `count` is the seq of the last row, not `count(*)` (O(n) over a table that only
+   * grows): the chain guard trigger only admits `seq = previous + 1` starting at 1,
+   * so the two are equal while the chain is intact, and a gap (a DBA's tampering)
+   * is what the verification reports.
+   */
   async head(): Promise<AuditHead> {
+    const anchorEmailConfigured = this.anchorEmailConfigured();
     const rows = await this.prisma.$queryRaw<
-      { seq: bigint; hash: string; at: Date; count: bigint }[]
-    >`SELECT "seq", "hash", "occurredAt" AS "at", (SELECT count(*) FROM "Audit_Events") AS "count"
+      { seq: bigint; hash: string; at: Date }[]
+    >`SELECT "seq", "hash", "occurredAt" AS "at"
         FROM "Audit_Events" ORDER BY "seq" DESC LIMIT 1`;
     if (rows.length === 0) {
-      return { seq: 0, hash: GENESIS_HASH, count: 0, at: null };
+      return {
+        seq: 0,
+        hash: GENESIS_HASH,
+        count: 0,
+        at: null,
+        anchorEmailConfigured,
+      };
     }
     return {
       seq: Number(rows[0].seq),
       hash: rows[0].hash,
-      count: Number(rows[0].count),
+      count: Number(rows[0].seq),
       at: rows[0].at.toISOString(),
+      anchorEmailConfigured,
     };
   }
 
@@ -239,10 +312,12 @@ export class AuditReadService {
     items: Record<string, unknown>[];
     chainBroken: boolean;
     lastBrokenAt: string | null;
+    lastCompleteVerificationAt: string | null;
+    anchorEmailConfigured: boolean;
   }> {
     const rows = await this.prisma.$queryRaw<Record<string, unknown>[]>`
       SELECT "id", "startedAt", "finishedAt", "mode", "source", "fromSeq", "toSeq", "rows", "result",
-             "brokenSeq", "expectedHash", "foundHash", "headSeq", "headHash"
+             "brokenSeq", "expectedHash", "foundHash", "headSeq", "headHash", "partial"
         FROM "Audit_Verifications" ORDER BY "startedAt" DESC, "id" LIMIT ${limit}`;
     const items = rows.map((r) => ({
       id: r.id,
@@ -259,7 +334,11 @@ export class AuditReadService {
       foundHash: r.foundHash ?? null,
       headSeq: Number(r.headSeq),
       headHash: r.headHash,
+      partial: r.partial === true,
     }));
+    const complete = await this.prisma.$queryRaw<{ at: Date }[]>`
+      SELECT "startedAt" AS "at" FROM "Audit_Verifications"
+       WHERE "result" = 'OK' AND NOT "partial" ORDER BY "startedAt" DESC LIMIT 1`;
     // The flag follows the LATEST verification: a BROKEN result stays visible
     // until a later verification says otherwise (it cannot silently disappear).
     const latest = items[0];
@@ -268,6 +347,8 @@ export class AuditReadService {
       chainBroken: latest?.result === 'BROKEN',
       lastBrokenAt:
         (items.find((i) => i.result === 'BROKEN')?.startedAt as string) ?? null,
+      lastCompleteVerificationAt: complete[0]?.at.toISOString() ?? null,
+      anchorEmailConfigured: this.anchorEmailConfigured(),
     };
   }
 }

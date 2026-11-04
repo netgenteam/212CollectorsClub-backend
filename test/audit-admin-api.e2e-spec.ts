@@ -142,6 +142,7 @@ describe('Admin audit API (e2e, Story 20.1) on a sandbox schema', () => {
       hash: GENESIS_HASH,
       count: 0,
       at: null,
+      anchorEmailConfigured: expect.any(Boolean),
     });
     const ev = await server().get(`${BASE}/events`).set(auth()).expect(200);
     expect(ev.body).toEqual({ items: [], nextCursor: null });
@@ -151,6 +152,37 @@ describe('Admin audit API (e2e, Story 20.1) on a sandbox schema', () => {
       .send({})
       .expect(200);
     expect(v.body).toMatchObject({ ok: true, rows: 0, done: true });
+  });
+
+  it('head and verifications tell the screen whether the external anchor (AUDIT_ANCHOR_EMAIL) is configured', async () => {
+    const saved = process.env.AUDIT_ANCHOR_EMAIL;
+    try {
+      delete process.env.AUDIT_ANCHOR_EMAIL;
+      for (const path of ['/head', '/verifications']) {
+        const res = await server()
+          .get(`${BASE}${path}`)
+          .set(auth())
+          .expect(200);
+        expect(
+          (res.body as { anchorEmailConfigured: boolean })
+            .anchorEmailConfigured,
+        ).toBe(false);
+      }
+      process.env.AUDIT_ANCHOR_EMAIL = 'anchor@example.com';
+      for (const path of ['/head', '/verifications']) {
+        const res = await server()
+          .get(`${BASE}${path}`)
+          .set(auth())
+          .expect(200);
+        expect(
+          (res.body as { anchorEmailConfigured: boolean })
+            .anchorEmailConfigured,
+        ).toBe(true);
+      }
+    } finally {
+      if (saved === undefined) delete process.env.AUDIT_ANCHOR_EMAIL;
+      else process.env.AUDIT_ANCHOR_EMAIL = saved;
+    }
   });
 
   it('seed 120 events through AuditService (as 20.5 will)', async () => {
@@ -263,6 +295,123 @@ describe('Admin audit API (e2e, Story 20.1) on a sandbox schema', () => {
         .set(auth())
         .expect(400);
       expect(res.body).toMatchObject({ errorCode: 'AUDIT_FILTER_INVALID' });
+    }
+  });
+
+  it('events: QA round 2 (AC9) values that used to be a 500 or a shifted date are 400 AUDIT_FILTER_INVALID', async () => {
+    for (const qs of [
+      'entityId=%00',
+      'entityId=a%00b',
+      'entityId=' + 'x'.repeat(129),
+      'from=0000-01-01',
+      'from=0001-01-01',
+      'to=0000-12-31',
+      'from=1999-12-31',
+      'from=3000-01-01',
+      'from=9999-12-31',
+      'from=2026-02-30',
+      'from=2026-02-29',
+      'from=2026-04-31',
+      'to=2026-06-31',
+      'from=2026-02-30T10:00:00Z',
+      'from=2026-11-03T25:00:00Z',
+      'from=2026-11-03T24:00:00Z',
+      'from=2026-11-03T10:00:00%2B24:00',
+      'from=2026-11-03T10:00:00',
+      'from=%00',
+      'to=%00',
+      'actorId=%00',
+      'requestId=%00',
+      'action=%00',
+      'entityType=%00',
+      'cursor=%00',
+      'cursor=9007199254740993',
+      'cursor=9999999999999999',
+      'from=2026-11-01&from=2026-11-02',
+      'entityId=',
+    ]) {
+      const res = await server().get(`${BASE}/events?${qs}`).set(auth());
+      expect(res.status, qs).toBe(400);
+      expect(res.body, qs).toMatchObject({ errorCode: 'AUDIT_FILTER_INVALID' });
+    }
+    for (const bad of ['%00', '9007199254740993', '9999999999999999', '1e3']) {
+      expect(
+        (await server().get(`${BASE}/events/${bad}`).set(auth())).status,
+        bad,
+      ).toBe(400);
+    }
+    // valid edge cases still work
+    for (const qs of [
+      'from=2028-02-29',
+      'from=2026-11-03T10:00:00%2B02:00',
+      'from=2000-01-01&to=2999-12-31',
+      'entityId=' + 'x'.repeat(128),
+      'entityId=%F0%9F%98%80',
+    ]) {
+      await server().get(`${BASE}/events?${qs}`).set(auth()).expect(200);
+    }
+  });
+
+  it('events: fuzzing every filter with hostile values never gives a 5xx (only 200 or 400)', async () => {
+    const hostile = [
+      '',
+      '%00',
+      '%0A',
+      '%0D%0A',
+      '%27',
+      '%22%3B--',
+      '%5C',
+      '%25',
+      '%F0%9F%98%80',
+      '%ED%A0%80',
+      '%C0%AF',
+      '%FF',
+      '%E2%80%AE',
+      '0',
+      '-1',
+      '1e309',
+      'NaN',
+      'null',
+      'undefined',
+      '[]',
+      '%7B%7D',
+      '9'.repeat(40),
+      'a'.repeat(300),
+      '0000-00-00',
+      '2026-13-01',
+      '2026-00-00T00:00:00Z',
+      '+002026-01-01T00:00:00Z',
+      '2026-01-01T00:00:00+99:99',
+      '%20',
+      '1.5',
+      '0x10',
+      '0b1',
+      '١٢٣',
+      '2026-01-01T00:00:00.9999Z',
+      '9999-12-31T23:59:59Z',
+      '10000-01-01',
+    ];
+    const keys = [
+      'from',
+      'to',
+      'action',
+      'actorId',
+      'entityType',
+      'entityId',
+      'requestId',
+      'cursor',
+    ];
+    for (const k of keys) {
+      for (const h of hostile) {
+        const res = await server().get(`${BASE}/events?${k}=${h}`).set(auth());
+        expect([200, 400], `${k}=${h} -> ${res.status}`).toContain(res.status);
+      }
+    }
+    for (const h of hostile) {
+      const res = await server().get(`${BASE}/events/${h}`).set(auth());
+      expect([200, 400, 404], `/events/${h} -> ${res.status}`).toContain(
+        res.status,
+      );
     }
   });
 

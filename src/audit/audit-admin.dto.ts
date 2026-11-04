@@ -73,6 +73,11 @@ export class VerifyResponseDto {
   nextFromSeq?: number;
   @ApiProperty({ description: 'True when the chain has been read to its end.' })
   done: boolean;
+  @ApiProperty({
+    description:
+      'True when this run did NOT cover the chain from the genesis to its end (fromSeq > 1, stopped by `limit`, or an incremental run that trusts the rows before its anchor). A partial OK says nothing about the rest of the chain.',
+  })
+  partial: boolean;
   @ApiProperty({ format: 'uuid' }) verificationId: string;
   @ApiProperty() headSeq: number;
   @ApiProperty() headHash: string;
@@ -124,9 +129,18 @@ export class AuditHeadDto {
     description: 'Write it down OUTSIDE the database (external anchor).',
   })
   hash: string;
-  @ApiProperty() count: number;
+  @ApiProperty({
+    description:
+      'Rows in the chain. Equals `seq`: the database guarantees a gapless chain (a gap is reported by the verification, not counted here).',
+  })
+  count: number;
   @ApiProperty({ nullable: true, type: String, format: 'date-time' }) at:
     string | null;
+  @ApiProperty({
+    description:
+      'True when AUDIT_ANCHOR_EMAIL is set (the weekly external anchor of the head). False: nobody outside the database keeps the head hash.',
+  })
+  anchorEmailConfigured: boolean;
 }
 
 export class AuditVerificationsDto {
@@ -141,4 +155,16 @@ export class AuditVerificationsDto {
   chainBroken: boolean;
   @ApiProperty({ nullable: true, type: String, format: 'date-time' })
   lastBrokenAt: string | null;
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    format: 'date-time',
+    description:
+      'Start of the latest OK verification that covered the chain from the genesis to its end in one run (partial = false). Null: none yet.',
+  })
+  lastCompleteVerificationAt: string | null;
+  @ApiProperty({
+    description: 'True when AUDIT_ANCHOR_EMAIL is set (see /head).',
+  })
+  anchorEmailConfigured: boolean;
 }

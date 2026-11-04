@@ -7,7 +7,11 @@
 --
 -- Parameters, as session settings (scripts/db-roles.mjs and deploy/db/init-roles.sql set them):
 --   dbroles.env        environment name; the role is collectorsclub_<env>_app
---   dbroles.password   password of the role (required to CREATE it; optional to rotate it)
+--   dbroles.password   SCRAM-SHA-256 verifier of the password (required to CREATE the role; optional to
+--                      rotate it). NEVER the clear text: if a statement fails Postgres logs its text
+--                      (`CONTEXT: SQL statement "CREATE ROLE ... PASSWORD ..."`), and a clear
+--                      password would end up in the server log. `pnpm db:roles` converts
+--                      APP_DB_PASSWORD (scripts/scram-verifier.mjs); this file refuses clear text.
 --   dbroles.owner      role whose FUTURE tables the app role gets privileges on (default: the current user)
 --
 -- The role: LOGIN, not SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS, owns nothing.
@@ -28,6 +32,9 @@ BEGIN
     RAISE EXCEPTION 'dbroles.env must match [a-z0-9_]{1,30} (e.g. production, staging, dev)';
   END IF;
   app := format('collectorsclub_%s_app', env);
+  IF pw IS NOT NULL AND pw <> '' AND pw NOT LIKE 'SCRAM-SHA-256$%' THEN
+    RAISE EXCEPTION 'dbroles.password must be a SCRAM-SHA-256 verifier, not a clear-text password (use pnpm db:roles)';
+  END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = app) THEN
     IF pw IS NULL OR pw = '' THEN

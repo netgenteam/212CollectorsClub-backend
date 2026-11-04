@@ -37,6 +37,13 @@ export interface VerifyResult {
   nextFromSeq?: number;
   /** True when no row is left after `checkedTo` (the chain has been read to its end). */
   done: boolean;
+  /**
+   * True when this run did NOT cover the chain from the genesis to its end: it
+   * started after row 1 (`fromSeq`, or an incremental run that trusts the rows
+   * before its anchor) or stopped early. A partial OK is not a clean bill of
+   * health for the whole chain.
+   */
+  partial: boolean;
   /** seq/hash of the last good row (the anchor of the next incremental run). */
   lastSeq: number;
   lastHash: string;
@@ -196,6 +203,7 @@ export class AuditChainVerifier {
             rows,
             brokenAt: bad,
             done: false,
+            partial: first > 1,
             lastSeq,
             lastHash,
           };
@@ -234,6 +242,7 @@ export class AuditChainVerifier {
       rows,
       ...(done ? {} : { nextFromSeq: lastSeq + 1 }),
       done,
+      partial: first > 1 || !done,
       lastSeq,
       lastHash,
     };
@@ -254,6 +263,7 @@ export class AuditChainVerifier {
       rows,
       brokenAt,
       done: false,
+      partial: from > 1,
       lastSeq,
       lastHash: GENESIS_HASH,
     };

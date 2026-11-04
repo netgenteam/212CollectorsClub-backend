@@ -313,7 +313,7 @@ describe('AuditService / chain / immutability on sandbox schemas (e2e, Story 20.
       { action: 'AUDIT_VERIFIED', after: { price: 1.5 } },
       { action: 'AUDIT_VERIFIED', after: { email: 'a@b.co' } },
       { action: 'AUDIT_VERIFIED', actorId: 'nope' },
-      { action: 'AUDIT_VERIFIED', reason: 'x'.repeat(501) },
+      { action: 'AUDIT_VERIFIED', entityId: 'x'.repeat(129) },
     ];
     for (const extra of bad) {
       await expect(

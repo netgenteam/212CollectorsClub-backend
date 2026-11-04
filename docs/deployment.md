@@ -1030,7 +1030,26 @@ Esta sección es para Angel. 13.1 qué trae, 13.2 las migraciones, 13.3 **el pas
 - `scripts/db-roles.sql` (`pnpm db:roles`): crea el rol limitado.
 - **Todavía no se emite ningún evento de negocio** (pagos, órdenes, FX, login...: Stories 20.4 a 20.8). Tras desplegar solo aparecen los `AUDIT_VERIFIED` que tú generes.
 
-### 13.2 Migraciones (dos, aditivas)
+### 13.1b Segunda ronda de QA de la 20.1 (qué cambió)
+
+- **Lo que se hashea es lo que Postgres guarda.** Todo texto que llega al log (columnas, `reason`, claves y valores de `before`/`after`) se normaliza en la app antes de hashear e insertar: un *surrogate* suelto (un emoji cortado por un `slice()`) y `U+0000` pasan a `U+FFFD`; `reason` se corta a 500 **caracteres** (no unidades UTF-16) sin partir un par; `entityType`/`entityId` se miden en caracteres. El `INSERT` devuelve la fila guardada y se recalcula su hash con el mismo código del verificador: si no coincide, la acción se aborta en el acto (`AuditRoundTripError`, 500, log de error) en vez de dejar una cadena que nunca podrá verificar.
+- **IP:** `audit_normalize_ip(text)` (migración nueva) hace el cast a `inet` dentro de un bloque de excepción y devuelve `NULL` si falla; antes un `X-Forwarded-For: fe80::1%eth0` (sin nginx) abortaba la transacción de la acción. Se acepta `[::1]:443` y `1.2.3.4:80`, se elimina el *zone id* y lo demás queda en `NULL`.
+- **`occurredAt`:** el trigger de la cadena rechaza (SQLSTATE `23000`) una fila anterior a la previa, una más de 1 minuto en el futuro y una anterior a 2020. Sin cota inferior frente a `now()` para no romper una restauración con triggers. El servicio nunca escribe una hora anterior a la cabeza (si el reloj retrocedió, reutiliza la de la cabeza).
+- **Guard de PII/floats** (`src/audit/audit-payload.ts`, criterio en su cabecera y en AD-99): por defecto **estricto** (lanza `AuditPayloadError`: se ve en los tests) y **permisivo en producción** (`NODE_ENV=production`: enmascara el valor con `[REDACTED:...]`, convierte floats en texto, registra rutas y motivos, nunca valores, y la acción sigue). Un falso positivo ya no puede tumbar una venta. `AUDIT_PAYLOAD_STRICT=true|false` lo fuerza. El `reason` siempre se enmascara, nunca se rechaza.
+- **Verificación parcial:** `Audit_Verifications.partial` (`fromSeq` > 1, cortada por `limit` o incremental). `POST /verify` responde `partial` y `GET /verifications` añade `lastCompleteVerificationAt` (última OK de una sola pasada génesis-cabeza). El cron devuelve `INCOMPLETE` (no `OK`) si llega a 50 trozos sin terminar la cadena, lo registra como error y lo dice en el asunto del correo ancla.
+- **`AUDIT_ANCHOR_EMAIL`:** sin definir, producción avisa (`WARN`) al arrancar, y `GET /admin/audit/head` y `/verifications` devuelven `anchorEmailConfigured` para la pantalla 20.9.
+- **`GET /head`:** `count` es el `seq` de la última fila (el trigger solo admite `seq = anterior + 1`, así que coincide con `count(*)` mientras la cadena esté íntegra; un hueco lo detecta la verificación). Ya no hace un `count(*)` O(n).
+- **Filtros de `GET /events`:** fechas con calendario estricto (`2026-02-30` es 400, años fuera de 2000-2999 son 400), `entityId` sin NUL ni *surrogates* sueltos, `cursor`/`seq` ≤ 2^53: todo 400 `AUDIT_FILTER_INVALID`, nunca 500.
+- **Uso seguro de `record`:** ver la cabecera de `AuditService`. El lock de cadena se retiene hasta el `COMMIT`: usa `AuditService.transaction` (el lock se toma al final, después de tu callback) o llama a `record` como **última** sentencia y sin ningún `await` lento después (Stripe, correo, HTTP). Un test estático (`findRecordMisuse`) lo comprueba en cada call site. Prisma no tiene un gancho previo al commit, así que no se puede diferir el lock de una transacción que no abre `AuditService`.
+- **Contraseña del rol:** `pnpm db:roles` convierte `APP_DB_PASSWORD` en un verificador SCRAM-SHA-256 en el cliente y el servidor nunca ve la contraseña: si `CREATE ROLE` falla, Postgres escribe la sentencia en su log (`CONTEXT: SQL statement "CREATE ROLE ... PASSWORD ..."`) y antes ahí quedaba la contraseña en claro. `scripts/db-roles.sql` rechaza una contraseña que no sea SCRAM. Aun así: un log de Postgres no es un buen sitio para nada secreto, rota la contraseña si alguna vez falló con una versión anterior.
+- **`_prisma_migrations`:** con el `init` del compose en volumen vacío el rol se crea antes de que Prisma cree la tabla y los privilegios por defecto le daban DML; la migración `20261105110000_revoke_prisma_migrations_from_app_roles` se lo quita a los roles `collectorsclub_<env>_app` (solo a esos).
+- **Tests e2e:** ningún esquema `audit_t_*` sobrevive a una corrida: un `globalSetup` borra los de la corrida y los de más de 3 h.
+- `AUDIT_VERIFY_CRON` escrito solo en `.env` se **ignora en desarrollo** (se lee del entorno del proceso antes de cargar `.env`): expórtalo en la shell.
+
+### 13.2 Migraciones (dos, aditivas) y, en la segunda ronda de QA, dos más
+
+`20261105100000_audit_chain_hardening` (función `audit_normalize_ip`, trigger de cadena con cotas de `occurredAt`, columna `Audit_Verifications.partial`) y `20261105110000_revoke_prisma_migrations_from_app_roles`. Ambas empiezan con `BEGIN;`; la primera con `SET LOCAL lock_timeout = '10s'`.
+
 
 `20261104100000_add_audit_events` (tablas nuevas, no toca ninguna tabla existente) y `20261104200000_legal_revision_never_decreases` (dos triggers sobre `Legal_Drafts` y `Legal_Documents`). Cada una empieza con `BEGIN;` y termina con `COMMIT;`: si una sentencia falla no queda nada a medias (regla de 12.3). La segunda toma un lock sobre dos tablas existentes y empieza con `SET LOCAL lock_timeout = '10s'` **dentro** del `BEGIN`.
 
@@ -1044,7 +1063,7 @@ Si en la BD ya hay roles que no son superusuario (p. ej. `qa_app`), la migració
 
 **Por qué.** Hoy la app corre como `collectorsclub`, que es superusuario y propietario: con ese rol cualquier fallo de la app (o una inyección SQL) podría hacer `ALTER TABLE ... DISABLE TRIGGER` y reescribir el log. Con un rol que no es propietario ni superusuario eso es imposible: no puede ejecutar DDL, ni desactivar triggers, ni `UPDATE/DELETE/TRUNCATE` sobre `Audit_Events`. Las migraciones y `deploy.sh` siguen con el propietario.
 
-**Qué hace `pnpm db:roles`.** Crea (o actualiza, es idempotente) `collectorsclub_<entorno>_app`: `LOGIN`, sin `SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS`, no propietario de nada. Le da `CONNECT`, `USAGE` sobre `public`, `SELECT/INSERT/UPDATE/DELETE` sobre todas las tablas y `USAGE/SELECT` sobre las secuencias, **y `ALTER DEFAULT PRIVILEGES` para que las tablas que creen las migraciones futuras (las ejecuta el propietario) queden accesibles sin ningún `GRANT` manual**. Después le quita `UPDATE/DELETE/TRUNCATE` sobre `Audit_Events` y todo sobre `_prisma_migrations`. Si creas la tabla de otra manera que no sea una migración del propietario, vuelve a ejecutarlo.
+**Qué hace `pnpm db:roles`.** Crea (o actualiza, es idempotente) `collectorsclub_<entorno>_app`: `LOGIN`, sin `SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS`, no propietario de nada. Le da `CONNECT`, `USAGE` sobre `public`, `SELECT/INSERT/UPDATE/DELETE` sobre todas las tablas y `USAGE/SELECT` sobre las secuencias, **y `ALTER DEFAULT PRIVILEGES` para que las tablas que creen las migraciones futuras (las ejecuta el propietario) queden accesibles sin ningún `GRANT` manual**. Después le quita `UPDATE/DELETE/TRUNCATE` sobre `Audit_Events` y todo sobre `_prisma_migrations` (con el `init` del compose en volumen vacío la tabla aún no existe: lo hace la migración `20261105110000`). Si creas la tabla de otra manera que no sea una migración del propietario, vuelve a ejecutarlo.
 
 **En tu máquina de desarrollo (no se ha tocado tu `.env`):**
 
@@ -1097,7 +1116,8 @@ Limitaciones que conviene saber: (a) las migraciones deben ejecutarlas **siempre
 | `AUDIT_VERIFY_CRON` | `0 5 * * 0` (UTC) | Verificación semanal. Como la del FX, se lee del entorno del proceso al arrancar: expórtala (systemd `EnvironmentFile`), no basta con el `.env` de dev. |
 | `AUDIT_VERIFY_CRON_MODE` | `full` | `full` recalcula toda la cadena cada vez; `incremental` solo lo posterior a la última verificación OK. **Deja `full`**: un incremental confía en las filas anteriores a su ancla y no vería que alguien cambió el contenido de una fila vieja sin tocar su hash. Solo si la cadena llega a millones de filas. |
 | `AUDIT_VERIFY_ENABLED` | `true` (`false` con `NODE_ENV=test`) | Apaga el job. |
-| `AUDIT_ANCHOR_EMAIL` | sin definir | Tras cada ejecución semanal se envía `seq` + `hash` de la cabeza por el `Mailer`. Un fallo de correo solo queda en el log. |
+| `AUDIT_PAYLOAD_STRICT` | `true` salvo `NODE_ENV=production` | Guard de `before`/`after`: `true` lanza, `false` enmascara y sigue (13.1b). |
+| `AUDIT_ANCHOR_EMAIL` | sin definir (producción avisa al arrancar) | Tras cada ejecución semanal se envía `seq` + `hash` de la cabeza por el `Mailer`. Un fallo de correo solo queda en el log. |
 | `DB_ROLES_ENV`, `APP_DB_PASSWORD` | sin definir | Solo para `pnpm db:roles`; no los dejes en el `.env` del servicio. |
 
 ### 13.5 Anclaje externo del hash (el único freno contra un DBA)

@@ -10,9 +10,13 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { SCRAM_PREFIX, scramVerifier } from './scram-verifier.mjs';
 
 const env = process.env.DB_ROLES_ENV;
-const password = process.env.APP_DB_PASSWORD ?? '';
+// The server only ever sees a SCRAM-SHA-256 verifier, never the password: a failing
+// CREATE/ALTER ROLE is written to the Postgres log with its text (Story 20.1, QA round 2).
+const given = process.env.APP_DB_PASSWORD ?? '';
+const password = given === '' || given.startsWith(SCRAM_PREFIX) ? given : scramVerifier(given);
 const raw = process.env.MIGRATE_DATABASE_URL || process.env.DATABASE_URL;
 
 if (!env || !/^[a-z0-9_]{1,30}$/.test(env)) {
