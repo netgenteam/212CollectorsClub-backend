@@ -17,6 +17,10 @@ services:
       - '5433:5432'
     volumes:
       - 212collectorsclub_postgres_data:/var/lib/postgresql/data
+      # Story 20.1: least-privilege app role `collectorsclub_dev_app`, created when
+      # the volume is EMPTY (an existing volume: `pnpm db:roles`, docs/deployment.md 13).
+      - ./deploy/db/init-roles.sql:/docker-entrypoint-initdb.d/20-init-roles.sql:ro
+      - ./scripts/db-roles.sql:/opt/collectorsclub/db-roles.sql:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U collectorsclub -d collectorsclub_dev']
       interval: 5s

@@ -865,9 +865,11 @@ describe(
             ),
           ).rejects.toThrow(/append-only/);
         }
+        // Story 20.1: with the limited application role TRUNCATE is refused by
+        // privileges (permission denied) before the trigger.
         await expect(
           prisma.$executeRawUnsafe(`TRUNCATE "Consent_Records"`),
-        ).rejects.toThrow(/append-only/);
+        ).rejects.toThrow(/append-only|permission denied|42501/);
         expect(await consentsOf({ customerId: c.id })).not.toHaveLength(0);
       });
 

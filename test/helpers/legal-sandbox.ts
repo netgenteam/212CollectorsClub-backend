@@ -8,6 +8,9 @@
  * would reject anything else anyway). `exec` is any "run this SQL with
  * params" function (Prisma `$queryRawUnsafe` or a pg client).
  */
+import pg from 'pg';
+import { adminDatabaseUrl } from './audit-sandbox.js';
+
 type Exec = (
   sql: string,
   params?: unknown[],
@@ -137,6 +140,12 @@ export async function realLegalFingerprint(exec: Exec): Promise<string> {
   return rows[0].h as string;
 }
 
+const ownerUrl = (): string => {
+  const u = new URL(adminDatabaseUrl());
+  u.searchParams.delete('schema');
+  return u.toString();
+};
+
 export interface LegalRealSnapshot {
   drafts: string;
   identity: string;
@@ -182,17 +191,26 @@ export async function restoreLegalReal(
     [s.drafts],
   );
   // The insert trigger numbers drafts above the floor: put the saved revisions
-  // and the saved floors back (UPDATEs are not guarded by those triggers).
-  await exec(
-    `UPDATE "Legal_Drafts" d SET "revision" = r."revision"
-     FROM jsonb_populate_recordset(NULL::"Legal_Drafts", $1::jsonb) r WHERE r."id" = d."id"`,
-    [s.drafts],
-  );
-  await exec(
-    `UPDATE "Legal_Documents" x SET "draftRevisionFloor" = (j->>'f')::int
-     FROM jsonb_array_elements($1::jsonb) j WHERE x."id" = (j->>'id')::uuid`,
-    [s.floors],
-  );
+  // and the saved floors back. Story 20.1: `revision` and `draftRevisionFloor`
+  // never decrease for the application role (DB trigger), so rewinding them is
+  // done as the table OWNER (MIGRATE_DATABASE_URL, falling back to DATABASE_URL,
+  // i.e. the same role when there is only one).
+  const owner = new pg.Client({ connectionString: ownerUrl() });
+  await owner.connect();
+  try {
+    await owner.query(
+      `UPDATE "Legal_Drafts" d SET "revision" = r."revision"
+       FROM jsonb_populate_recordset(NULL::"Legal_Drafts", $1::jsonb) r WHERE r."id" = d."id"`,
+      [s.drafts],
+    );
+    await owner.query(
+      `UPDATE "Legal_Documents" x SET "draftRevisionFloor" = (j->>'f')::int
+       FROM jsonb_array_elements($1::jsonb) j WHERE x."id" = (j->>'id')::uuid`,
+      [s.floors],
+    );
+  } finally {
+    await owner.end();
+  }
   await exec(`DELETE FROM "Seller_Identity_Settings"`);
   await exec(
     `INSERT INTO "Seller_Identity_Settings" SELECT * FROM jsonb_populate_recordset(NULL::"Seller_Identity_Settings", $1::jsonb)`,

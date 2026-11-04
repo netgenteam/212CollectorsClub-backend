@@ -38,6 +38,8 @@ const REAL = [
 describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
   let prisma: PrismaService;
   let fingerprint: string;
+  /** True under the limited application role (no TRUNCATE privilege): privileges stop it before the trigger. */
+  let limited = false;
 
   const sql = (q: string, p: unknown[] = []) =>
     prisma.$queryRawUnsafe<Record<string, unknown>[]>(q, ...p);
@@ -50,6 +52,11 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
     await mod.init();
     await purgeSandbox(sql);
     fingerprint = await realLegalFingerprint(sql);
+    limited = !(
+      await sql(
+        `SELECT has_table_privilege(current_user, '"Legal_Audit_Logs"', 'TRUNCATE') AS ok`,
+      )
+    )[0].ok;
   });
 
   afterAll(async () => {
@@ -251,7 +258,14 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
       // Story 19.4: Consent_Records now references Legal_Document_Versions, and
       // Postgres refuses TRUNCATE of a referenced table (0A000) before any
       // trigger runs: still rejected, with that code.
-      const expected = name === 'version TRUNCATE' ? '0A000' : '23000';
+      // Story 20.1: with the limited application role TRUNCATE is refused by
+      // PRIVILEGES (42501) before any trigger or FK check: still rejected.
+      const expected =
+        limited && name.includes('TRUNCATE')
+          ? '42501'
+          : name === 'version TRUNCATE'
+            ? '0A000'
+            : '23000';
       expect([name, code]).toEqual([name, expected]);
     }
     // Story 19.4a: with the FK from Consent_Records the plain TRUNCATE of the
@@ -259,9 +273,11 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
     // CASCADE form is what keeps the versions' own BEFORE TRUNCATE trigger
     // exercised: prove it is THAT trigger (and not the Consent_Records one)
     // that rejects it.
-    expect(messages['version TRUNCATE CASCADE']).toContain(
-      'Legal_Document_Versions is immutable: TRUNCATE rejected',
-    );
+    if (!limited) {
+      expect(messages['version TRUNCATE CASCADE']).toContain(
+        'Legal_Document_Versions is immutable: TRUNCATE rejected',
+      );
+    }
     expect(Object.keys(results)).toHaveLength(17);
     // Nothing leaked out of the rolled-back transaction.
     expect(await realLegalFingerprint(sql)).toBe(fingerprint);
@@ -296,7 +312,7 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
       .catch((e: unknown) => {
         code = sqlstate(e);
       });
-    expect(code).toBe('23000');
+    expect(code).toBe(limited ? '42501' : '23000');
     // The sandbox may not be turned into a real document nor renamed either.
     await expect(
       prisma.$executeRawUnsafe(

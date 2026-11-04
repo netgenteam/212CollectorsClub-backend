@@ -5,6 +5,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module.js';
+import { applyRequestContext } from './common/request-id.middleware.js';
 import { applyJsonBodyLimit } from './common/json-body-limit.js';
 import { createGlobalValidationPipe } from './common/global-validation-pipe.js';
 import {
@@ -35,6 +36,9 @@ async function bootstrap() {
   // Story 19.2 (A78, QA E): JSON bodies are capped at 100 KB (Express' default)
   // everywhere, except PUT /admin/legal/:slug/draft (a 200 KB Markdown draft,
   // only for requests carrying a Bearer token). See `json-body-limit.ts`.
+  // Story 20.1: requestId + ip context for every request, before cookie-parser.
+  applyRequestContext(app);
+
   applyJsonBodyLimit(app);
 
   // Story 3.1 / AD-5: cookie-parser, given the COOKIE_SECRET from

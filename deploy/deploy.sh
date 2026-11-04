@@ -98,6 +98,12 @@ source "$ENV_FILE"
 set +a
 [ -n "${DATABASE_URL:-}" ] || fail "DATABASE_URL is missing in $ENV_FILE"
 
+# Story 20.1 (A90): migrations run as the database OWNER (MIGRATE_DATABASE_URL),
+# the service as the least-privilege app role (DATABASE_URL). Without
+# MIGRATE_DATABASE_URL both are the same role (the pre-20.1 setup). The migration
+# CLI below always sees the owner's URL; the service keeps its own, unmodified.
+MIGRATE_BASE_URL="${MIGRATE_DATABASE_URL:-$DATABASE_URL}"
+
 # Bound the time the migration may WAIT for a table lock (default 10 s) so a
 # DDL never queues behind a long transaction and, in turn, blocks every query
 # on that table (docs/deployment.md §12.2). `SET LOCAL lock_timeout` inside a
@@ -109,8 +115,8 @@ MIGRATE_LOCK_TIMEOUT_MS="${MIGRATE_LOCK_TIMEOUT_MS:-10000}"
 case "$MIGRATE_LOCK_TIMEOUT_MS" in
   ''|*[!0-9]*) fail "MIGRATE_LOCK_TIMEOUT_MS must be a number of milliseconds (got '$MIGRATE_LOCK_TIMEOUT_MS')" ;;
 esac
-case "$DATABASE_URL" in
-  *options=*) fail "DATABASE_URL already carries an 'options' parameter; set lock_timeout there or remove it (docs/deployment.md §12.2)" ;;
+case "$MIGRATE_BASE_URL" in
+  *options=*) fail "the migration URL (MIGRATE_DATABASE_URL, or DATABASE_URL when it is unset) already carries an 'options' parameter; set lock_timeout there or remove it (docs/deployment.md §12.2)" ;;
   *\?*) MIGRATE_URL_SEP='&' ;;
   *) MIGRATE_URL_SEP='?' ;;
 esac
@@ -126,7 +132,7 @@ redact() {
 }
 MIGRATE_OUT="$(mktemp)"
 trap 'rm -f "$MIGRATE_OUT"' EXIT
-if DATABASE_URL="${DATABASE_URL}${MIGRATE_URL_SEP}options=-c%20lock_timeout%3D${MIGRATE_LOCK_TIMEOUT_MS}" pnpm prisma:deploy >"$MIGRATE_OUT" 2>&1; then
+if MIGRATE_DATABASE_URL="${MIGRATE_BASE_URL}${MIGRATE_URL_SEP}options=-c%20lock_timeout%3D${MIGRATE_LOCK_TIMEOUT_MS}" pnpm prisma:deploy >"$MIGRATE_OUT" 2>&1; then
   redact <"$MIGRATE_OUT"
 else
   redact <"$MIGRATE_OUT" >&2

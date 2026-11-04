@@ -1494,3 +1494,52 @@ model ConsentRecord {
   @@index([documentVersionId])
   @@map("Consent_Records")
 }
+
+/// Known Prisma limitation: `migrate diff` always proposes `ALTER COLUMN "ip" SET DATA TYPE inet` for an Unsupported column (a no-op).
+/// READ-ONLY model (Story 20.1, AD-99). Append-only in the database (triggers + REVOKE); the ONLY writer is
+/// `AuditService` with raw SQL, which a static test enforces. `seq` is gapless and assigned by the service.
+/// Raw reads/writes use unqualified names so the e2e can run them against a sandbox schema.
+model AuditEvent {
+  seq         BigInt                   @id
+  occurredAt  DateTime                 @db.Timestamptz(3)
+  actorType   String                   @db.VarChar(16)
+  actorId     String?                  @db.Uuid
+  action      String                   @db.VarChar(64)
+  entityType  String                   @db.VarChar(64)
+  entityId    String                   @db.VarChar(128)
+  before      Json?
+  after       Json?
+  reason      String?                  @db.VarChar(500)
+  requestId   String?                  @db.Uuid
+  ip          Unsupported("inet")?
+  hashVersion Int                      @default(1) @db.SmallInt
+  prevHash    String                   @db.Char(64)
+  hash        String                   @unique @db.Char(64)
+
+  @@index([occurredAt])
+  @@index([action, seq])
+  @@index([actorId, seq])
+  @@index([entityType, entityId, seq])
+  @@map("Audit_Events")
+}
+
+/// Operational (admits UPDATE, A105); not evidence. Written by `AuditVerifyService`.
+model AuditVerification {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  startedAt    DateTime  @default(now()) @db.Timestamptz(3)
+  finishedAt   DateTime? @db.Timestamptz(3)
+  mode         String    @db.VarChar(16)
+  source       String    @default("MANUAL") @db.VarChar(16)
+  fromSeq      BigInt
+  toSeq        BigInt
+  rows         Int       @default(0)
+  result       String    @db.VarChar(8)
+  brokenSeq    BigInt?
+  expectedHash String?   @db.Char(64)
+  foundHash    String?   @db.Char(64)
+  headSeq      BigInt
+  headHash     String    @db.Char(64)
+
+  @@index([startedAt])
+  @@map("Audit_Verifications")
+}

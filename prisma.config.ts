@@ -15,6 +15,9 @@ export default defineConfig({
     seed: 'tsx prisma/seed.ts',
   },
   datasource: {
-    url: env('DATABASE_URL'),
+    // Story 20.1: migrations run as the database OWNER (MIGRATE_DATABASE_URL);
+    // the application connects with the least-privilege role (DATABASE_URL).
+    // Without MIGRATE_DATABASE_URL both are the same (dev, CI).
+    url: process.env.MIGRATE_DATABASE_URL || env('DATABASE_URL'),
   },
 });

@@ -25,6 +25,7 @@ import { ShippingModule } from './shipping/shipping.module.js';
 import { VitrinaModule } from './vitrina/vitrina.module.js';
 import { LegalModule } from './legal/legal.module.js';
 import { WishlistModule } from './wishlist/wishlist.module.js';
+import { AuditModule } from './audit/audit.module.js';
 
 @Module({
   imports: [
@@ -80,6 +81,7 @@ import { WishlistModule } from './wishlist/wishlist.module.js';
     VitrinaModule,
     // Story 19.1 (AD-88..91): legal documents, safe Markdown, public read API.
     LegalModule,
+    AuditModule,
   ],
   controllers: [AppController],
   providers: [AppService],

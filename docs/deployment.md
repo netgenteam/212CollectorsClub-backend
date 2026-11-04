@@ -853,7 +853,7 @@ Esta sección es para Angel. Se lee de arriba abajo en el orden en que se hace: 
 
 - *Worker de Markdown.* `LegalMarkdownService` nunca analiza Markdown en el event loop. Tras un prefiltro O(n), el análisis va a un pool acotado de `worker_thread` (`src/legal/legal-markdown-pool.ts`): máximo 2 hilos, 16 trabajos en cola (más: 503 `LEGAL_MARKDOWN_BUSY` al instante), 3 s de plazo duro por análisis (400 `LEGAL_MARKDOWN_INVALID` con `details.reason` = `TIMEOUT`, que significa que el servidor no alcanzó, no que el texto esté mal) y 192 MB por hilo. El worker es el archivo `src/legal/legal-markdown.worker.mjs`, que `nest build` copia a `dist/legal/`: si falta `dist/legal/legal-markdown.worker.mjs` tras un build, toda validación responde «demasiado complejo». Importa `unified`, `remark-parse`, `remark-gfm` y `mdast-util-to-string`, que son dependencias de producción.
 - *Lectura pública.* `GET /legal/...` obtiene el índice (toc) de una caché por contenido (SHA-256, 256 entradas); si no se alcanza a analizar, el índice es `[]` y el cuerpo se sirve igual.
-- *Guarda de BD.* Un trigger BEFORE INSERT en `Legal_Document_Versions` toma un lock por documento, rechaza cualquier `versionNumber` distinto de `max + 1` (SQLSTATE 23000) y pone `publishedAt` con el reloj de la BD. Que el rol de la aplicación no pueda hacer `DISABLE TRIGGER` es trabajo del Epic 20 (Story 20.1): hoy el rol de la app es el propietario de las tablas y un DBA sí puede desactivarlos.
+- *Guarda de BD.* Un trigger BEFORE INSERT en `Legal_Document_Versions` toma un lock por documento, rechaza cualquier `versionNumber` distinto de `max + 1` (SQLSTATE 23000) y pone `publishedAt` con el reloj de la BD. Que el rol de la aplicación no pueda hacer `DISABLE TRIGGER` lo resuelve la Story 20.1 con un rol de BD limitado (sección 13): mientras la app siga corriendo como propietario de las tablas, un DBA sí puede desactivarlos.
 - *Consentimiento.* Con la variable apagada, un documento requerido sin versión vigente **no** se exige ni se registra (el backend avisa con un WARN, a lo sumo uno por minuto y documento, y `Orders.termsVersion`/`shippingVersion`/`returnsVersion` quedan NULL). `POST /me/consent` exige solo lo pendiente. La declaración de edad se graba con la versión de Términos vigente (0 si no hay).
 
 ### 12.2 La migración se queda esperando (Story 19.4a)
@@ -1015,3 +1015,120 @@ Marca cada punto solo cuando lo hayas comprobado tú. Los textos sembrados son *
 ### 12.7 Volver atrás
 
 Las columnas y tablas nuevas son inertes para la compilación anterior: despliega la versión anterior (§5) y deja las migraciones aplicadas. `Consent_Records` no se puede truncar por diseño, y las versiones y la bitácora tampoco. Antes de volver atrás pon `LEGAL_REQUIRE_PUBLISHED=false` y `CHECKOUT_REQUIRE_SHIPPING=false` si estaban en `true`.
+
+## 13. Epic 20, Story 20.1: auditoría inmutable y rol de BD limitado
+
+Esta sección es para Angel. 13.1 qué trae, 13.2 las migraciones, 13.3 **el paso que tienes que hacer tú** (el rol de BD limitado), 13.4 variables, 13.5 anclaje del hash, 13.6 lo medido, 13.7 lo que **no** está verificado, 13.8 volver atrás. El resto del Epic 20 (cédula cifrada, purgas, `Usage_Logs`) tendrá su propio apartado cuando se implemente (Story 20.10).
+
+### 13.1 Qué trae la Story 20.1
+
+- Tabla `Audit_Events` (solo se añade, nunca se cambia ni se borra): triggers que rechazan `UPDATE`, `DELETE` y `TRUNCATE` (SQLSTATE `23000`), un trigger que exige que cada fila nueva sea el `seq` siguiente con el hash de la anterior (la cadena no se puede bifurcar ni dejar huecos) y `REVOKE UPDATE, DELETE, TRUNCATE` a todo rol que no sea superusuario ni propietario. Cada fila lleva el hash SHA-256 de la anterior más su contenido (cadena de hash). Tabla `Audit_Verifications` (registro operativo de cada verificación; esa sí admite `UPDATE`).
+- `AuditService` (único escritor), `GET /admin/audit/events|events/:seq|head|verifications` y `POST /admin/audit/verify`, todos tras `AdminAuthGuard` y todos de solo lectura salvo `verify` (que solo añade su propio evento `AUDIT_VERIFIED`).
+- Cada respuesta HTTP lleva `X-Request-Id` (uuid generado por el servidor; el que mande el cliente se ignora).
+- Verificación semanal automática (`AUDIT_VERIFY_CRON`, domingo 05:00 UTC) y, si defines `AUDIT_ANCHOR_EMAIL`, envío del hash de cabeza por correo.
+- Un segundo trigger para que `Legal_Drafts.revision` y `Legal_Documents.draftRevisionFloor` no bajen nunca con el rol de la app (observación de 19.2).
+- `scripts/db-roles.sql` (`pnpm db:roles`): crea el rol limitado.
+- **Todavía no se emite ningún evento de negocio** (pagos, órdenes, FX, login...: Stories 20.4 a 20.8). Tras desplegar solo aparecen los `AUDIT_VERIFIED` que tú generes.
+
+### 13.2 Migraciones (dos, aditivas)
+
+`20261104100000_add_audit_events` (tablas nuevas, no toca ninguna tabla existente) y `20261104200000_legal_revision_never_decreases` (dos triggers sobre `Legal_Drafts` y `Legal_Documents`). Cada una empieza con `BEGIN;` y termina con `COMMIT;`: si una sentencia falla no queda nada a medias (regla de 12.3). La segunda toma un lock sobre dos tablas existentes y empieza con `SET LOCAL lock_timeout = '10s'` **dentro** del `BEGIN`.
+
+Verificado sobre un clon (Postgres 17): con otra sesión reteniendo un lock sobre `Legal_Drafts`, `prisma migrate deploy` falló a los 11 s; la primera migración quedó aplicada, de la segunda **no quedó ninguna función ni trigger**, Prisma dijo `current transaction is aborted` (el texto que `deploy.sh` ya reconoce, 12.3), y bastó `pnpm prisma migrate resolve --rolled-back 20261104200000_legal_revision_never_decreases` + volver a desplegar. Esta vez, a diferencia de la línea de 12.2, **el `SET LOCAL` sí funciona** porque está dentro de un `BEGIN`/`COMMIT` escrito en el propio archivo.
+
+Una rareza inofensiva: `prisma migrate diff` propone `ALTER COLUMN "ip" SET DATA TYPE inet` para `Audit_Events` en cada ejecución (limitación de Prisma con columnas `Unsupported`; no cambia nada). No generes una migración a partir de eso.
+
+Si en la BD ya hay roles que no son superusuario (p. ej. `qa_app`), la migración les quita `UPDATE/DELETE/TRUNCATE` sobre `Audit_Events` (tabla nueva): no modifica los roles.
+
+### 13.3 El paso que tienes que hacer tú: el rol de BD limitado (A90)
+
+**Por qué.** Hoy la app corre como `collectorsclub`, que es superusuario y propietario: con ese rol cualquier fallo de la app (o una inyección SQL) podría hacer `ALTER TABLE ... DISABLE TRIGGER` y reescribir el log. Con un rol que no es propietario ni superusuario eso es imposible: no puede ejecutar DDL, ni desactivar triggers, ni `UPDATE/DELETE/TRUNCATE` sobre `Audit_Events`. Las migraciones y `deploy.sh` siguen con el propietario.
+
+**Qué hace `pnpm db:roles`.** Crea (o actualiza, es idempotente) `collectorsclub_<entorno>_app`: `LOGIN`, sin `SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS`, no propietario de nada. Le da `CONNECT`, `USAGE` sobre `public`, `SELECT/INSERT/UPDATE/DELETE` sobre todas las tablas y `USAGE/SELECT` sobre las secuencias, **y `ALTER DEFAULT PRIVILEGES` para que las tablas que creen las migraciones futuras (las ejecuta el propietario) queden accesibles sin ningún `GRANT` manual**. Después le quita `UPDATE/DELETE/TRUNCATE` sobre `Audit_Events` y todo sobre `_prisma_migrations`. Si creas la tabla de otra manera que no sea una migración del propietario, vuelve a ejecutarlo.
+
+**En tu máquina de desarrollo (no se ha tocado tu `.env`):**
+
+1. Elige una contraseña para el rol; no la pegues en ningún chat ni commit. En una terminal (el script lee tu `.env` para conectarse como propietario y no imprime ninguna URL ni contraseña):
+   ```bash
+   DB_ROLES_ENV=dev APP_DB_PASSWORD='<la-contraseña>' pnpm db:roles
+   ```
+   Debe terminar con `role collectorsclub_dev_app created` y `done`.
+2. En tu `.env`, **copia** la línea actual `DATABASE_URL=...` a una línea nueva `MIGRATE_DATABASE_URL=...` (sin cambiarla) y cambia el usuario y la contraseña de `DATABASE_URL` por `collectorsclub_dev_app` y la contraseña del paso 1 (misma base y puerto). El CLI de Prisma (`migrate`, `studio`, `db execute`) usa `MIGRATE_DATABASE_URL`; la app, los seeds (`prisma:seed`, `seed:legal`), `tcg:ingest` y los tests usan `DATABASE_URL`.
+3. Reinicia `pnpm start:dev` y comprueba `GET /api/v1/health` y un login.
+4. Para volver atrás basta con quitar `MIGRATE_DATABASE_URL` y restaurar `DATABASE_URL`.
+
+Si recreas el volumen de Docker desde cero, `docker-compose.yml` monta `deploy/db/init-roles.sql` y el rol `collectorsclub_dev_app` (contraseña de desarrollo `collectorsclub_dev_app_password`, solo local) se crea solo; en un volumen que ya existe no corre, de ahí el paso 1. **Aviso:** al cambiar `docker-compose.yml`, el próximo `docker compose up -d` recreará el contenedor de Postgres (los datos del volumen se conservan).
+
+**Para ejecutar la suite e2e con el rol limitado** (sin tocar el `.env`; en una terminal, con las dos URL ya exportadas):
+
+```bash
+DATABASE_URL='<url del rol app>' MIGRATE_DATABASE_URL='<url del propietario>' pnpm test:e2e --no-file-parallelism
+```
+
+Los pocos specs que necesitan privilegios (crear el esquema sandbox de auditoría, devolver `revision`/`draftRevisionFloor` de los borradores reales a su valor guardado) usan `MIGRATE_DATABASE_URL` y, si no existe, `DATABASE_URL`. Los tests de triggers de `TRUNCATE` aceptan `42501` (permiso denegado) cuando el rol no tiene el privilegio. Con una sola URL (tu configuración actual) todo corre como antes.
+
+**En staging y producción (en este orden, fuera de hora punta):**
+
+1. Despliega el código como siempre. Las migraciones corren con la URL que ya existe (`MIGRATE_DATABASE_URL` si la defines, si no `DATABASE_URL`; `deploy.sh` usa esa misma con el `lock_timeout`).
+2. En el servidor, desde `/opt/212cc/<entorno>/app` y con las variables en el entorno de esa sesión (no impresas), como en 12.3:
+   ```bash
+   set -a; source /opt/212cc/<entorno>/shared/.env; set +a
+   DB_ROLES_ENV=<staging|production> APP_DB_PASSWORD='<contraseña nueva>' pnpm db:roles
+   ```
+3. Edita `/opt/212cc/<entorno>/shared/.env`: `MIGRATE_DATABASE_URL` = la URL actual (propietario); `DATABASE_URL` = la del rol `collectorsclub_<entorno>_app`. `deploy.sh` ya usa `MIGRATE_DATABASE_URL` para `prisma migrate deploy` (rechaza una URL que ya traiga un parámetro `options`). Verificado sobre el clon (el bloque de migración de `deploy.sh`, extraído y ejecutado): con `MIGRATE_DATABASE_URL` migra como propietario; si pones el rol limitado en `DATABASE_URL` y **olvidas** `MIGRATE_DATABASE_URL`, `prisma migrate deploy` falla (el rol no puede tocar `_prisma_migrations`) y `deploy.sh` se detiene **antes** de reiniciar el servicio.
+4. `sudo systemctl restart 212cc-backend-<entorno>` y comprueba el health check, un registro y una compra de prueba.
+5. Comprueba que el rol es el limitado (como propietario, con `psql` o con el `q` de 12.3):
+   ```sql
+   SELECT has_table_privilege('collectorsclub_<entorno>_app', '"Audit_Events"', 'UPDATE')   AS upd,   -- f
+          has_table_privilege('collectorsclub_<entorno>_app', '"Audit_Events"', 'DELETE')   AS del,   -- f
+          has_table_privilege('collectorsclub_<entorno>_app', '"Audit_Events"', 'TRUNCATE') AS trunc,  -- f
+          has_table_privilege('collectorsclub_<entorno>_app', '"Audit_Events"', 'INSERT')  AS ins;   -- t
+   SELECT rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname = 'collectorsclub_<entorno>_app';  -- f f f
+   ```
+6. Vuelve a ejecutar `pnpm db:roles` (sin contraseña, para no rotarla) tras restaurar una copia de seguridad o si alguna vez creas tablas sin pasar por una migración del propietario.
+
+Limitaciones que conviene saber: (a) las migraciones deben ejecutarlas **siempre el mismo propietario** que ejecutó `pnpm db:roles` (los privilegios por defecto son «para las tablas de ese rol»); (b) en PostgreSQL anterior al 15 el esquema `public` deja crear objetos a cualquiera: si tu servidor es antiguo, valora `REVOKE CREATE ON SCHEMA public FROM PUBLIC`; (c) el propietario o un superusuario **sí pueden** desactivar los triggers y reescribir la cadena entera: la defensa es el anclaje externo (13.5).
+
+### 13.4 Variables de entorno (todas opcionales; ver `.env.example`)
+
+| Variable | Por defecto | Para qué |
+|---|---|---|
+| `MIGRATE_DATABASE_URL` | = `DATABASE_URL` | URL del propietario para `prisma migrate`, `deploy.sh` y `pnpm db:roles`. |
+| `AUDIT_VERIFY_CRON` | `0 5 * * 0` (UTC) | Verificación semanal. Como la del FX, se lee del entorno del proceso al arrancar: expórtala (systemd `EnvironmentFile`), no basta con el `.env` de dev. |
+| `AUDIT_VERIFY_CRON_MODE` | `full` | `full` recalcula toda la cadena cada vez; `incremental` solo lo posterior a la última verificación OK. **Deja `full`**: un incremental confía en las filas anteriores a su ancla y no vería que alguien cambió el contenido de una fila vieja sin tocar su hash. Solo si la cadena llega a millones de filas. |
+| `AUDIT_VERIFY_ENABLED` | `true` (`false` con `NODE_ENV=test`) | Apaga el job. |
+| `AUDIT_ANCHOR_EMAIL` | sin definir | Tras cada ejecución semanal se envía `seq` + `hash` de la cabeza por el `Mailer`. Un fallo de correo solo queda en el log. |
+| `DB_ROLES_ENV`, `APP_DB_PASSWORD` | sin definir | Solo para `pnpm db:roles`; no los dejes en el `.env` del servicio. |
+
+### 13.5 Anclaje externo del hash (el único freno contra un DBA)
+
+Quien tenga privilegios plenos en la BD puede desactivar los triggers y reescribir **toda** la cadena con hashes nuevos coherentes; la verificación no lo vería. Lo que sí lo delata es un hash escrito **fuera** de la BD y del servidor. Define `AUDIT_ANCHOR_EMAIL` con un buzón que no controle quien administra la BD (cada domingo recibe el hash de cabeza), o anota a mano el resultado de `GET /api/v1/admin/audit/head`. Para contrastar: `GET /admin/audit/events/<seq>` de ese `seq` debe dar el mismo `hash`.
+
+### 13.6 Lo medido (clon, contenedor Postgres 17 en la máquina de desarrollo, cliente en `localhost`)
+
+- **`POST /admin/audit/verify` con 200 000 filas** (`mode: full, limit: 200000`) por HTTP: 1 936 ms (≈ 6,2 millones filas/min; el mínimo exigido es 50 000/min). **Retraso del event loop durante la verificación:** media 1,5 ms, p99 9,4 ms, máximo 24,7 ms (sonda de temporizador: 23,5 ms). El verificador lee por *keyset* de 5 000 y calcula los hashes en tramos de 250 filas cediendo el control entre tramos; sin ceder, el máximo medido fue 43 ms. No hizo falta moverlo a un worker.
+- **Coste del lock de la cadena** (cada acción auditada toma `pg_advisory_xact_lock` hasta su `COMMIT`; transacciones con forma de checkout: 2 filas de producto `FOR UPDATE`, un pedido y dos líneas, y el evento al final):
+
+  | Transacciones simultáneas | Sin auditoría: tx/s, p50 / p95 / p99 (ms) | Con auditoría: tx/s, p50 / p95 / p99 (ms) |
+  |---|---|---|
+  | 1 | 458, 2,1 / 2,6 / 2,9 | 247, 4,0 / 4,9 / 6,7 |
+  | 5 | 1 575, 3,1 / 4,4 / 5,9 | 508, 9,7 / 11,5 / 15,1 |
+  | 10 | 1 725, 5,3 / 9,2 / 13,8 | 503, 19,2 / 23,2 / 33,6 |
+  | 25 | 1 669, 12,6 / 27,0 / 43,7 | 485, 47,3 / 78,7 / 104,5 (máx. 120) |
+
+  (La app de producción usa el pool por defecto de 10 conexiones, así que en la práctica hay como mucho 10 transacciones en cola; 25 es margen.)
+
+  Lectura: la sección serializada (lock, lectura de cabeza, `INSERT`, `COMMIT`) dura unos 2 ms, así que el techo con auditoría es de ~450-500 acciones auditadas por segundo en este hardware, frente a ~1 700 sin ella. Un checkout real tarda mucho más que estas transacciones sintéticas, y la tienda hace unas pocas acciones auditadas por segundo como mucho (R2 del epic: < 10/s): el lock no es el cuello de botella. Ninguna espera se acercó a los 5 s del presupuesto. **Si se agotan los 5 s** (BD saturada, o un proceso que retiene el lock), la acción **falla cerrada**: la API responde `503 AUDIT_UNAVAILABLE` (`details.reason`: `LOCK_TIMEOUT`, `WRITE_FAILED` o `TX_TIMEOUT`) y la acción auditada se revierte; nunca un 500. El front debe tratar ese 503 como «reintenta en unos segundos».
+- **Con el rol limitado, sobre un clon:** servidor real arrancado con `collectorsclub_d201_app` (`node dist/main`): login admin, `GET head`, `POST verify` (cadena sana: `ok`; tras alterar una fila como propietario: `ok: false`, `brokenAt {seq, reason: HASH_MISMATCH, expected, found}`; tras restaurarla: `ok` otra vez), `GET verifications` (`chainBroken: true` mientras la última verificación esté rota), un registro (201) y un checkout con Pago Móvil (201). La suite e2e completa pasó con ese rol salvo `related-products` (preexistente) y los ajustes de test descritos en 13.3.
+
+### 13.7 Lo que NO está verificado
+
+- Nada de esto se ha ejecutado en un VPS real (ni `deploy.sh` con `MIGRATE_DATABASE_URL`, ni `pnpm db:roles` contra el Postgres del servidor, ni el correo de anclaje con un SMTP real). Se probó sobre una instancia desechable de Postgres 17 con una copia de la base de desarrollo.
+- `docker-compose.yml` con `deploy/db/init-roles.sql` se probó solo en un contenedor desechable nuevo; el volumen de Angel ya existe y no ejecuta ese script.
+- Medidas hechas en `localhost` con cliente y servidor en la misma máquina: en una red real el lock se mantiene unos milisegundos más por viaje (unos 5 viajes a la BD dentro de la sección serializada).
+- La Story 20.1 no emite eventos de negocio: lo que pasaría con el lock en un checkout real se midió con transacciones sintéticas con la misma forma.
+- El rol con `DB_ROLES_ENV=dev` en el volumen real de Angel no se ha creado (se hizo en la instancia desechable); el paso 1 de 13.3 es suyo.
+
+### 13.8 Volver atrás
+
+Las tablas y triggers nuevos son inertes para la versión anterior del código: despliega la anterior y deja las migraciones aplicadas. `Audit_Events` no se puede vaciar por diseño (solo el propietario puede `DROP TABLE`, y no se debe). Para volver al rol único, quita `MIGRATE_DATABASE_URL` y pon en `DATABASE_URL` la del propietario; el rol limitado puede quedarse sin efecto, o eliminarse con `DROP OWNED BY collectorsclub_<entorno>_app; DROP ROLE collectorsclub_<entorno>_app;`.

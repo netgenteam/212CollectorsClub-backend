@@ -28,7 +28,8 @@
     "prisma:deploy": "prisma migrate deploy",
     "tcg:ingest": "node dist/tcg/cli/ingest.js",
     "prisma:seed": "tsx prisma/seed.ts",
-    "seed:legal": "tsx prisma/seed-legal.ts"
+    "seed:legal": "tsx prisma/seed-legal.ts",
+    "db:roles": "node scripts/db-roles.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",
