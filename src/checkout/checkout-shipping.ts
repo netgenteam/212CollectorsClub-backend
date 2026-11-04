@@ -5,6 +5,7 @@ import type { DeliveryMode } from '../generated/prisma/enums.js';
 import type { ShippingValidationService } from '../shipping/shipping-validation.service.js';
 import type { PreparedIdDoc } from '../crypto/id-doc-crypto.service.js';
 import { splitIdDocFromName } from '../crypto/id-doc-in-name.js';
+import { shippingInvalidException } from '../shipping/shipping-invalid.js';
 import {
   canonicalRecipientIdDoc,
   validateShippingInput,
@@ -235,12 +236,9 @@ export async function resolveCheckoutShipping(
   const cleaned = cleanCheckoutRecipient(rawDto);
   const dto = cleaned.dto;
   if (cleaned.ambiguous) {
-    throw new ApiException(
-      HttpStatus.BAD_REQUEST,
-      'SHIPPING_INVALID',
-      'The shipping data is invalid.',
-      { errors: [{ field: 'recipientName', code: 'INVALID' }] },
-    );
+    throw shippingInvalidException([
+      { field: 'recipientName', code: 'INVALID' },
+    ]);
   }
   if (!isNewShippingFormat(dto)) {
     const errors: ShippingFieldError[] = [];
@@ -256,12 +254,7 @@ export async function resolveCheckoutShipping(
       }
     }
     if (errors.length > 0) {
-      throw new ApiException(
-        HttpStatus.BAD_REQUEST,
-        'SHIPPING_INVALID',
-        'The shipping data is invalid.',
-        { errors },
-      );
+      throw shippingInvalidException(errors);
     }
     const p =
       canonical === null
@@ -355,12 +348,7 @@ export async function resolveCheckoutShipping(
     }
   }
   if (errors.length > 0 || !checked.value) {
-    throw new ApiException(
-      HttpStatus.BAD_REQUEST,
-      'SHIPPING_INVALID',
-      'The shipping data is invalid.',
-      { errors },
-    );
+    throw shippingInvalidException(errors);
   }
   if (!UUID_RE.test(agencyId)) throw agencyUnavailableException();
   await shipping.assertAgencyUsable(

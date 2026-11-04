@@ -17,6 +17,15 @@
 # nginx installed on this dev machine). See docs/deployment.md for what
 # Angel must still confirm on the real VPS.
 
+# Story 20.4 (FR-126, NFR-20.5): the admin order search takes the cedula in the query string
+# (`GET /api/v1/admin/orders?idDoc=V-12345678`). The default `combined` format logs the whole request
+# line, query string included, so a cedula would land in the access log. This format logs the
+# normalized path (`$uri`, no query string) instead. (`error_log` lines for upstream failures still
+# print the full request line: see docs/deployment.md 16.6.)
+log_format cc_staging_noquery '$remote_addr - $remote_user [$time_local] '
+                          '"$request_method $uri $server_protocol" $status $body_bytes_sent '
+                          '"$http_referer" "$http_user_agent"';
+
 server {
     listen 80;
     listen [::]:80;
@@ -45,6 +54,6 @@ server {
         proxy_read_timeout 60s;
     }
 
-    access_log /var/log/nginx/212cc-staging.access.log;
+    access_log /var/log/nginx/212cc-staging.access.log cc_staging_noquery;
     error_log  /var/log/nginx/212cc-staging.error.log;
 }

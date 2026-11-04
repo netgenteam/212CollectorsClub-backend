@@ -323,6 +323,17 @@ describe('redactString: evasions found by QA of 20.3 (Story 20.3 fix)', () => {
       'GET /x?recipientIdDoc=[REDACTED]&page=2',
     );
   });
+  it.each([
+    'GET /api/v1/admin/orders?idDoc=V-70123456&page=2',
+    'GET /api/v1/admin/orders?status=paid&idDoc=v70123456',
+    'GET /api/v1/admin/orders?idDoc=V-70.123.456',
+    'GET /api/v1/admin/orders?idDoc=V%2D70123456',
+    'GET /api/v1/admin/orders?idDoc=70123456',
+  ])('the admin search query (Story 20.4): %s', (line) => {
+    const out = redactString(line);
+    expect(out).not.toMatch(/70123456|70\.123\.456|70123456/);
+    expect(out).toContain('/api/v1/admin/orders?');
+  });
   it('harmless look-alikes stay untouched', () => {
     for (const s of [
       'iddoc:backfill started',

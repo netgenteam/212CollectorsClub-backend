@@ -1,16 +1,21 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsEnum,
   IsIn,
   IsInt,
+  IsUUID,
   Min,
   IsNotEmpty,
   IsOptional,
   IsString,
   MaxLength,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
 import { isNewShippingFormat } from '../checkout-shipping.js';
+import { BUYER_ID_TYPES } from '../buyer-id.js';
 
 /**
  * Legal `paymentRail` values: `pago_movil` (stock-hold then
@@ -58,6 +63,27 @@ const requiresLegacyAddress = (o: CheckoutDto): boolean =>
  */
 const requiresFlatRecipient = (o: CheckoutDto): boolean =>
   isNotPickup(o) && !o.customerAddressId && !isNewFormat(o);
+
+/**
+ * Story 20.4 (FR-127): the buyer's fiscal ID, the one that goes on the invoice. Only the shape
+ * is checked here; the rules per type (V/E 6-9 digits, J/G RIF with check digit, P 6-12) live
+ * in `buyer-id.ts` and answer 400 BUYER_ID_INVALID with `details.field` / `details.reason`.
+ */
+export class BuyerIdDto {
+  @ApiProperty({ enum: BUYER_ID_TYPES, example: 'V' })
+  @IsIn(BUYER_ID_TYPES)
+  type: (typeof BUYER_ID_TYPES)[number];
+
+  @ApiProperty({
+    example: '12345678',
+    description:
+      'Number only, without the type letter. Dots, spaces and dashes are ignored. V/E: 6-9 digits. J/G: RIF of 9 digits (8 + check digit). P: 6-12 letters/digits.',
+    maxLength: 30,
+  })
+  @IsString()
+  @MaxLength(30)
+  number: string;
+}
 
 /**
  * Story 4.1 (FR-12, FR-13, AD-8): body of `POST /api/v1/checkout`.
@@ -279,4 +305,41 @@ export class CheckoutDto {
   @IsInt()
   @Min(1)
   acceptedReturnsVersion?: number;
+  @ApiPropertyOptional({
+    type: BuyerIdDto,
+    description:
+      'Story 20.4 (FR-127): fiscal ID of the buyer (goes on the invoice). Mandatory when the server runs with CHECKOUT_REQUIRE_BUYER_ID=true (400 BUYER_ID_REQUIRED if neither this nor buyerSameAsRecipient is sent); always validated when sent (400 BUYER_ID_INVALID). Guests and accounts, both rails. Stored encrypted; only ever returned masked. J/G also need buyerLegalName.',
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => BuyerIdDto)
+  buyerId?: BuyerIdDto;
+
+  @ApiPropertyOptional({
+    description:
+      'Story 20.4: true = the buyer is the recipient (copies the recipient cedula). Only valid in the agency/saved-address format with a V/E recipient cedula; in the legacy flat format it is 400 BUYER_ID_REQUIRED. Sending it together with buyerId is 400 BUYER_ID_INVALID.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  buyerSameAsRecipient?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Story 20.4: legal name for the invoice. Required when buyerId.type is J or G; ignored otherwise.',
+    maxLength: 200,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  buyerLegalName?: string;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    format: 'uuid',
+    description:
+      'Story 20.4 (race guard): the customer id the storefront believes it is acting as (from GET /auth/me). If the session of this request belongs to another account (or to none), the checkout is rejected with 409 CHECKOUT_ACCOUNT_MISMATCH and nothing is created. null = "I am a guest". Omitted = no check.',
+  })
+  @IsOptional()
+  @IsUUID()
+  expectedCustomerId?: string | null;
 }

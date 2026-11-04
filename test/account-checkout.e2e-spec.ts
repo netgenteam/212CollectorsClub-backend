@@ -13,6 +13,7 @@ import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { registerConsent } from './helpers/legal-consent.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 interface CheckoutBody {
   orderId: string;
@@ -50,16 +51,18 @@ const ADMIN_EMAIL = `${ADMIN_USERNAME}@212collectorsclub.test`;
 const ADMIN_PASSWORD = 'correct-horse-battery-staple-12-6';
 const PNG = Buffer.from('fake-png-bytes-for-story-12-6');
 
-const body = (over: Record<string, unknown> = {}) => ({
-  paymentRail: 'pago_movil',
-  fulfillmentType: 'delivery',
-  addressLine1: 'Av. Test 1',
-  city: 'Caracas',
-  state: 'Distrito Capital',
-  recipientName: 'Maria Perez',
-  recipientPhone: '0412-1234567',
-  ...over,
-});
+// Story 20.4: the body carries the buyer fiscal ID, as the storefront of 20.9 will send it.
+const body = (over: Record<string, unknown> = {}) =>
+  withBuyerId({
+    paymentRail: 'pago_movil',
+    fulfillmentType: 'delivery',
+    addressLine1: 'Av. Test 1',
+    city: 'Caracas',
+    state: 'Distrito Capital',
+    recipientName: 'Maria Perez',
+    recipientPhone: '0412-1234567',
+    ...over,
+  });
 
 /**
  * Story 12.6 e2e (FR-45, AD-31, AD-16): account checkout, "mis pedidos",

@@ -208,6 +208,25 @@ export class IdDocCryptoService implements OnModuleInit {
   }
 
   /**
+   * Story 20.4 (buyerSameAsRecipient): the TYPE LETTER (`V`/`E`/...) of a stored ciphertext whose
+   * value really is the one its blind index says, without ever returning the number. The checkout
+   * copies the recipient's `Enc/Blind` to the buyer (A87) and needs the letter for
+   * `buyerIdType`; decrypting stays inside `src/crypto/`. Null if it does not decrypt, is not
+   * a parsed type+number, or `blind` is not its index.
+   */
+  typeOfStored(stored: string, blind: string | null): IdDocType | null {
+    let canonical: string;
+    try {
+      canonical = this.decrypt(stored);
+    } catch {
+      return null;
+    }
+    const n = normalizeIdDoc(canonical);
+    if (!n || n.unparsed) return null;
+    return this.blindIndex(n.type, n.digits) === blind ? n.type : null;
+  }
+
+  /**
    * Re-encrypts under `toVersion` and proves in memory that the new ciphertext holds exactly the
    * same value as the old one before returning it. Throws `IdDocDecryptError` on any failure.
    */

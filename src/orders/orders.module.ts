@@ -13,6 +13,7 @@ import { AdminOrdersService } from './admin-orders.service.js';
 import { AdminOrderPaymentService } from './admin-order-payment.service.js';
 import { AdminOrderFulfillmentService } from './admin-order-fulfillment.service.js';
 import { AdminOrderTrackingService } from './admin-order-tracking.service.js';
+import { IdDocRevealService } from '../crypto/id-doc-reveal.service.js';
 
 // PrismaService is provided by the global PrismaModule — no need to
 // re-import it here (same pattern CheckoutModule already uses).
@@ -73,7 +74,14 @@ import { AdminOrderTrackingService } from './admin-order-tracking.service.js';
     AdminOrderPaymentService,
     AdminOrderFulfillmentService,
     AdminOrderTrackingService,
+    // Story 20.4: audited reveal of the full cedula (the file lives in crypto/; wired here because it needs Prisma + Audit).
+    IdDocRevealService,
   ],
-  exports: [StockHoldExpiryCronService, PaymentProcessingTimeoutCronService],
+  exports: [
+    StockHoldExpiryCronService,
+    PaymentProcessingTimeoutCronService,
+    // Story 20.6 reuses it for the customer address reveal.
+    IdDocRevealService,
+  ],
 })
 export class OrdersModule {}

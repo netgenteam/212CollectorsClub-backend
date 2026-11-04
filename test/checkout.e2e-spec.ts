@@ -8,6 +8,7 @@ import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { SINGLETON_FX_RATE_ID } from './../src/checkout/fx-rate.constants.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 type App = Parameters<typeof request>[0];
 
@@ -65,7 +66,8 @@ function extractCartCookie(res: request.Response): string {
 }
 
 function flatBody(overrides: Record<string, unknown> = {}) {
-  return {
+  // Story 20.4: the body the storefront of 20.9 will send (buyer fiscal ID included).
+  return withBuyerId({
     paymentRail: 'pago_movil',
     fulfillmentType: 'delivery',
     addressLine1: 'Av. Test 1',
@@ -74,11 +76,11 @@ function flatBody(overrides: Record<string, unknown> = {}) {
     recipientName: 'Maria Perez',
     recipientPhone: '0412-1234567',
     ...overrides,
-  };
+  });
 }
 
 function deliveryBody(overrides: Record<string, unknown> = {}) {
-  return {
+  return withBuyerId({
     paymentRail: 'pago_movil',
     fulfillmentType: 'delivery',
     recipientName: 'Maria Perez',
@@ -87,7 +89,7 @@ function deliveryBody(overrides: Record<string, unknown> = {}) {
     city: 'Caracas',
     state: 'Distrito Capital',
     ...overrides,
-  };
+  });
 }
 
 // Runs against the shared dev Postgres seeded by Story 1.4 (prisma/seed.ts)

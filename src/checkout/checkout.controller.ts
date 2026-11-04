@@ -60,6 +60,16 @@ export class CheckoutController {
       'errorCode CONSENT_REQUIRED (Story 19.4, FR-114): acceptedTermsVersion / acceptedShippingVersion / acceptedReturnsVersion missing for a document that has a version in force; `details.missing[]`. Guests and accounts, both rails and the flat legacy format alike. No Order, StockHold or ConsentRecord is created.',
   })
   @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      'errorCode BUYER_ID_REQUIRED (Story 20.4, FR-127): neither `buyerId` nor `buyerSameAsRecipient` was sent while the server has CHECKOUT_REQUIRE_BUYER_ID=true; or `buyerLegalName` missing for a J/G buyer; or `buyerSameAsRecipient` in the legacy flat format / without a recipient cedula. errorCode BUYER_ID_INVALID: wrong type, length, characters or RIF check digit (RIF_CHECKDIGIT_STRICT), a non V/E recipient cedula to copy, or `buyerId` together with `buyerSameAsRecipient: true`. Both carry `details.field` (e.g. `buyerId.number`, `buyerLegalName`, `buyerSameAsRecipient`) and `details.reason` (REQUIRED, INVALID_TYPE, INVALID_FORMAT, INVALID_LENGTH, INVALID_CHECK_DIGIT, TOO_LONG, SAME_AS_RECIPIENT_NEEDS_AGENCY_FORMAT, RECIPIENT_ID_MISSING, RECIPIENT_ID_NOT_VE, CONFLICTS_WITH_BUYER_ID); never the value. Resolved before the transaction: no Order and no StockHold is created. errorCode SHIPPING_INVALID: `details.field` / `details.reason` are the first error (`details.errors[]` lists all), e.g. field recipientIdDoc, reason INVALID.',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description:
+      'errorCode INVALID_CUSTOMER_TOKEN (Story 20.4, hook for Story 20.6): the account of the session was anonymized or no longer exists (the first statement of the checkout transaction is `SELECT "anonymizedAt" ... FOR SHARE`; it is active once the 20.6 column exists).',
+  })
+  @ApiResponse({
     status: HttpStatus.UNPROCESSABLE_ENTITY,
     description:
       'errorCode EMPTY_CART — there is no cart cookie, or it resolves to an empty/expired cart.',
@@ -67,7 +77,7 @@ export class CheckoutController {
   @ApiResponse({
     status: HttpStatus.CONFLICT,
     description:
-      'errorCode EMAIL_NOT_VERIFIED (Story 12.6) — a logged-in customer (cookie cc_session) whose email is not verified; no order and no stock hold are created. OR errorCode INSUFFICIENT_STOCK — one or more cart lines no longer have enough available stock. details.items lists every affected line with its requested/available quantities. The checkout is fully rejected — no Order is created. OR errorCode CONSENT_VERSION_STALE (Story 19.4): a version sent is not the one in force (or that document has none); `details.current{slug: versionNumber}`, `details.stale[]`; no Order is created.',
+      'errorCode CHECKOUT_ACCOUNT_MISMATCH (Story 20.4): `expectedCustomerId` was sent and the session of this request is another account (or none; `null` expects a guest). Nothing is created. OR errorCode EMAIL_NOT_VERIFIED (Story 12.6) — a logged-in customer (cookie cc_session) whose email is not verified; no order and no stock hold are created. OR errorCode INSUFFICIENT_STOCK — one or more cart lines no longer have enough available stock. details.items lists every affected line with its requested/available quantities. The checkout is fully rejected — no Order is created. OR errorCode CONSENT_VERSION_STALE (Story 19.4): a version sent is not the one in force (or that document has none); `details.current{slug: versionNumber}`, `details.stale[]`; no Order is created.',
   })
   @ApiResponse({
     status: HttpStatus.BAD_GATEWAY,

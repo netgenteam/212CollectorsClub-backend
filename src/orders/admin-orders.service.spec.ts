@@ -1,6 +1,9 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AdminOrdersService } from './admin-orders.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
+import { makeTestCrypto } from '../../test/helpers/iddoc-test-crypto.js';
+import { ApiException } from '../common/api-exception.js';
 import {
   AdminOrderPaymentRailFilter,
   AdminOrderStatusFilter,
@@ -55,6 +58,8 @@ describe('AdminOrdersService', () => {
     stripeWebhookEvent: { findMany: ReturnType<typeof vi.fn> };
   };
 
+  const crypto = makeTestCrypto();
+
   beforeEach(async () => {
     prisma = {
       order: {
@@ -68,6 +73,7 @@ describe('AdminOrdersService', () => {
       providers: [
         AdminOrdersService,
         { provide: PrismaService, useValue: prisma },
+        { provide: IdDocCryptoService, useValue: crypto },
       ],
     }).compile();
 
@@ -232,6 +238,107 @@ describe('AdminOrdersService', () => {
       limit: 20,
       total: 0,
       totalPages: 0,
+    });
+  });
+
+  // Story 20.4 (AC6): exact search by blind index, recipient OR buyer; never LIKE.
+  describe('idDoc filter', () => {
+    const blindOf = (raw: string): string => {
+      const b = crypto.blindIndexOf(raw);
+      if (b === null) throw new Error('test value must parse');
+      return b;
+    };
+
+    it.each(['V-12345678', 'v12345678', ' V-12.345.678 '])(
+      'normalizes %j and matches either blind column, nothing else',
+      async (raw) => {
+        prisma.order.findMany.mockResolvedValue([]);
+        prisma.order.count.mockResolvedValue(0);
+
+        await service.listOrders(buildQuery({ idDoc: raw }));
+
+        const expected = blindOf('V-12345678');
+        expect(prisma.order.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: {
+              OR: [
+                { recipientIdDocBlind: expected },
+                { buyerIdDocBlind: expected },
+              ],
+            },
+          }),
+        );
+        expect(JSON.stringify(prisma.order.findMany.mock.calls)).not.toMatch(
+          /contains|startsWith|endsWith|mode/,
+        );
+      },
+    );
+
+    it('combines with the other filters (AND)', async () => {
+      prisma.order.findMany.mockResolvedValue([]);
+      prisma.order.count.mockResolvedValue(0);
+      await service.listOrders(
+        buildQuery({
+          idDoc: 'E-81234567',
+          status: AdminOrderStatusFilter.PAID,
+        }),
+      );
+      expect(prisma.order.count).toHaveBeenCalledWith({
+        where: {
+          status: 'PAID',
+          OR: [
+            { recipientIdDocBlind: blindOf('E-81234567') },
+            { buyerIdDocBlind: blindOf('E-81234567') },
+          ],
+        },
+      });
+    });
+
+    it.each([
+      '',
+      '   ',
+      '1234',
+      '12345678', // no type
+      'V-123', // too short
+      'V-1234567890', // too long
+      'J-12345678', // RIF needs 9 digits
+      'V-****5678', // a masked value
+      'V-1234%',
+      'V-12345678 OR 1=1',
+      'P-12345', // passport needs 6-12
+    ])(
+      'rejects %j with 400 ID_DOC_FILTER_INVALID and never echoes it',
+      async (raw) => {
+        try {
+          await service.listOrders(buildQuery({ idDoc: raw }));
+          expect.unreachable('should have thrown');
+        } catch (err) {
+          expect(err).toBeInstanceOf(ApiException);
+          const body = (err as ApiException).getResponse() as {
+            statusCode: number;
+            errorCode: string;
+            message: string;
+            details: Record<string, unknown>;
+          };
+          expect(body.statusCode).toBe(400);
+          expect(body.errorCode).toBe('ID_DOC_FILTER_INVALID');
+          expect(body.details).toEqual({
+            field: 'idDoc',
+            reason: 'INVALID_FORMAT',
+          });
+          if (raw.trim().length > 3) {
+            expect(JSON.stringify(body)).not.toContain(raw.trim());
+          }
+        }
+        expect(prisma.order.findMany).not.toHaveBeenCalled();
+      },
+    );
+
+    it('a valid RIF with a wrong check digit is searchable (finds nothing, does not fail)', async () => {
+      prisma.order.findMany.mockResolvedValue([]);
+      prisma.order.count.mockResolvedValue(0);
+      const r = await service.listOrders(buildQuery({ idDoc: 'J-123456780' }));
+      expect(r.data).toEqual([]);
     });
   });
 });

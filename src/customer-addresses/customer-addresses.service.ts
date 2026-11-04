@@ -3,6 +3,7 @@ import { HttpStatus, Injectable } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client.js';
 import { ApiException } from '../common/api-exception.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { shippingInvalidException } from '../shipping/shipping-invalid.js';
 import { ShippingValidationService } from '../shipping/shipping-validation.service.js';
 import {
   canonicalRecipientIdDoc,
@@ -99,12 +100,7 @@ export class CustomerAddressesService {
   ): Promise<CustomerAddressResponseDto> {
     const checked = validateShippingInput(dto);
     if (checked.errors) {
-      throw new ApiException(
-        HttpStatus.BAD_REQUEST,
-        'SHIPPING_INVALID',
-        'The shipping data is invalid.',
-        { errors: checked.errors },
-      );
+      throw shippingInvalidException(checked.errors);
     }
     const { recipientIdDoc: canonicalId, ...value } = checked.value;
     const label = dto.label?.trim() || null;
@@ -250,19 +246,12 @@ export class CustomerAddressesService {
         // which a required field cannot do.
         const nullAgency = (patch.agencyId as unknown) === null;
         if (checked.errors || nullAgency) {
-          throw new ApiException(
-            HttpStatus.BAD_REQUEST,
-            'SHIPPING_INVALID',
-            'The shipping data is invalid.',
-            {
-              errors: [
-                ...(nullAgency
-                  ? [{ field: 'agencyId', code: 'REQUIRED' as const }]
-                  : []),
-                ...(checked.errors ?? []),
-              ],
-            },
-          );
+          throw shippingInvalidException([
+            ...(nullAgency
+              ? [{ field: 'agencyId', code: 'REQUIRED' as const }]
+              : []),
+            ...(checked.errors ?? []),
+          ]);
         }
         const { recipientIdDoc: _unused, ...value } = checked.value;
         void _unused;

@@ -1,4 +1,10 @@
-import { HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  HttpStatus,
+  Inject,
+  Injectable,
+  Logger,
+  type OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -36,9 +42,27 @@ import {
 import { ShippingValidationService } from '../shipping/shipping-validation.service.js';
 import {
   assertCheckoutShippingPreconditions,
+  cleanCheckoutRecipient,
+  isNewShippingFormat,
   prepareCheckoutIdDoc,
   resolveCheckoutShipping,
+  type OrderShippingData,
 } from './checkout-shipping.js';
+import {
+  buyerIdInvalid,
+  buyerIdRequired,
+  isBuyerIdRequired,
+  resolveBuyerId,
+  type CheckoutShippingFormat,
+  type ResolvedBuyerId,
+} from './buyer-id.js';
+import {
+  assertExpectedCustomer,
+  customerAnonymizedAtExists,
+  lockCustomerForCheckout,
+} from './checkout-account-lock.js';
+import type { BuyerIdType } from '../generated/prisma/enums.js';
+import type { PreparedIdDoc } from '../crypto/id-doc-crypto.service.js';
 import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
 import { FxRateService } from '../fx/fx-rate.service.js';
 import { ConsentService } from '../legal/consent.service.js';
@@ -160,8 +184,17 @@ interface CheckoutTransactionResult {
 }
 
 @Injectable()
-export class CheckoutService {
+export class CheckoutService implements OnModuleInit {
   private readonly logger = new Logger(CheckoutService.name);
+
+  /** Story 20.4: a production process that does not enforce the buyer ID says so at boot (once). */
+  onModuleInit(): void {
+    if (process.env.NODE_ENV === 'production' && !isBuyerIdRequired()) {
+      this.logger.warn(
+        'CHECKOUT_REQUIRE_BUYER_ID is not "true": checkouts WITHOUT a buyer fiscal ID are accepted (docs/deployment.md 16.2). Turn it on together with the storefront of Story 20.9.',
+      );
+    }
+  }
 
   constructor(
     private readonly prisma: PrismaService,
@@ -203,8 +236,35 @@ export class CheckoutService {
     dto: CheckoutDto,
     customer: Pick<AuthenticatedCustomer, 'id'> | null = null,
   ): Promise<CheckoutResponseDto> {
+    // Story 20.4: the storefront's idea of "who am I" must match the session of THIS request
+    // (race between GET /auth/me and this POST). 409, nothing created, no DB touched.
+    assertExpectedCustomer(dto.expectedCustomerId, customer?.id ?? null);
+
     // Story 17.4 (AD-74): DB-free shipping gates, before touching cart/stock.
     assertCheckoutShippingPreconditions(dto, customer !== null);
+
+    // Story 20.4 (AC1, AD-97): the buyer fiscal ID is resolved FIRST, pure and with no DB, so a
+    // missing/invalid one is a 400 with no Order and no StockHold. Mandatory only when
+    // CHECKOUT_REQUIRE_BUYER_ID=true (docs/deployment.md 16.2); always validated when sent.
+    const shippingFormat: CheckoutShippingFormat =
+      dto.customerAddressId !== undefined
+        ? 'saved'
+        : isNewShippingFormat(dto)
+          ? 'agency'
+          : 'flat';
+    const buyer = resolveBuyerId(
+      dto,
+      {
+        format: shippingFormat,
+        recipientIdDoc: cleanCheckoutRecipient(dto).dto.recipientIdDoc ?? null,
+      },
+      { required: isBuyerIdRequired() },
+    );
+    // Encrypted here too (a few microseconds, cannot throw inside the transaction).
+    const preparedBuyer: PreparedIdDoc | null =
+      buyer.kind === 'explicit'
+        ? this.idDocCrypto.protect(buyer.canonical)
+        : null;
 
     // Story 12.6 (AD-31): with a session the cart is the ACCOUNT's cart
     // (the anonymous cookie is ignored); without one nothing changes.
@@ -235,8 +295,18 @@ export class CheckoutService {
     // transaction opens (synchronous, no I/O, a few microseconds).
     const preparedIdDoc = prepareCheckoutIdDoc(dto, this.idDocCrypto);
 
+    // Story 20.4 (AC4): decided before the transaction so the FOR SHARE below is its FIRST statement.
+    const lockAnonymized = customer
+      ? await customerAnonymizedAtExists(this.prisma)
+      : false;
+
     const result = await this.prisma.$transaction(
       async (tx): Promise<CheckoutTransactionResult> => {
+        // Story 20.4 (AC4): FIRST statement with a session (hook for 20.6, see checkout-account-lock.ts).
+        if (customer && lockAnonymized) {
+          await lockCustomerForCheckout(tx, customer.id);
+        }
+
         // Story 19.4 (AD-92, FR-114): FIRST statement of the transaction,
         // before the cart is read, a StockHold is reserved or the Order is
         // created. Plain SELECTs (no lock held). Guests and accounts, both
@@ -256,6 +326,14 @@ export class CheckoutService {
           dto,
           customer?.id ?? null,
           { crypto: this.idDocCrypto, prepared: preparedIdDoc },
+        );
+
+        // Story 20.4 (AC3): what the order keeps as buyer ID. Inside the transaction only because
+        // `buyerSameAsRecipient` with a saved address copies the cipher of the saved address.
+        const buyerData = this.buyerOrderData(
+          buyer,
+          preparedBuyer,
+          shippingData,
         );
 
         const cart = await tx.cart.findFirst({
@@ -364,6 +442,7 @@ export class CheckoutService {
             paymentRail: isStripe ? PaymentRail.STRIPE : PaymentRail.PAGO_MOVIL,
             fulfillmentType: FulfillmentType.DELIVERY,
             ...shippingData,
+            ...buyerData,
             totalUsd,
             fxRateVesPerUsd: fxRate?.vesPerUsd ?? null,
             fxRateSource: fxRate?.source ?? null,
@@ -496,6 +575,60 @@ export class CheckoutService {
       return this.finalizeStripeCheckout(result);
     }
     return this.toResponseDto(result, null);
+  }
+
+  /**
+   * Story 20.4 (AC3, A87): the buyer columns of the order. Never the clear value.
+   * - explicit: the cipher/blind prepared before the transaction.
+   * - same-as-recipient: the recipient's `Enc/Blind` are COPIED (no re-encryption). The type
+   *   letter comes from the body (agency format) or, for a saved address, from the stored
+   *   cipher itself (`typeOfStored`, decrypts only inside `src/crypto/` and returns just the
+   *   letter, after checking the blind index). Recipient cedulas are V/E by rule; anything else
+   *   (a legacy row) is rejected.
+   * Throws 400 BUYER_ID_REQUIRED / BUYER_ID_INVALID (details.field/reason); inside the
+   * transaction, but before any stock is touched, so nothing is created.
+   */
+  private buyerOrderData(
+    buyer: ResolvedBuyerId,
+    prepared: PreparedIdDoc | null,
+    shippingData: OrderShippingData,
+  ): {
+    buyerIdType: BuyerIdType | null;
+    buyerIdDocEnc: string | null;
+    buyerIdDocBlind: string | null;
+    buyerLegalName: string | null;
+  } {
+    const none = {
+      buyerIdType: null,
+      buyerIdDocEnc: null,
+      buyerIdDocBlind: null,
+      buyerLegalName: null,
+    };
+    if (buyer.kind === 'none') return none;
+    if (buyer.kind === 'explicit') {
+      return {
+        buyerIdType: buyer.type,
+        buyerIdDocEnc: prepared?.enc ?? null,
+        buyerIdDocBlind: prepared?.blind ?? null,
+        buyerLegalName: buyer.legalName,
+      };
+    }
+    const enc = shippingData.recipientIdDocEnc;
+    const blind = shippingData.recipientIdDocBlind;
+    if (!enc || !blind) {
+      throw buyerIdRequired('buyerSameAsRecipient', 'RECIPIENT_ID_MISSING');
+    }
+    const type =
+      buyer.fromBody?.type ?? this.idDocCrypto.typeOfStored(enc, blind);
+    if (type !== 'V' && type !== 'E') {
+      throw buyerIdInvalid('buyerSameAsRecipient', 'RECIPIENT_ID_NOT_VE');
+    }
+    return {
+      buyerIdType: type,
+      buyerIdDocEnc: enc,
+      buyerIdDocBlind: blind,
+      buyerLegalName: null,
+    };
   }
 
   /**

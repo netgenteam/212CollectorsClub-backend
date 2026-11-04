@@ -21,6 +21,19 @@ describe('splitIdDocFromName (story 20.3)', () => {
     ['Ana Prueba (Ｖ-７０１２３４５６)', 'Ana Prueba', 'V-70123456'],
     ['Ana Prueba (V​-70123456)', 'Ana Prueba', 'V-70123456'],
     ['José Núñez (P-AB123456)', 'José Núñez', 'P-AB123456'],
+    // 20.4: a label with no letter is unmistakable: it is a V.
+    ['Ana CI 12345678', 'Ana', 'V-12345678'],
+    ['Ana C.I.: 12.345.678', 'Ana', 'V-12345678'],
+    ['Ana (CI 12345678)', 'Ana', 'V-12345678'],
+    ['Ana cédula 12345678', 'Ana', 'V-12345678'],
+    ['Ana ced. 12 345 678', 'Ana', 'V-12345678'],
+    ['CI 1234567 Ana', 'Ana', 'V-1234567'],
+    // Boundaries of the real rules still extract.
+    ['Ana V-123456', 'Ana', 'V-123456'],
+    ['Ana E-123456789', 'Ana', 'E-123456789'],
+    ['Torre P-123456', 'Torre', 'P-123456'],
+    ['Ana (J-123456789)', 'Ana', 'J-123456789'],
+    ['Ana (G-200000001)', 'Ana', 'G-200000001'],
   ];
   it.each(found)('extracts %j', (input, name, id) => {
     const r = splitIdDocFromName(input);
@@ -45,6 +58,24 @@ describe('splitIdDocFromName (story 20.3)', () => {
     'María del 12.345',
     'PENDING12345',
     'Apt 5, piso 12',
+    // 20.4: short tokens are not cedulas (V/E 6-9, J/G 9, P 6-12): company names, lots, buildings.
+    'Inversiones G-20000 C.A.',
+    'Inversiones J-1234 C.A.',
+    'Edificio P-12345',
+    'Torre E-12345',
+    'Local J-12345678',
+    'Ana V-12345',
+    'Ana V-1234567890',
+    'Ana P-12345',
+    // No label, or a label that cannot give a type, or not a standalone label.
+    'Ana 12345678',
+    'Maci 12345678',
+    'Ana RIF 12345678',
+    'Ana pasaporte 12345678',
+    'Ana CI 12345',
+    'Ana CI 1234567890',
+    'Ana ci 12345678901',
+    'Apt 5, piso 12',
     '',
   ];
   it.each(untouched)('leaves %j alone', (input) => {
@@ -67,6 +98,16 @@ describe('splitIdDocFromName (story 20.3)', () => {
   });
   it('a name that is only a cedula leaves an empty name', () => {
     expect(splitIdDocFromName('(V-70123456)').name).toBe('');
+  });
+  it('keeps a company name that looks like a short id and extracts the real cedula beside it', () => {
+    const r = splitIdDocFromName('Inversiones G-20000 C.A. (V-12345678)');
+    expect(r.found).toBe(true);
+    expect(r.idDoc).toBe('V-12345678');
+    expect(r.name).toBe('Inversiones G-20000 C.A.');
+    expect(r.ambiguous).toBe(false);
+  });
+  it('a label does not eat letters of the word before it', () => {
+    expect(splitIdDocFromName('Marci CI 12345678').name).toBe('Marci');
   });
   it('stripIdDocFromName is the view helper', () => {
     expect(stripIdDocFromName('Ana (V-70123456)')).toBe('Ana');

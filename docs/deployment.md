@@ -860,7 +860,7 @@ Esta sección es para Angel. Se lee de arriba abajo en el orden en que se hace: 
 
 Un `ALTER TABLE` espera un lock exclusivo y, mientras espera, todas las consultas posteriores sobre esa tabla se encolan detrás (en `Orders`: checkout y consultas de pedido se detienen). QA midió la migración de consentimiento esperando 28,5 s con un `SELECT` sobre `Orders` bloqueado 25 s, aunque el archivo empieza con `SET LOCAL lock_timeout = '10s'`.
 
-- **Solo una migración depende de esa línea:** `20261103100000_add_consent_records` (`grep -rn lock_timeout prisma/migrations`). Ya está aplicada en desarrollo y su checksum no puede cambiar, así que se dejó como está: en una base donde siga pendiente, **no** acota la espera.
+- **Solo una migración tiene ese `SET LOCAL lock_timeout` sin efecto:** `20261103100000_add_consent_records` (no empieza con `BEGIN;`, y un `SET LOCAL` fuera de una transacción no hace nada). Ya está aplicada en desarrollo y su checksum no puede cambiar, así que se dejó como está: en una base donde siga pendiente, **no** acota la espera. Varias migraciones posteriores (Stories 20.1 y 20.3) sí fijan `SET LOCAL lock_timeout = '10s'`, pero dentro de `BEGIN;`, donde sí surte efecto (lista en el último punto de esta lista; `grep -rn lock_timeout prisma/migrations` la reproduce). Las migraciones nuevas no lo fijan (regla de abajo).
 - **Verificado sobre un clon de la base** (lock de lectura sobre `Orders` retenido 25-40 s y un `ALTER TABLE "Orders" ADD COLUMN` de prueba):
 
   | Mecanismo | Resultado |
@@ -1362,7 +1362,7 @@ Lectores de `Order.recipientIdDoc*`: solo `OrderLookupService.toDetailDto` (look
 
 **La cédula dentro de `recipientName` (hallazgo de QA de la 20.3).** La tienda antigua (`buildCheckoutBody`) mandaba el formato plano con la cédula concatenada en el nombre (`"Ana (V-70123456)"`, sin `recipientIdDoc` ni agencia). Con `CHECKOUT_REQUIRE_SHIPPING=false` (el valor por defecto) eso acababa **en claro** en `Orders.recipientName` y en `GET /orders/:id`, `GET /admin/orders/:id` y `GET /admin/orders`. Ahora:
 
-1. **Checkout** (formato plano, agencia y libreta; `src/checkout/checkout-shipping.ts` + `src/crypto/id-doc-in-name.ts`): si `recipientName` contiene una cédula **inequívoca** (letra de tipo `V E J G P` suelta + lo que `normalizeIdDoc` acepta; entre paréntesis o corchetes, al final, al principio o en medio; con o sin espacios, puntos, `CI:`, `C.I.`, `cédula`, letras de ancho completo o caracteres de ancho cero), se extrae, se cifra a `Enc/Blind` y se guarda el nombre limpio. Si llega `recipientIdDoc` en su campo, **gana ese**. Un nombre sin cédula no se toca, y uno con cifras legítimas (`Ana 3era`, `Calle 12345`) tampoco se muta ni se rechaza. Dos cédulas distintas en el nombre, o un nombre que es solo una cédula, dan 400 `SHIPPING_INVALID` (campo `recipientName`). El formato plano acepta ahora `recipientIdDoc` en su campo (ya no lo convierte en formato agencia: solo lo hacen los campos de agencia); uno inválido o enmascarado da 400.
+1. **Checkout** (formato plano, agencia y libreta; `src/checkout/checkout-shipping.ts` + `src/crypto/id-doc-in-name.ts`): **(desde la 20.4 las longitudes son las del tipo, ver 16.5)** si `recipientName` contiene una cédula **inequívoca** (letra de tipo `V E J G P` suelta + lo que `normalizeIdDoc` acepta; entre paréntesis o corchetes, al final, al principio o en medio; con o sin espacios, puntos, `CI:`, `C.I.`, `cédula`, letras de ancho completo o caracteres de ancho cero), se extrae, se cifra a `Enc/Blind` y se guarda el nombre limpio. Si llega `recipientIdDoc` en su campo, **gana ese**. Un nombre sin cédula no se toca, y uno con cifras legítimas (`Ana 3era`, `Calle 12345`) tampoco se muta ni se rechaza. Dos cédulas distintas en el nombre, o un nombre que es solo una cédula, dan 400 `SHIPPING_INVALID` (campo `recipientName`). El formato plano acepta ahora `recipientIdDoc` en su campo (ya no lo convierte en formato agencia: solo lo hacen los campos de agencia); uno inválido o enmascarado da 400.
 2. **Backfill** (fase de nombres, 15.5): `Orders` y `Customer_Addresses`. Extrae al `Enc`; solo tras leer el `Enc` de la base y **descifrarlo** para comprobar que contiene esa cédula limpia el nombre (comparando el nombre leído y con la condición SQL `Enc IS NOT NULL`). No es una purga: la cédula queda recuperable en `Enc` y el test estático (`iddoc-static.spec.ts`) comprueba que esa sentencia no puede ejecutarse sin un `Enc` verificado. Si la fila ya tenía un `Enc` **distinto** del extraído, o el nombre lleva dos cédulas distintas, es un **conflicto**: no se pisa nada, se cuenta (`nameConflicts`, resultado `NAME_CONFLICTS`, salida 1) y `--check` sigue en rojo con el id de la fila (15.7).
 3. **Vistas:** `recipientName` del lookup público, de las vistas del cliente, de la libreta y de `admin/orders` (detalle y lista) pasa por `stripIdDocFromName` al leer, así que un despliegue **antes** del backfill tampoco la expone.
 
@@ -1375,6 +1375,7 @@ Todas las salidas traen contadores y **ids de fila** (uuid), nunca cédulas ni c
 - **Cifrado malformado (`malformed`, o `KEY_PREFLIGHT_FAILED ... is not a ciphertext (row ids: ...)`).** El backfill se niega a escribir mientras exista un `Enc` que no tenga la forma `v<N>:<iv>:<tag>:<ct>` (una edición manual, una escritura mala): la alternativa sería leerlo como si fuera una cédula. Mira el mensaje o `pnpm iddoc:backfill --check` (`sampleIds.malformed`, hasta 20 ids). Para cada id: si la fila **aún tiene el claro** (`recipientIdDoc` no nulo) basta `UPDATE "Customer_Addresses" SET "recipientIdDocEnc" = NULL, "recipientIdDocBlind" = NULL WHERE id = '<id>';` (o `"Orders"`) y volver a correr `pnpm iddoc:backfill`, que lo cifra de nuevo. Si **no** tiene el claro, ese `Enc` era la única copia: restaura la fila desde la copia de seguridad (no hay forma de recuperar la cédula de un valor que no descifra) o, si es una dirección, pide al cliente que la vuelva a escribir. **No** pongas `Enc` a NULL en una orden que no tenga su claro sin una copia a mano.
 - **Claro que no coincide con su cifrado (`plainMismatch`, solo en filas con claro).** Un build antiguo (tras un rollback de la app) editó el claro y el `Enc` quedó viejo. Decide cuál vale (el claro suele ser el más reciente): `UPDATE ... SET "recipientIdDocEnc" = NULL, "recipientIdDocBlind" = NULL WHERE id = '<id>';` y `pnpm iddoc:backfill` lo cifra de nuevo desde el claro. Para una orden compara antes con la factura.
 - **Nombre con cédula (`nameHits`).** Corre `pnpm iddoc:backfill`: lo resuelve solo. Si queda en rojo es un **conflicto** (`nameConflicts`): el `Enc` de esa fila es distinto de la cédula del nombre, o el nombre lleva dos. No se arregla solo: mira la fila con `psql` (el nombre es texto), decide cuál es la cédula correcta y corrige a mano `recipientName` y, si hace falta, el `Enc` (poniéndolo a NULL con el claro a mano, como arriba).
+  **Atajo cuando el nombre AÚN lleva la cédula (Story 20.4):** si la fila tiene un `Enc` que no corresponde (conflicto, o un `Enc` que salió de un falso positivo de reglas anteriores, p. ej. `G-20000` extraído de `Inversiones G-20000 C.A.`) y el nombre todavía contiene la cédula verdadera, basta poner `Enc` y `Blind` en NULL y volver a correr `pnpm iddoc:backfill`, que la extrae otra vez del nombre con las reglas actuales: `UPDATE "Orders" SET "recipientIdDocEnc" = NULL, "recipientIdDocBlind" = NULL WHERE id = '<id>';` (o `"Customer_Addresses"`). **Solo si el nombre aún la lleva Y estás seguro de que el `Enc` actual es el equivocado:** una fila nueva guarda la cédula del campo `recipientIdDoc` solo en el `Enc` (el claro es NULL), y si el nombre ya fue limpiado ese `Enc` es la única copia; no lo pongas a NULL sin una copia a mano. Una fila cuyo nombre fue limpiado por un falso positivo antes de la 20.4 (`Inversiones C.A.` más una «cédula» `G-20000`) no se puede reconstruir sola: el texto original de la parte quitada solo existe en el `Enc` (descífralo con una copia del llavero en un entorno aparte) o en la copia de seguridad.
 - **`PORT` inválido en `deploy.sh`.** Un `.env` guardado con finales de línea de Windows (`PORT=3804\r`) rompía la URL del health check y solo avisaba. Ahora `deploy.sh` quita `\r`, espacios y comillas, y si lo que queda no es un número termina con código 1 (después del backfill) con un error explícito. Nota para la auditoría (anterior a esta story): `deploy.sh` hace `source "$ENV_FILE"`, que **ejecuta** el archivo como shell y conserva un `\r` final dentro de los valores; sustituirlo por un lector tipo dotenv queda como seguimiento.
 
 ### 15.8 Lo medido (disposable Postgres 17 en contenedor, rol limitado `collectorsclub_d203_app`, 12 000 órdenes + 3 000 direcciones sintéticas, máquina de desarrollo)
@@ -1383,3 +1384,119 @@ Todas las salidas traen contadores y **ids de fila** (uuid), nunca cédulas ni c
 - Corte forzado (kill -9) a mitad de la corrida y reanudación: sin pérdidas ni duplicados.
 - **No verificado:** un VPS real; checkouts HTTP concurrentes contra el servidor Nest durante el backfill (la carga fue de SQL equivalente, la app sí se probó con checkouts reales en los e2e, pero no a la vez); tablas de millones de filas; `deploy.sh` entero (solo su tramo posterior al reinicio, con `pnpm` simulado); la restauración de claves de 14.2.
 
+
+## 16. Epic 20, Story 20.4: cédula del comprador en el checkout, búsqueda por cédula y revelado
+
+Esta sección es para Angel. **No hay migraciones nuevas** en esta story (las columnas `buyerId*` ya las creó la 20.3). Lo que cambia es código, tres variables de entorno y la plantilla de Nginx.
+
+### 16.1 Qué cambia
+
+- `POST /checkout` acepta `buyerId {type, number}`, `buyerSameAsRecipient`, `buyerLegalName` y `expectedCustomerId` (contrato exacto en 16.3). La cédula del comprador se valida **antes** de la transacción (sin Order ni StockHold si falla), se cifra y se guarda en `Orders.buyerIdType/buyerIdDocEnc/buyerIdDocBlind/buyerLegalName`; nunca el claro. Las órdenes históricas no se tocan.
+- `GET /admin/orders?idDoc=V-12345678`: búsqueda exacta por índice ciego (destinatario **o** comprador).
+- `POST /admin/orders/:orderId/reveal-id-doc {field: 'recipient'|'buyer'}`: devuelve la cédula completa **después** de comprometer el evento de auditoría `ID_DOC_REVEALED`; máximo `ID_DOC_REVEAL_MAX_PER_HOUR` (30) por admin y hora.
+- Las vistas de orden ya devolvían `buyerIdDoc` (enmascarado), `buyerIdType` y `buyerLegalName` desde la 20.3.
+- `SHIPPING_INVALID` (checkout y libreta) lleva ahora `details.field` y `details.reason` (el primer error; `details.errors[]` sigue con la lista completa).
+- La extracción de la cédula metida en `recipientName` ya no confunde `Inversiones G-20000 C.A.` ni `Edificio P-12345` con cédulas (16.5).
+
+### 16.2 La exigencia de la cédula del comprador: `CHECKOUT_REQUIRE_BUYER_ID` (léelo antes de activar nada)
+
+**La cédula es obligatoria en facturas (decisión de Angel), pero la tienda actual (frontend) todavía no la envía: la manda la Story 20.9.** Por eso la exigencia es un interruptor de despliegue, no un comportamiento fijo:
+
+| Valor | Efecto |
+|---|---|
+| `CHECKOUT_REQUIRE_BUYER_ID=false` o ausente (**valor por defecto**) | Un checkout **sin** `buyerId`/`buyerSameAsRecipient` se acepta y la orden queda sin cédula de comprador (`buyerIdType`, `buyerIdDocEnc`, `buyerIdDocBlind` en NULL, como una orden histórica). Un `buyerId` que **sí** llegue se valida siempre (400 si es inválido) y se guarda. La tienda sigue vendiendo exactamente igual que antes de la 20.4. |
+| `CHECKOUT_REQUIRE_BUYER_ID=true` (valor exacto; se lee en cada petición) | Un checkout sin comprador responde `400 BUYER_ID_REQUIRED` (`details.field = buyerId`, `reason = REQUIRED`) **sin Order ni StockHold**. |
+
+**Qué se rompe y cuándo.** Con el valor por defecto, nada se rompe al desplegar la 20.4. **Si activas `true` antes de la 20.9, la tienda deja de vender: el 100 % de los checkouts del frontend actual responde 400** (el frontend no manda `buyerId`; en el formato plano antiguo ni siquiera existe `buyerSameAsRecipient`, que allí siempre es `BUYER_ID_REQUIRED`). En producción el backend avisa con un WARN al arrancar mientras el interruptor no esté en `true`.
+
+**Orden de despliegue recomendado:**
+
+1. Desplegar el backend con la 20.4 (interruptor apagado). Nada cambia para el cliente.
+2. Desplegar el frontend de la 20.9 (envía `buyerId` o `buyerSameAsRecipient`, y `expectedCustomerId`).
+3. Pasar `CHECKOUT_REQUIRE_BUYER_ID=true` en el `.env` del entorno y reiniciar el servicio. Desde ese momento ninguna orden nueva nace sin cédula.
+4. Entre los pasos 1 y 3, las órdenes nuevas que lleguen sin comprador quedan sin cédula fiscal. Para saber cuántas y desde cuándo: `SELECT count(*), min("createdAt"), max("createdAt") FROM "Orders" WHERE "buyerIdDocEnc" IS NULL AND "createdAt" > '<fecha del paso 1>';` (esas habrá que completarlas con el cliente antes de facturar; **no** se completan solas).
+
+**Interacción con `CHECKOUT_REQUIRE_SHIPPING`** (17.4, también `false` por defecto):
+
+- Los dos son independientes y se comprueban en este orden: primero la cuenta esperada (409), luego `SHIPPING_REQUIRED`, luego `BUYER_ID_*`, todo antes de tocar la BD. Un cuerpo que viola ambos recibe `SHIPPING_REQUIRED`.
+- `buyerSameAsRecipient: true` solo existe en el formato agencia/libreta (Epic 17). Con `CHECKOUT_REQUIRE_SHIPPING=false` el formato plano antiguo sigue siendo válido, pero ahí el comprador **tiene que ir explícito** (`buyerId`), nunca "igual que el destinatario".
+- Activar solo `CHECKOUT_REQUIRE_BUYER_ID=true` rompe a toda tienda que no envíe el comprador (formato plano incluido). Activar solo `CHECKOUT_REQUIRE_SHIPPING=true` rompe a toda tienda que use el formato plano. Con la 20.9 desplegada pueden activarse juntos.
+
+### 16.3 Contrato exacto para la Story 20.9
+
+**Request de `POST /api/v1/checkout`** (campos nuevos; todos opcionales a nivel de DTO):
+
+```jsonc
+{
+  "buyerId": { "type": "V" | "E" | "J" | "P" | "G", "number": "12345678" },  // solo el número, sin la letra; puntos/espacios/guiones se ignoran
+  "buyerSameAsRecipient": true,        // copia la cédula del destinatario (solo formato agencia/libreta, destinatario V/E)
+  "buyerLegalName": "Empresa C.A.",    // ≤ 200; OBLIGATORIO si type es J o G; se ignora en V/E/P
+  "expectedCustomerId": "<uuid>" | null // id de cuenta que la tienda cree tener (de /auth/me); null = "soy invitado"; ausente = sin comprobación
+}
+```
+
+Reglas: `V/E` 6-9 dígitos; `J/G` RIF de 9 dígitos (8 + dígito verificador, ver 16.4); `P` 6-12 letras/dígitos con al menos un dígito. `buyerId` y `buyerSameAsRecipient: true` juntos son una contradicción (400 `BUYER_ID_INVALID`, `CONFLICTS_WITH_BUYER_ID`); `buyerSameAsRecipient: false` junto a `buyerId` es válido.
+
+**Errores** (todos 400 salvo indicación; `details.field` y `details.reason` sin valores):
+
+| `errorCode` | `details.field` | `details.reason` |
+|---|---|---|
+| `BUYER_ID_REQUIRED` | `buyerId` | `REQUIRED` (no se envió comprador y el servidor tiene el interruptor en `true`) |
+| `BUYER_ID_REQUIRED` | `buyerId.type`, `buyerId.number` | `REQUIRED` |
+| `BUYER_ID_REQUIRED` | `buyerLegalName` | `REQUIRED` (J/G sin razón social) |
+| `BUYER_ID_REQUIRED` | `buyerSameAsRecipient` | `SAME_AS_RECIPIENT_NEEDS_AGENCY_FORMAT` (formato plano), `RECIPIENT_ID_MISSING` (la dirección guardada no tiene cédula) |
+| `BUYER_ID_INVALID` | `buyerId.type` | `INVALID_TYPE` |
+| `BUYER_ID_INVALID` | `buyerId.number` | `INVALID_FORMAT` (letras donde van dígitos, máscara, letra de tipo dentro del número), `INVALID_LENGTH`, `INVALID_CHECK_DIGIT` (RIF) |
+| `BUYER_ID_INVALID` | `buyerLegalName` | `TOO_LONG`, `INVALID_FORMAT` |
+| `BUYER_ID_INVALID` | `buyerSameAsRecipient` | `CONFLICTS_WITH_BUYER_ID`, `RECIPIENT_ID_NOT_VE` (la dirección guardada no es V/E o su índice no coincide) |
+| `SHIPPING_INVALID` | `recipientIdDoc`, `recipientName`, ... | `REQUIRED`, `INVALID` (con `buyerSameAsRecipient` y cédula de destinatario ausente o no V/E, el error es este y habla del **destinatario**) |
+| `CHECKOUT_ACCOUNT_MISMATCH` (409) | — | `expectedCustomerId` no coincide con la sesión de esta petición; sin efecto (el carrito de la cuenta se conserva) |
+| `INVALID_CUSTOMER_TOKEN` (401) | — | cuenta anonimizada o inexistente (se activa con la 20.6, ver 16.9) |
+
+**Respuestas de lectura**: `fulfillment.buyerIdDoc` (`"J-****3805"`), `fulfillment.buyerIdType`, `fulfillment.buyerLegalName`; `recipientIdDoc` sigue enmascarado. La orden de la tienda antigua puede traer los tres a `null`.
+
+**Admin**:
+
+- `GET /admin/orders?idDoc=<cualquier grafía>`: `400 ID_DOC_FILTER_INVALID` (`details = {field: 'idDoc', reason: 'INVALID_FORMAT'}`) si no es una cédula completa; lista vacía si no hay coincidencias; solo igualdad exacta (7 dígitos de un V de 8 **no** encuentra nada, no hay prefijos).
+- `POST /admin/orders/:orderId/reveal-id-doc` con `{field}`: `200 {value, unparsed}` y `Cache-Control: no-store` (también en los errores). `unparsed: true` marca un valor heredado sin tipo (sin índice ciego: no se pudo contrastar con la fila; se entrega igualmente y el evento de auditoría lo registra). Errores: `404 ORDER_NOT_FOUND`, `404 ID_DOC_NOT_FOUND` (esa orden no tiene cédula en ese campo: p. ej. una orden histórica sin comprador), `429 ID_DOC_REVEAL_RATE_LIMITED` con cabecera `Retry-After` (segundos hasta que el evento más antiguo de la última hora deje de contar) y `details.limitPerHour`, `500 ID_DOC_INTEGRITY_FAILED` (`details.reason`: `BLIND_MISMATCH`, `BLIND_MISSING`, `DECRYPT_FAILED`, `ENC_MALFORMED`; no se entrega nada y no se audita), `503 AUDIT_UNAVAILABLE` (la auditoría no se pudo comprometer: **no** se entrega; reintentar). El frontend oculta el valor a los 30 s.
+
+### 16.4 El dígito verificador del RIF: confirma uno real antes de dejar `RIF_CHECKDIGIT_STRICT` en estricto
+
+El algoritmo es el del SENIAT (pesos `4 3 2 7 6 5 4 3 2` sobre `[letra, d1..d8]`, `dv = 11 - (suma mod 11)`), probado con el RIF publicado de Banesco (`J-07013380-5`). **El caso «resto 1 → dígito 9» no está confirmado** contra un RIF real: hay implementaciones públicas que en ese caso dan `0`. Si el valor estricto rechazara RIFs válidos, el 1 de cada 11 RIFs aproximadamente (los de resto 1) daría `400 BUYER_ID_INVALID/INVALID_CHECK_DIGIT` a clientes legítimos en el checkout.
+
+- **Recomendación hasta confirmarlo: `RIF_CHECKDIGIT_STRICT=false`** (el `.env.example` ya lo trae así). Solo se omite el dígito verificador; el formato (9 dígitos, tipo J/G) se exige igual. Cuesta poco: un RIF mal tecleado pasará, pero la factura la revisa una persona.
+- **Cómo confirmarlo:** toma un RIF real de J o G cuyo cálculo dé resto 1 (suma de `4×letra + 3·d1 + 2·d2 + 7·d3 + 6·d4 + 5·d5 + 4·d6 + 3·d7 + 2·d8` con J=3, G=5, módulo 11 igual a 1) y comprueba en la consulta del SENIAT que su dígito es el que el código espera (9). Con un resultado distinto, el cambio es de una línea en `src/crypto/rif-check-digit.ts` y su test. Mientras no lo confirmes, el valor por defecto del **código** (variable ausente) sigue siendo estricto: por eso el `.env.example` lo pone explícitamente en `false`.
+
+### 16.5 Falsos positivos de la extracción de la cédula en el nombre
+
+Alineada con las reglas de `buyer-id.ts`: un token con letra de tipo solo cuenta como cédula si tiene los dígitos que ese tipo tiene (V/E 6-9, J/G 9, P 6-12). `Inversiones G-20000 C.A.`, `Edificio P-12345` y `Local J-12345678` se dejan intactos (antes quedaban como `Inversiones C.A.` y se cifraba `G-20000` como «cédula»). Un cuerpo con `buyerId` explícito no depende de esto: gana siempre el campo. Una etiqueta inequívoca sin letra (`Ana CI 12345678`, `C.I.: 12.345.678`, `cédula 12345678`) se toma como `V`; `RIF 12345678` o `pasaporte 12345678` sin letra no (no se puede saber el tipo). Los datos ya migrados con las reglas anteriores y los pasos para repararlos están en 15.7.
+
+### 16.6 Búsqueda por cédula en la URL, Nginx y logs
+
+`GET /admin/orders?idDoc=` lleva la cédula en la cadena de consulta. La aplicación **no** la registra: no tiene log de acceso (Nest no imprime peticiones), el middleware de uso de la 20.7 no guardará nunca la query string (AD-100) y el redactor de logs enmascara `idDoc=...` si apareciera en un mensaje. Lo que sí la registraría es **Nginx**: el formato `combined` por defecto escribe la línea completa de la petición. Por eso las dos plantillas (`deploy/nginx/*.conf.template`) definen un `log_format` (`cc_prod_noquery` / `cc_staging_noquery`) que registra `$request_method $uri` (la ruta, sin query string) y lo usan en `access_log`. **Hay que volver a copiar las plantillas al servidor y recargar Nginx** (1.7). Dos límites:
+
+- `error_log` de Nginx imprime la línea completa de la petición cuando falla un `proxy_pass` (`upstream timed out`, `connect() failed`...): ahí la cédula **sí** puede aparecer en un fallo del backend. No se puede quitar con un formato.
+- La aplicación no ofrece una alternativa por `POST` (`POST /admin/orders/search {idDoc}`), que evitaría las dos cosas (la URL no llevaría nada). La arquitectura lo permite sin cambios de modelo; **no se añadió porque la story no lo pide**. Recomendable antes de producción si la política es «cero cédula en logs de infraestructura».
+
+### 16.7 El revelado y el lock de la cadena de auditoría (lo medido)
+
+- Flujo: se lee la orden, se **descifra y se contrasta en memoria** con el índice ciego de la fila (`blindIndexOf(decrypt(enc))`; el AAD del cifrado es constante, así que un cifrado válido puede copiarse a otra orden y descifraría igual; si no coincide no se entrega nada, se registra `ID_DOC_INTEGRITY_FAILED order=<id> field=<campo> reason=<motivo>` y no se consume cupo ni se audita). Luego una transacción de auditoría **propia y comprometida primero**: toma el lock de la cadena, cuenta los `ID_DOC_REVEALED` del admin en la última hora (conteo exacto dentro del lock: a prueba de carreras y de varias instancias), si hay `≥ ID_DOC_REVEAL_MAX_PER_HOUR` responde 429 sin escribir, y si no inserta el evento con `AuditService.record` **como última sentencia**. Solo con el commit hecho se devuelve el valor.
+- El evento lleva actor, `Order`, id de la orden, `after: {field}` (más `unparsed: true` si aplica), `requestId` e IP; nunca el valor ni el cifrado.
+- El conteo bajo el lock es el único trabajo extra. Se escribió con `statement_timestamp()` (estable) en vez de `clock_timestamp()` (volátil): **medido con 1 000 000 de filas, la versión volátil no podía usar el índice y tardaba 103 ms bajo el lock** (recorría 998 000 filas de `Audit_Events_occurredAt_idx`); la versión estable usa `Audit_Events_occurredAt_idx` + `Audit_Events_action_seq_idx` y tarda 0,13 ms.
+- **Cifras** (`pnpm test:perf`, `test/id-doc-reveal.perf.spec.ts`; esquema sandbox sin triggers en el Postgres de desarrollo, 1 000 000 de filas, ~1 800 en la última hora, `ANALYZE` hecho): conteo p50 0,13 ms, p95 0,18 ms (plan solo con índices, 19 buffers). **Lock retenido** con 31 transacciones concurrentes: transacción de auditoría simple de un evento p50 2,4 ms, p95 5,4 ms, máx 7,0 ms; revelado completo p50 5,1 ms, p95 16,5 ms, máx 23,5 ms (incluye el `record` y el segundo `LockBudget`). Contra el servidor real (clon, rol limitado `_app`), 31 reveals concurrentes de un admin: 30 × 200 y 1 × 429 con `Retry-After: 3600`; latencia del cliente p50 195 ms, p95 251 ms, 255 ms en total.
+- Corte de la auditoría: con la tabla sin poder escribir (`CHECK` imposible en el sandbox) el revelado responde 503 y no entrega; con el lock retenido por otra sesión responde 503 a los ~5 s (`lock_timeout` del presupuesto de auditoría), sin valor ni evento.
+
+### 16.8 Variables nuevas (ver `.env.example`)
+
+| Variable | Defecto | Qué hace |
+|---|---|---|
+| `CHECKOUT_REQUIRE_BUYER_ID` | `false` | Exige comprador en el checkout (16.2). Se lee en cada petición. |
+| `ID_DOC_REVEAL_MAX_PER_HOUR` | `30` | Límite de revelados por admin y hora. Un valor que no sea un entero positivo se ignora (queda 30). |
+| `RIF_CHECKDIGIT_STRICT` | ausente = estricto (`.env.example`: `false`) | 16.4. |
+
+### 16.9 Lo que NO está verificado ni hecho
+
+- El `FOR SHARE` de `anonymizedAt` (AC4) es solo el **punto de enganche**: `Customers.anonymizedAt` lo crea la 20.6; hasta entonces un sondeo de existencia de columna (cada minuto, fuera de la transacción) lo mantiene apagado. Probado el orden de sentencias (el `FOR SHARE` es la primera, antes del consentimiento) con un doble de la transacción; **no** probado contra la columna real ni contra el `FOR UPDATE` de la anonimización.
+- `log_format` de Nginx: no se probó con `nginx -t` (no hay imagen de Nginx en esta máquina); la sintaxis es la estándar.
+- Los RIF de los tests son uno publicado (Banesco) y valores calculados a mano; el caso resto 1 no se ha contrastado con un RIF real (16.4).
+- Nada de esto se ha probado en un VPS real ni con tablas de producción.

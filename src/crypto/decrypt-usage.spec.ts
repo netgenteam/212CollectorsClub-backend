@@ -13,11 +13,19 @@ import { describe, expect, it } from 'vitest';
  * (`createDecipher`, `createDecipheriv`, `privateDecrypt`, `subtle.decrypt`). Comments are
  * ignored; a literal split to dodge the scan (`'dec' + 'rypt'`) is flagged too.
  */
+/**
+ * Exact FILES, not directories (Story 20.4 narrowed it): a new file in `src/crypto/` is not
+ * allowed to decrypt just for living there. Each entry must really use `decrypt` (checked below),
+ * so an entry cannot outlive its need.
+ */
 export const ALLOWLIST: string[] = [
-  `src${sep}crypto${sep}`,
-  // Story 20.4: admin reveal endpoint (audited before answering).
-  // `src${sep}orders${sep}admin-order-reveal...`
-  // Future invoice generator.
+  // The service itself: encrypt/decrypt, `checkStored`, `typeOfStored`, re-encryption.
+  `src${sep}crypto${sep}id-doc-crypto.service.ts`,
+  // THE masked serializer of every non-admin view (decrypts, masks, never returns the value).
+  `src${sep}crypto${sep}id-doc-serialize.ts`,
+  // Story 20.4: the audited admin reveal (commits the audit event before it returns the value).
+  `src${sep}crypto${sep}id-doc-reveal.service.ts`,
+  // Future invoice generator: add its file here when it exists (a privacy decision).
 ];
 
 const SCANNED_ROOTS = ['src', 'scripts', 'prisma'];
@@ -71,6 +79,16 @@ describe('decrypt usage is confined (AC5, widened in 20.3)', () => {
       .filter((f) => !/\.spec\.ts$/.test(f))
       .filter((f) => usesDecrypt(readFileSync(join(root, f), 'utf8')));
     expect(offenders).toEqual([]);
+  });
+
+  it('the allowlist is minimal: every entry exists and uses decrypt', () => {
+    const root = process.cwd();
+    for (const f of ALLOWLIST) {
+      expect(f.endsWith('.ts'), `${f} must be a file, not a directory`).toBe(
+        true,
+      );
+      expect(usesDecrypt(readFileSync(join(root, f), 'utf8')), f).toBe(true);
+    }
   });
 
   it.each([

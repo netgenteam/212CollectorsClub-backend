@@ -1,5 +1,5 @@
 import { newIdDocInTextRegex } from '../common/id-doc-pattern.js';
-import { normalizeIdDoc } from './id-doc-normalize.js';
+import { normalizeIdDoc, type ParsedIdDoc } from './id-doc-normalize.js';
 
 /**
  * Story 20.3 (FR-123, FR-125, NFR-20.5): the legacy storefront sent the cedula INSIDE the
@@ -7,9 +7,18 @@ import { normalizeIdDoc } from './id-doc-normalize.js';
  * checkout (extract + encrypt), the views (clean on read) and the backfill (extract + verify +
  * clean) all use it, so they can never disagree.
  *
- * Only an UNAMBIGUOUS token is extracted: a standalone type letter (V E J G P) followed by what
- * `normalizeIdDoc` parses (5..11 digits, optionally grouped or with a RIF check digit). "Ana 3era",
- * "Calle 12345" or "Ave 5to" have no type letter + digits token and are returned untouched.
+ * Only an UNAMBIGUOUS token is extracted, and "unambiguous" follows the buyer ID rules of
+ * `checkout/buyer-id.ts` (Story 20.4): a standalone type letter (V E J G P) followed by a number
+ * of the length that type really has: V/E 6-9 digits, J/G 9 digits (RIF, check digit included),
+ * P 6-12 letters/digits. Fewer digits is a street, a lot or a company name, not a cedula:
+ * `Inversiones G-20000 C.A.` and `Edificio P-12345` are left alone (before 20.4 they were turned
+ * into `Inversiones C.A.` plus a fake encrypted cedula `G-20000`). The one case with no letter:
+ * an unmistakable LABEL (`CI`, `C.I.`, `cédula`, `ced.`) followed by 6-9 digits is a V
+ * (`Ana CI 12345678`). `RIF` and `pasaporte` labels need their type letter (a bare number after
+ * them cannot be typed). "Ana 3era", "Calle 12345" or "Ave 5to" are returned untouched.
+ *
+ * The RIF check digit is deliberately NOT verified here: a mistyped RIF is still a RIF and must
+ * not stay in clear in the name.
  */
 export interface NameSplit {
   /** The recipient name without any cedula (the original string, untouched, when none was found). */
@@ -33,6 +42,29 @@ const LEFT = new RegExp(
   'i',
 );
 const RIGHT = /^\s*([)\]}])?/;
+/**
+ * A bare number (no type letter) right after a cedula LABEL: `CI 12345678`, `C.I.: 12.345.678`,
+ * `cédula 12345678`. The label must start a word (`Maci 12345678` is not a label). 6-9 digits,
+ * contiguous or grouped by thousands.
+ */
+const LABELED_BARE = new RegExp(
+  String.raw`(?<![\p{L}\p{N}])(?:c\.?\s?i\.?|c[eé]dula|ced\.?)\s*[:.#=-]?\s*((?:\d{6,9}|\d{1,3}(?:[.\s]\d{3}){2}))(?![\p{L}\p{N}]|[.\s-]?\d)`,
+  'giu',
+);
+
+/** Whether a normalized token has the digit count its type really has (buyer-id.ts rules, no check digit). */
+function plausibleCedula(n: ParsedIdDoc): boolean {
+  switch (n.type) {
+    case 'V':
+    case 'E':
+      return /^\d{6,9}$/.test(n.digits);
+    case 'J':
+    case 'G':
+      return /^\d{9}$/.test(n.digits);
+    case 'P':
+      return /^[A-Z0-9]{6,12}$/.test(n.digits);
+  }
+}
 const EDGE_JUNK = new RegExp(String.raw`^${SEP}+|${SEP}+$`, 'g');
 
 export function splitIdDocFromName(raw: string): NameSplit {
@@ -51,7 +83,7 @@ export function splitIdDocFromName(raw: string): NameSplit {
   const hits: { start: number; end: number; canonical: string }[] = [];
   for (const m of text.matchAll(newIdDocInTextRegex())) {
     const n = normalizeIdDoc(m[0]);
-    if (n && !n.unparsed) {
+    if (n && !n.unparsed && plausibleCedula(n)) {
       hits.push({
         start: m.index,
         end: m.index + m[0].length,
@@ -59,7 +91,17 @@ export function splitIdDocFromName(raw: string): NameSplit {
       });
     }
   }
+  // `CI 12345678` (label, no letter): the digits are the hit, the label is removed with it below.
+  for (const m of text.matchAll(LABELED_BARE)) {
+    const digits = m[1];
+    const start = m.index + m[0].length - digits.length;
+    const n = normalizeIdDoc(`V${digits}`);
+    if (n && !n.unparsed && plausibleCedula(n)) {
+      hits.push({ start, end: start + digits.length, canonical: n.canonical });
+    }
+  }
   if (hits.length === 0) return untouched;
+  hits.sort((a, b) => a.start - b.start);
 
   let out = text;
   // Right to left, so the indexes of the hits still to process stay valid.

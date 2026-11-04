@@ -11,6 +11,7 @@ import { createGlobalValidationPipe } from './../src/common/global-validation-pi
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { expectOnlyEncrypted } from './helpers/iddoc-assert.js';
 import { registerConsent } from './helpers/legal-consent.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 const PASSWORD = 'Correct-horse-17-4!';
 interface Err {
@@ -88,30 +89,33 @@ describe('Checkout shipping (e2e, Story 17.4)', { timeout: 30000 }, () => {
     return { id: c.id, s: cookieOf(res, 'cc_session') };
   }
 
-  const flat = (over: Record<string, unknown> = {}) => ({
-    paymentRail: 'pago_movil',
-    fulfillmentType: 'delivery',
-    recipientName: 'Maria Perez',
-    recipientPhone: '0412-1234567',
-    addressLine1: 'Av. Test 1',
-    city: 'Caracas',
-    state: 'Distrito Capital',
-    ...over,
-  });
-  const fresh = (over: Record<string, unknown> = {}) => ({
-    paymentRail: 'pago_movil',
-    recipientName: 'Maria Perez',
-    recipientPhone: '+58 (412) 123-4567',
-    recipientIdDoc: 'v12345678',
-    deliveryMode: 'home_delivery',
-    shippingAgencyId: mrw.id,
-    state: 'Miranda',
-    municipality: 'Baruta',
-    parish: 'Las Minas',
-    addressLine1: 'Calle 1, Casa 2',
-    referencePoint: 'Frente a la plaza',
-    ...over,
-  });
+  // Story 20.4: the bodies carry the buyer fiscal ID, as the storefront of 20.9 will send them.
+  const flat = (over: Record<string, unknown> = {}) =>
+    withBuyerId({
+      paymentRail: 'pago_movil',
+      fulfillmentType: 'delivery',
+      recipientName: 'Maria Perez',
+      recipientPhone: '0412-1234567',
+      addressLine1: 'Av. Test 1',
+      city: 'Caracas',
+      state: 'Distrito Capital',
+      ...over,
+    });
+  const fresh = (over: Record<string, unknown> = {}) =>
+    withBuyerId({
+      paymentRail: 'pago_movil',
+      recipientName: 'Maria Perez',
+      recipientPhone: '+58 (412) 123-4567',
+      recipientIdDoc: 'v12345678',
+      deliveryMode: 'home_delivery',
+      shippingAgencyId: mrw.id,
+      state: 'Miranda',
+      municipality: 'Baruta',
+      parish: 'Las Minas',
+      addressLine1: 'Calle 1, Casa 2',
+      referencePoint: 'Frente a la plaza',
+      ...over,
+    });
 
   async function guestCart(): Promise<string> {
     const add = await request(server())

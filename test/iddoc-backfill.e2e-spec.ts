@@ -701,14 +701,18 @@ describe('names that carry a cedula (legacy storefront format)', () => {
       'Eva Soto, E-81234567',
       'Ana 3era',
       'Pedro Pérez',
+      // Story 20.4: a short typed token is a company/lot, not a cedula; a label with no letter is a V.
+      'Inversiones G-20000 C.A.',
+      'Edificio P-12345',
+      'Marcos CI 12345679',
     ];
     const ids: string[] = [];
     for (const n of names) ids.push(await orderWith(n));
     const addr = await addressWith('Marta (V-70123458)', null);
     const m = await svc().backfill(opts);
     expect(m.outcome).toBe('ok');
-    expect(m['nameExtracted']).toBe(4);
-    expect(m['nameCleaned']).toBe(4);
+    expect(m['nameExtracted']).toBe(5);
+    expect(m['nameCleaned']).toBe(5);
     noValues(JSON.stringify(m));
 
     const expected: Array<[string, string | null, string | null]> = [
@@ -717,6 +721,9 @@ describe('names that carry a cedula (legacy storefront format)', () => {
       ['Eva Soto', 'E-81234567', null],
       ['Ana 3era', null, null],
       ['Pedro Pérez', null, null],
+      ['Inversiones G-20000 C.A.', null, null], // untouched, no fake cedula encrypted
+      ['Edificio P-12345', null, null],
+      ['Marcos', 'V-12345679', null],
     ];
     for (const [i, [name, ced]] of expected.entries()) {
       const r = await row('Orders', ids[i]);

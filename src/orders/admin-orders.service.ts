@@ -1,5 +1,9 @@
 import { stripIdDocFromName } from '../crypto/id-doc-in-name.js';
-import { Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable } from '@nestjs/common';
+import { ApiException } from '../common/api-exception.js';
+import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
+import { normalizeIdDoc } from '../crypto/id-doc-normalize.js';
+import { validateBuyerId } from '../checkout/buyer-id.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import type { Order } from '../generated/prisma/client.js';
@@ -76,7 +80,35 @@ interface ReconciliationRollupRow {
  */
 @Injectable()
 export class AdminOrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly idDocCrypto: IdDocCryptoService,
+  ) {}
+
+  /**
+   * Story 20.4 (AC6): blind index of an `idDoc` search value, or 400 ID_DOC_FILTER_INVALID. The
+   * rules are the buyer ID rules without the RIF check digit (searching a mistyped RIF is
+   * legitimate: it just finds nothing). The value is NEVER echoed (not in the message, not in
+   * `details`).
+   */
+  idDocBlindOrThrow(raw: string): string {
+    const bad = (reason: string): ApiException =>
+      new ApiException(
+        HttpStatus.BAD_REQUEST,
+        'ID_DOC_FILTER_INVALID',
+        'idDoc must be a complete ID document: type letter (V, E, J, G, P) plus number.',
+        { field: 'idDoc', reason },
+      );
+    const n = normalizeIdDoc(raw);
+    if (!n || n.unparsed) throw bad('INVALID_FORMAT');
+    try {
+      validateBuyerId({ type: n.type, number: n.digits }, { strictRif: false });
+    } catch (err) {
+      if (err instanceof ApiException) throw bad('INVALID_FORMAT');
+      throw err;
+    }
+    return this.idDocCrypto.blindIndex(n.type, n.digits);
+  }
 
   async listOrders(
     query: ListAdminOrdersQueryDto,
@@ -99,6 +131,12 @@ export class AdminOrdersService {
     }
     if (query.paymentRail) {
       where.paymentRail = query.paymentRail.toUpperCase() as PaymentRail;
+    }
+
+    // Story 20.4 (AC6): exact match on either blind index (both indexed); never LIKE.
+    if (query.idDoc !== undefined) {
+      const blind = this.idDocBlindOrThrow(query.idDoc);
+      where.OR = [{ recipientIdDocBlind: blind }, { buyerIdDocBlind: blind }];
     }
 
     // Story 14.5b (AD-50): Stripe_Webhook_Events has no FK to Order, so the

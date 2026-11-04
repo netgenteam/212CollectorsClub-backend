@@ -27,7 +27,15 @@ import type { Response } from 'express';
 import { ApiException } from '../common/api-exception.js';
 import { AdminAuthGuard } from '../common/admin-auth.guard.js';
 import type { RequestWithAdminUser } from '../common/admin-auth.guard.js';
+import {
+  IdDocRateLimitedError,
+  IdDocRevealService,
+} from '../crypto/id-doc-reveal.service.js';
 import { AdminOrdersService } from './admin-orders.service.js';
+import {
+  RevealIdDocDto,
+  RevealIdDocResponseDto,
+} from './dto/reveal-id-doc.dto.js';
 import { OrderLookupService } from './order-lookup.service.js';
 import { AdminOrderDetailResponseDto } from './dto/admin-order-detail-response.dto.js';
 import { AdminOrderPaymentService } from './admin-order-payment.service.js';
@@ -104,6 +112,7 @@ export class AdminOrdersController {
     private readonly adminOrderFulfillmentService: AdminOrderFulfillmentService,
     private readonly orderLookup: OrderLookupService,
     private readonly adminOrderTrackingService: AdminOrderTrackingService,
+    private readonly idDocReveal: IdDocRevealService,
   ) {}
 
   @Get()
@@ -401,5 +410,65 @@ export class AdminOrdersController {
       dto,
       request.user,
     );
+  }
+
+  @Post(':orderId/reveal-id-doc')
+  @HttpCode(HttpStatus.OK)
+  @ApiParam({ name: 'orderId', format: 'uuid' })
+  @ApiBody({ type: RevealIdDocDto })
+  @ApiOperation({
+    summary: 'Reveal the full recipient/buyer ID document (admin, audited)',
+    description:
+      "Story 20.4 (FR-125/126, AD-97). Returns the FULL cedula/RIF/passport of the order (`field`: recipient or buyer). Flow: the stored value is decrypted and checked in memory against its blind index; then an audit transaction of its own is COMMITTED first (it counts this admin's `ID_DOC_REVEALED` events of the last hour inside the audit chain lock and, if there are ID_DOC_REVEAL_MAX_PER_HOUR (30) or more, answers 429 with `Retry-After`; otherwise it inserts the event: admin, order, field, request id, IP, never the value); only after that commit the value is returned, with `Cache-Control: no-store`. If the audit cannot be written the value is NOT delivered (503 AUDIT_UNAVAILABLE). `unparsed: true` flags a legacy value with no recognizable type (no blind index to cross-check).",
+  })
+  @ApiResponse({ status: HttpStatus.OK, type: RevealIdDocResponseDto })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Invalid orderId or `field` (or an unknown body field).',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'errorCode INVALID_ADMIN_TOKEN.',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description:
+      'errorCode ORDER_NOT_FOUND, or errorCode ID_DOC_NOT_FOUND: the order has no ID document in that field (e.g. a historical order without buyerId).',
+  })
+  @ApiResponse({
+    status: HttpStatus.TOO_MANY_REQUESTS,
+    description:
+      'errorCode ID_DOC_REVEAL_RATE_LIMITED: this admin already revealed ID_DOC_REVEAL_MAX_PER_HOUR (30) documents in the last hour; `Retry-After` header (seconds). No event is written and no value is delivered.',
+  })
+  @ApiResponse({
+    status: HttpStatus.INTERNAL_SERVER_ERROR,
+    description:
+      'errorCode ID_DOC_INTEGRITY_FAILED: the stored value cannot be read back, or does not match the row blind index (e.g. a ciphertext moved from another order). Nothing is delivered and nothing is audited; `details.reason` says why. Logged for review.',
+  })
+  @ApiResponse({
+    status: HttpStatus.SERVICE_UNAVAILABLE,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the audit event could not be committed (database error or chain lock wait expired). The value is NOT delivered; retry in a few seconds.',
+  })
+  async revealIdDoc(
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Body(strictBody(RevealIdDocDto)) dto: Readonly<RevealIdDocDto>,
+    @Req() request: RequestWithAdminUser,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<RevealIdDocResponseDto> {
+    // Every answer of this route (value or error) is uncacheable.
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      return await this.idDocReveal.revealOrderIdDoc(
+        orderId,
+        dto.field,
+        request.user,
+      );
+    } catch (err) {
+      if (err instanceof IdDocRateLimitedError) {
+        res.setHeader('Retry-After', String(err.retryAfterSec));
+      }
+      throw err;
+    }
   }
 }
