@@ -98,6 +98,20 @@ const SAMPLES: Record<AuditAction, AuditPayload[]> = {
   ADMIN_DISABLED: [{ emailHash: sha, disabled: true }],
   CUSTOMER_ANONYMIZED: [
     { emailHash: sha, addressesDeleted: 3, sessionsRevoked: 1 },
+    // the real payload of Story 20.6 (CustomerAnonymizationService)
+    {
+      customerId: uuid(),
+      emailHash: sha,
+      addressesDeleted: 3,
+      sessionsRevoked: 2,
+      credentialsDeleted: 1,
+      verificationTokensDeleted: 0,
+      cartsDeleted: 1,
+      wishlistsDeleted: 1,
+      contactInquiriesDeleted: 2,
+      ordersRetained: 500,
+      consentRecordsRetained: 3,
+    },
   ],
   ID_DOC_REVEALED: [
     { field: 'buyer', orderId: uuid(), idDocType: 'V', revealedInHour: 7 },

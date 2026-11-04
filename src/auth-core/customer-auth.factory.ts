@@ -49,6 +49,9 @@ export function createCustomerAuth(
       modelName: 'customer',
       additionalFields: {
         phone: { type: 'string', required: false, input: false },
+        // Story 20.6: read-only here. Returned with every session so the guard can refuse the
+        // session of an anonymized account without one more query per request.
+        anonymizedAt: { type: 'date', required: false, input: false },
       },
     },
     session: {

@@ -2,7 +2,6 @@ import { fakeAudit } from '../../test/helpers/fake-audit.js';
 import { makeTestCrypto } from '../../test/helpers/iddoc-test-crypto.js';
 import { FxRateService } from '../fx/fx-rate.service.js';
 import { Prisma } from '../generated/prisma/client.js';
-import { resetCustomerAnonymizedAtProbe } from './checkout-account-lock.js';
 import { CheckoutService } from './checkout.service.js';
 import {
   CheckoutFulfillmentType,
@@ -28,7 +27,6 @@ describe('CheckoutService (account)', () => {
   let service: CheckoutService;
 
   beforeEach(() => {
-    resetCustomerAnonymizedAtProbe();
     tx = {
       cart: { findFirst: vi.fn(), delete: vi.fn() },
       fxRateSetting: { findUnique: vi.fn() },
@@ -36,6 +34,8 @@ describe('CheckoutService (account)', () => {
       stockHold: { create: vi.fn() },
       orderStatusHistory: { create: vi.fn() },
       $executeRaw: vi.fn().mockResolvedValue(1),
+      // Story 20.6: the FOR SHARE of the account is always the first statement of the transaction.
+      $queryRaw: vi.fn().mockResolvedValue([{ anonymizedAt: null }]),
     } as never;
     tx.cart.findFirst.mockResolvedValue({
       id: 'cart-1',
@@ -67,8 +67,6 @@ describe('CheckoutService (account)', () => {
     service = new CheckoutService(
       {
         $transaction: transaction,
-        // The anonymizedAt probe (a missing $queryRaw used to be swallowed as "absent": fail-open).
-        $queryRaw: vi.fn().mockResolvedValue([{ present: false }]),
         customer: { findUnique: customerFind },
       } as never,
       {} as never,

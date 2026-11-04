@@ -33,6 +33,7 @@ describe('CustomerAuthService', () => {
       update: ReturnType<typeof vi.fn>;
     };
     customerSession: { deleteMany: ReturnType<typeof vi.fn> };
+    $executeRaw: ReturnType<typeof vi.fn>;
   };
   let service: CustomerAuthService;
   /** Story 19.4: ConsentService double (its own rules are in consent.service.spec.ts). */
@@ -54,6 +55,7 @@ describe('CustomerAuthService', () => {
     prisma = {
       customer: { findUnique: vi.fn(), count: vi.fn(), update: vi.fn() },
       customerSession: { deleteMany: vi.fn() },
+      $executeRaw: vi.fn().mockResolvedValue(0),
     };
     sendMail = vi.fn().mockResolvedValue(undefined);
     verification = {
@@ -238,6 +240,84 @@ describe('CustomerAuthService', () => {
     });
   });
 
+  describe('Story 20.6: anonymized accounts', () => {
+    it('login with the reserved domain: the same generic 401 after ONE dummy hash, BetterAuth is never called', async () => {
+      await expect(
+        service.login('deleted+x@Anonymized.Invalid', 'whatever1'),
+      ).rejects.toMatchObject({
+        status: 401,
+        response: { errorCode: 'INVALID_CUSTOMER_CREDENTIALS' },
+      });
+      expect(argon2.hash).toHaveBeenCalledTimes(1);
+      expect(signInEmail).not.toHaveBeenCalled();
+    });
+
+    it('a login that raced the anonymization is revoked and answered with the generic 401', async () => {
+      signInEmail.mockResolvedValue({
+        headers: new Headers(),
+        response: { user: { id: 'u1' } },
+      });
+      prisma.customer.findUnique.mockResolvedValue({
+        id: 'u1',
+        email: 'x@y.co',
+        anonymizedAt: new Date(),
+      });
+      await expect(service.login('x@y.co', 'whatever1')).rejects.toMatchObject({
+        status: 401,
+        response: { errorCode: 'INVALID_CUSTOMER_CREDENTIALS' },
+      });
+      // sessions and credentials of an anonymized account are deleted
+      expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
+    });
+
+    it('login: the profile never carries anonymizedAt', async () => {
+      signInEmail.mockResolvedValue({
+        headers: new Headers(),
+        response: { user: { id: 'u1' } },
+      });
+      prisma.customer.findUnique.mockResolvedValue({
+        id: 'u1',
+        email: 'a@b.co',
+        anonymizedAt: null,
+      });
+      const r = await service.login('a@b.co', 'x');
+      expect(r.customer).not.toHaveProperty('anonymizedAt');
+    });
+
+    it('register with the reserved domain is 400 EMAIL_DOMAIN_NOT_ALLOWED before anything runs', async () => {
+      await expect(
+        service.register({ ...DTO, email: 'deleted+u@anonymized.invalid' }),
+      ).rejects.toMatchObject({
+        status: 400,
+        response: { errorCode: 'EMAIL_DOMAIN_NOT_ALLOWED' },
+      });
+      expect(signUpEmail).not.toHaveBeenCalled();
+      expect(consent.assertAccepted).not.toHaveBeenCalled();
+    });
+
+    it('forgotPassword counts only accounts that are not anonymized', async () => {
+      prisma.customer.count.mockResolvedValue(0);
+      await service.forgotPassword('a@b.co');
+      expect(prisma.customer.count).toHaveBeenCalledWith({
+        where: { email: 'a@b.co', anonymizedAt: null },
+      });
+      expect(requestPasswordReset).not.toHaveBeenCalled();
+    });
+
+    it('resendVerification: an anonymized account gets no token and no mail', async () => {
+      prisma.customer.findUnique.mockResolvedValue({
+        id: 'u1',
+        name: 'x',
+        emailVerified: false,
+        anonymizedAt: new Date(),
+      });
+      await service.resendVerification('a@b.co');
+      await new Promise((r) => setTimeout(r, 20));
+      expect(verification.create).not.toHaveBeenCalled();
+      expect(sendMail).not.toHaveBeenCalled();
+    });
+  });
+
   it('updateProfile: only name/phone reach Prisma; a vanished customer is 401', async () => {
     prisma.customer.update.mockResolvedValue({ id: 'u1' });
     await service.updateProfile('u1', { name: 'N' });
@@ -306,7 +386,7 @@ describe('CustomerAuthService', () => {
       verification.deleteMany.mockResolvedValue({ count: 1 });
       await service.verifyEmail('tok');
       expect(prisma.customer.updateMany).toHaveBeenCalledWith({
-        where: { id: 'u1' },
+        where: { id: 'u1', anonymizedAt: null },
         data: { emailVerified: true },
       });
     });

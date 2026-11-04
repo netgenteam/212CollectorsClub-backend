@@ -174,7 +174,10 @@ export class AdminOrdersController {
     @Body(strictBody(SearchAdminOrdersDto))
     dto: Readonly<SearchAdminOrdersDto>,
     @Res({ passthrough: true }) res: Response,
+    @Req() request: Request,
   ): Promise<PaginatedAdminOrdersResponseDto> {
+    // Story 20.6: `POST /admin/orders/search?idDoc=...` is as bad as the GET: the URL is logged.
+    assertNoIdDocInQuery(request.query, 'POST /admin/orders/search');
     // Orders of a person found by cedula: never cached by a proxy or the browser.
     res.setHeader('Cache-Control', 'no-store');
     const { idDoc, ...filters } = dto;

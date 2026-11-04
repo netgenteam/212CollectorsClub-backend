@@ -62,6 +62,31 @@ describe('CustomerAuthGuard / OptionalCustomerGuard', () => {
     ).rejects.toMatchObject({ status: 401 });
   });
 
+  it('Story 20.6: a session whose account is anonymized is refused at once (guard) and treated as a guest (optional guard)', async () => {
+    const getSession = vi.fn().mockResolvedValue({
+      response: {
+        ...SESSION,
+        user: { ...SESSION.user, anonymizedAt: new Date() },
+      },
+      headers: new Headers(),
+    });
+    const strict = makeContext('cc_session=x');
+    await expect(
+      new CustomerAuthGuard(authWith(getSession)).canActivate(strict.context),
+    ).rejects.toMatchObject({
+      status: 401,
+      response: { errorCode: 'INVALID_CUSTOMER_TOKEN' },
+    });
+    expect(strict.request.customer).toBeUndefined();
+    const optional = makeContext('cc_session=x');
+    await expect(
+      new OptionalCustomerGuard(authWith(getSession)).canActivate(
+        optional.context,
+      ),
+    ).resolves.toBe(true);
+    expect(optional.request.customer).toBeUndefined();
+  });
+
   it('attaches a hash-free customer, forwards only the Cookie header and re-emits a refreshed Set-Cookie', async () => {
     const headers = new Headers();
     headers.append('set-cookie', 'cc_session=new; Path=/; HttpOnly');

@@ -6,6 +6,7 @@ import { APIError } from 'better-auth/api';
 import { CUSTOMER_AUTH } from '../auth-core/auth-core.constants.js';
 import type { CustomerAuth } from '../auth-core/customer-auth.factory.js';
 import { ApiException } from '../common/api-exception.js';
+import { isAnonymizedEmail } from '../common/anonymized-email.js';
 import { invalidCustomerTokenException } from '../common/customer-auth.guard.js';
 import {
   alreadyRegisteredEmail,
@@ -104,6 +105,15 @@ export class CustomerAuthService {
    * "you already have an account" email (Story 12.4), both best-effort.
    */
   async register(dto: RegisterCustomerDto): Promise<void> {
+    // Story 20.6: the DTO already refuses it; this is the same rule for any caller that skips it.
+    // It depends on the domain only, never on whether an account exists (no oracle).
+    if (isAnonymizedEmail(dto.email)) {
+      throw new ApiException(
+        HttpStatus.BAD_REQUEST,
+        'EMAIL_DOMAIN_NOT_ALLOWED',
+        'That email domain cannot be registered.',
+      );
+    }
     // Constant-time floor: a real signup writes user+account rows that the
     // duplicate branch skips (~10 ms). Padding both to a common minimum hides
     // that residue; the floor sits well above the Argon2id cost.
@@ -246,9 +256,16 @@ export class CustomerAuthService {
   async resendVerification(email: string): Promise<void> {
     const customer = await this.prisma.customer.findUnique({
       where: { email },
-      select: { id: true, name: true, emailVerified: true },
+      select: {
+        id: true,
+        name: true,
+        emailVerified: true,
+        anonymizedAt: true,
+      },
     });
-    if (!customer || customer.emailVerified) {
+    // Story 20.6: an anonymized account (its placeholder address cannot receive mail) never
+    // gets a token; the answer and the cost are those of "unknown email".
+    if (!customer || customer.emailVerified || customer.anonymizedAt) {
       return;
     }
     void this.issueVerificationToken(customer.id)
@@ -281,7 +298,8 @@ export class CustomerAuthService {
       throw invalidVerificationTokenException();
     }
     await this.prisma.customer.updateMany({
-      where: { id: row.value },
+      // Story 20.6: a verification token that raced the anonymization must not revive the flag.
+      where: { id: row.value, anonymizedAt: null },
       data: { emailVerified: true },
     });
   }
@@ -291,7 +309,10 @@ export class CustomerAuthService {
    * (non-awaited) reset email through BetterAuth's one-time token.
    */
   async forgotPassword(email: string): Promise<void> {
-    const exists = await this.prisma.customer.count({ where: { email } });
+    // Story 20.6: an anonymized account counts as "no account" (one lookup either way).
+    const exists = await this.prisma.customer.count({
+      where: { email, anonymizedAt: null },
+    });
     if (exists === 0) {
       return;
     }
@@ -350,6 +371,7 @@ export class CustomerAuthService {
       throw err;
     }
     if (!owner) return;
+    await this.scrubIfAnonymized(owner.value);
     try {
       await this.audit.transaction((_tx, audit) => {
         audit.add({
@@ -410,6 +432,12 @@ export class CustomerAuthService {
     email: string,
     password: string,
   ): Promise<{ customer: CustomerResponseDto; setCookies: string[] }> {
+    // Story 20.6: nobody logs in as a placeholder address of an anonymized account. Same 401 and
+    // the same cost (one Argon2id hash) as an unknown email: no oracle.
+    if (isAnonymizedEmail(email)) {
+      await argon2.hash(password, { type: argon2.argon2id });
+      throw invalidCredentialsException();
+    }
     let result;
     try {
       result = await this.customerAuth.api.signInEmail({
@@ -422,14 +450,50 @@ export class CustomerAuthService {
       }
       throw err;
     }
-    const customer = await this.prisma.customer.findUnique({
+    const found = await this.prisma.customer.findUnique({
       where: { id: result.response.user.id },
-      select: PROFILE_SELECT,
+      select: { ...PROFILE_SELECT, anonymizedAt: true },
     });
-    if (!customer) {
+    if (!found) {
       throw invalidCredentialsException();
     }
+    // Story 20.6: a login that read the credential just before the anonymization committed would
+    // otherwise end with a live session on an anonymized account (the session insert waits for
+    // the `FOR UPDATE` and then succeeds: the row is kept). Revoke what it created, answer the
+    // generic 401. (`CustomerAuthGuard` also refuses such a session on its own.)
+    if (found.anonymizedAt) {
+      await this.scrubIfAnonymized(found.id);
+      throw invalidCredentialsException();
+    }
+    // `anonymizedAt` is internal: the profile keeps its documented shape.
+    const customer: CustomerResponseDto = {
+      id: found.id,
+      email: found.email,
+      name: found.name,
+      phone: found.phone,
+      emailVerified: found.emailVerified,
+    };
     return { customer, setCookies: result.headers.getSetCookie() };
+  }
+
+  /**
+   * Story 20.6: deletes the credentials and sessions of `customerId` if (and only if) the account
+   * is anonymized. Covers the two races the anonymization transaction cannot see: a login or a
+   * reset-password that finished on BetterAuth's own connection after the commit.
+   */
+  private async scrubIfAnonymized(customerId: string): Promise<void> {
+    try {
+      await this.prisma
+        .$executeRaw`DELETE FROM "Customer_Sessions" WHERE "userId" = ${customerId}::uuid
+        AND EXISTS (SELECT 1 FROM "Customers" WHERE "id" = ${customerId}::uuid AND "anonymizedAt" IS NOT NULL)`;
+      await this.prisma
+        .$executeRaw`DELETE FROM "Customer_Accounts" WHERE "userId" = ${customerId}::uuid
+        AND EXISTS (SELECT 1 FROM "Customers" WHERE "id" = ${customerId}::uuid AND "anonymizedAt" IS NOT NULL)`;
+    } catch (err) {
+      this.logger.error(
+        `Could not scrub credentials of anonymized customer ${customerId}: ${String(err)}`,
+      );
+    }
   }
 
   async updateProfile(

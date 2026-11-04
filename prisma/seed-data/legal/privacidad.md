@@ -11,6 +11,7 @@ El responsable del tratamiento es **[[RAZON_SOCIAL]]**, RIF **[[RIF]]**, domicil
 ## 2. Qué datos recopilamos
 
 - **Cuenta:** nombre, correo electrónico y contraseña (la contraseña se guarda con un algoritmo de hash, nunca en claro).
+- **Libreta de direcciones de tu cuenta:** si guardas direcciones en tu cuenta, guardamos en nuestros servidores el nombre, el teléfono, la dirección, la agencia de envío y la cédula del destinatario (esta última **cifrada**). [[CONFIRMAR_LIBRETA_DE_DIRECCIONES_EN_SERVIDOR]]
 - **Compra y envío:** nombre y teléfono del destinatario, dirección, agencia de envío, y número de **cédula o RIF** del comprador y/o del destinatario (obligatorio para facturar y despachar [[CONFIRMAR_CHECKOUT_REQUIRE_SHIPPING_ACTIVO_PARA_CEDULA_OBLIGATORIA]]). [[CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA]]
 - **Pago:** datos del pedido y, si pagas por Pago Móvil, el **comprobante** que subas. Si pagas con tarjeta, los datos de la tarjeta los recibe Stripe; la Tienda no los guarda.
 - **Sesión:** dirección IP y agente de usuario (navegador) asociados a tu sesión iniciada, por seguridad.
@@ -45,8 +46,8 @@ El número de cédula o RIF es obligatorio en la factura y en el despacho. Se gu
 
 ## 7. Cuánto tiempo los conservamos
 
-- Cuenta: mientras la mantengas.
-- Libreta de direcciones, productos guardados y miniaturas del carrito: viven solo en el almacenamiento local de tu navegador (sección 2), no en nuestros servidores; permanecen hasta que los borres desde tu navegador.
+- Cuenta: mientras la mantengas. Si pides cerrarla, se **anonimiza** (sección 9): se borran tus credenciales, sesiones, libreta de direcciones de la cuenta, carrito, lista de deseos, enlaces pendientes y mensajes de contacto con tu correo; se conservan los pedidos y sus soportes fiscales. [[CONFIRMAR_BORRADO_DE_CUENTA_IMPLEMENTADO]]
+- Libreta de direcciones, productos guardados y miniaturas del carrito que están en el almacenamiento local de tu navegador (sección 2): no están en nuestros servidores; permanecen hasta que los borres desde tu navegador. Las direcciones guardadas **en tu cuenta** sí están en nuestros servidores y se borran cuando cierras la cuenta (sección 9). [[CONFIRMAR_LIBRETA_DE_DIRECCIONES_EN_SERVIDOR]]
 - Pedidos y datos de factura: durante el plazo fiscal indicado arriba.
 - Sesiones (IP y agente): la sesión vencida se elimina 7 días después de vencer, y la IP y el agente de usuario se anulan a los 90 días de creada la sesión (una sesión todavía activa no se toca). [[CONFIRMAR_BORRADO_DE_SESIONES_VENCIDAS_IMPLEMENTADO]]
 - Mensajes de contacto: [[PLAZO_CONSERVACION_CONTACTO]].
@@ -60,6 +61,13 @@ Cuando ves un producto, el sitio puede enviar una señal para sumar una vista a 
 ## 9. Tus derechos
 
 Conforme al artículo 28 de la Constitución puedes solicitar **acceso, rectificación y supresión** de tus datos, y oponerte a ciertos usos, escribiendo a [[EMAIL_CONTACTO]] desde el correo de tu cuenta. Podremos conservar los datos que la ley nos obligue a mantener (sección 6). Responderemos en un plazo razonable: [[PLAZO_RESPUESTA_DERECHOS]].
+
+**Cierre (supresión) de tu cuenta.** No es recomendable y solo lo hacemos cuando **tú** nos lo pides de forma expresa, desde el correo de tu cuenta o comprobando de otra manera que eres el titular. Es **irreversible**. Si tienes pedidos que aún no terminaron (pendientes de pago o de verificación, o pagados y sin enviar), primero deben terminar o cancelarse. Al cerrarla ocurre esto:
+
+- **Se borran de nuestros servidores:** tu contraseña y credenciales; todas tus sesiones iniciadas, que se cierran en todos tus dispositivos al instante; la libreta de direcciones de tu cuenta; tu carrito y tu lista de productos guardados; los enlaces pendientes de verificación y de recuperación de contraseña; y los mensajes que nos enviaste por el formulario de contacto con ese correo.
+- **Se reemplazan:** tu nombre por «Cuenta eliminada», y tu correo por una dirección inválida que no puede recibir mensajes; tu teléfono y tu imagen se borran. Tu correo original **queda libre**: si te registras otra vez con él, será una cuenta nueva, sin relación con la anterior (no recupera pedidos, listas ni aceptaciones).
+- **Se conservan:** los pedidos, pagos y comprobantes de pago, con el nombre, teléfono y dirección de entrega y la cédula o RIF **cifrados** de la factura, durante el plazo fiscal (sección 6); el registro de las versiones de documentos que aceptaste y la declaración de mayoría de edad (prueba legal, sección 3); y el registro interno de auditoría, que guarda quién cerró la cuenta, cuándo y con qué referencia de solicitud, pero **nunca tu correo** (solo una huella irreversible con clave que permite atender una disputa).
+- **No podemos borrar desde nuestros servidores:** lo que está guardado en tu propio navegador (la libreta de direcciones, los productos guardados y las miniaturas del carrito en `localStorage`, sección 2): bórralo tú desde los ajustes de tu navegador; y las copias de seguridad, que conservan los datos hasta que rotan ([[PLAZO_ROTACION_DE_COPIAS_DE_SEGURIDAD]]). [[CONFIRMAR_BORRADO_DE_CUENTA_IMPLEMENTADO]]
 
 ## 10. Seguridad
 

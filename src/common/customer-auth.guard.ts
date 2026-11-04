@@ -65,7 +65,14 @@ export async function resolveCustomer(
     }
     const user = session.user as typeof session.user & {
       phone?: string | null;
+      anonymizedAt?: Date | string | null;
     };
+    // Story 20.6 (AC6): a session that outlived the anonymization of its account (created by a
+    // login that raced it, or read in another process) is refused at once. The anonymization
+    // itself deletes every session; this closes the window of a concurrent login.
+    if (user.anonymizedAt) {
+      return false;
+    }
     request.customer = {
       id: user.id,
       email: user.email,

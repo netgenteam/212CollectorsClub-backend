@@ -63,7 +63,6 @@ import {
 } from './buyer-id.js';
 import {
   assertExpectedCustomer,
-  customerAnonymizedAtExists,
   lockCustomerForCheckout,
 } from './checkout-account-lock.js';
 import type { BuyerIdType } from '../generated/prisma/enums.js';
@@ -303,19 +302,14 @@ export class CheckoutService implements OnModuleInit {
     // transaction opens (synchronous, no I/O, a few microseconds).
     const preparedIdDoc = prepareCheckoutIdDoc(dto, this.idDocCrypto);
 
-    // Story 20.4 (AC4): decided before the transaction so the FOR SHARE below is its FIRST statement.
-    const lockAnonymized = customer
-      ? await customerAnonymizedAtExists(this.prisma)
-      : false;
-
     // Story 20.5 (AD-99): `CONSENT_RECORDED` is collected by `recordConsents` and flushed by
     // `audit.transaction` AFTER the callback: the chain-head lock is taken after the Products
     // rows (guarded UPDATEs), the Cart row and every other business lock, held only for the
     // INSERT and the COMMIT. Stripe is called after this transaction, never inside it.
     const result = await this.audit.transaction(
       async (tx, audit): Promise<CheckoutTransactionResult> => {
-        // Story 20.4 (AC4): FIRST statement with a session (hook for 20.6, see checkout-account-lock.ts).
-        if (customer && lockAnonymized) {
+        // Story 20.4 (AC4) / 20.6: FIRST statement with a session (see checkout-account-lock.ts).
+        if (customer) {
           await lockCustomerForCheckout(tx, customer.id);
         }
 

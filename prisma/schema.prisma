@@ -812,6 +812,9 @@ model AdminUser {
   adminsessions AdminSession[]
   adminaccounts AdminAccount[]
 
+  /// Story 20.6: back-reference for `Customer.anonymizedById`.
+  anonymizedCustomers Customer[] @relation("CustomerAnonymizedBy")
+
   @@map("Admin_Users")
 }
 
@@ -1065,6 +1068,15 @@ model Customer {
   image         String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
+  /// Story 20.6 (AD-98): set once by `POST /admin/customers/:id/anonymize` and never cleared. The row
+  /// is KEPT (orders, consent evidence and the fiscal history point at it); a non-null value means
+  /// the personal data is gone and the account can neither log in nor check out. Read with
+  /// `FOR SHARE` by the checkout (AD-97) and written under `FOR UPDATE` by the anonymization.
+  anonymizedAt   DateTime?  @db.Timestamptz(3)
+  /// The admin who did it; SetNull if that admin is ever removed (the audit event keeps the id).
+  anonymizedById String?    @db.Uuid
+  anonymizedBy   AdminUser? @relation("CustomerAnonymizedBy", fields: [anonymizedById], references: [id], onDelete: SetNull)
 
   /// The all-lowercase names are mandatory: the BetterAuth Prisma adapter
   /// joins through `<lowercased modelName>s`.

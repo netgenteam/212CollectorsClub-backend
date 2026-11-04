@@ -72,12 +72,7 @@ export class CheckoutController {
   @ApiResponse({
     status: HttpStatus.UNAUTHORIZED,
     description:
-      'errorCode INVALID_CUSTOMER_TOKEN (Story 20.4, hook for Story 20.6): the account of the session was anonymized or no longer exists (the first statement of the checkout transaction is `SELECT "anonymizedAt" ... FOR SHARE`; it is active once the 20.6 column exists).',
-  })
-  @ApiResponse({
-    status: HttpStatus.SERVICE_UNAVAILABLE,
-    description:
-      'errorCode CHECKOUT_UNAVAILABLE (Story 20.4): logged-in checkout only; the check that decides whether the account-anonymization lock applies failed twice (database trouble), so the checkout is refused (fail closed). Nothing is created; retry in a few seconds.',
+      'errorCode INVALID_CUSTOMER_TOKEN (Story 20.4/20.6): the account of the session was anonymized (or no longer exists) between the moment the session was read and the order. The first statement of the checkout transaction is `SELECT "anonymizedAt" ... FOR SHARE`, which waits for an anonymization in progress (`FOR UPDATE`) and then sees it. Nothing is created.',
   })
   @ApiResponse({
     status: HttpStatus.UNPROCESSABLE_ENTITY,

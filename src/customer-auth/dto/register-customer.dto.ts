@@ -11,6 +11,8 @@ import {
   MinLength,
 } from 'class-validator';
 
+import { IsNotAnonymizedEmailDomain } from '../../common/anonymized-email.js';
+
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
 const normalizeEmail = ({ value }: { value: unknown }): unknown =>
@@ -21,6 +23,8 @@ export class RegisterCustomerDto {
   @Transform(normalizeEmail)
   @IsEmail()
   @MaxLength(254)
+  // Story 20.6: `anonymized.invalid` is the reserved domain of deleted accounts.
+  @IsNotAnonymizedEmailDomain()
   email: string;
 
   @ApiProperty({ minLength: 8, maxLength: 128, example: 'a-strong-password' })

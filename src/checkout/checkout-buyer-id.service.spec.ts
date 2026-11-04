@@ -4,11 +4,6 @@ import { FxRateService } from '../fx/fx-rate.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { CheckoutService } from './checkout.service.js';
 import {
-  ABSENT_TTL_MS,
-  customerAnonymizedAtExists,
-  resetCustomerAnonymizedAtProbe,
-} from './checkout-account-lock.js';
-import {
   CheckoutFulfillmentType,
   CheckoutPaymentRail,
   type CheckoutDto,
@@ -52,7 +47,6 @@ describe('CheckoutService (story 20.4: buyer ID, expected account, account lock)
   let prisma: Record<string, unknown>;
   let customerFind: Mock;
   let transaction: Mock;
-  let probe: Mock;
   let shipping: { assertAgencyUsable: Mock };
   let calls: string[];
   let service: CheckoutService;
@@ -75,7 +69,6 @@ describe('CheckoutService (story 20.4: buyer ID, expected account, account lock)
   beforeEach(() => {
     saved = process.env.CHECKOUT_REQUIRE_BUYER_ID;
     delete process.env.CHECKOUT_REQUIRE_BUYER_ID;
-    resetCustomerAnonymizedAtProbe();
     calls = [];
     tx = {
       cart: {
@@ -124,10 +117,8 @@ describe('CheckoutService (story 20.4: buyer ID, expected account, account lock)
       .fn()
       .mockResolvedValue({ emailVerified: true, email: 'a@x.test' });
     transaction = vi.fn((cb: (t: unknown) => unknown) => cb(tx));
-    probe = vi.fn().mockResolvedValue([{ present: false }]);
     prisma = {
       $transaction: transaction,
-      $queryRaw: probe,
       customer: { findUnique: customerFind },
     };
     shipping = { assertAgencyUsable: vi.fn().mockResolvedValue(undefined) };
@@ -501,20 +492,21 @@ describe('CheckoutService (story 20.4: buyer ID, expected account, account lock)
     });
   });
 
-  describe('AC4: the account lock is the FIRST statement of the transaction (hook for 20.6)', () => {
-    it('with the column present: SELECT "anonymizedAt" ... FOR SHARE runs before consent, cart and Order', async () => {
-      probe.mockResolvedValue([{ present: true }]);
+  describe('AC4 (20.4) / AC6-7 (20.6): the account lock is the FIRST statement of the transaction', () => {
+    it('SELECT "anonymizedAt" ... FOR SHARE runs before consent, cart and Order', async () => {
       await service.checkout(null, AGENCY, { id: ACCOUNT_A });
       expect(calls.slice(0, 3)).toEqual(['lock', 'consent', 'cart']);
-      // The probe ran OUTSIDE the transaction (it would otherwise be the first statement).
-      expect(probe).toHaveBeenCalledTimes(1);
       const sql = (tx.$queryRaw.mock.calls[0][0] as string[]).join('?');
       expect(sql).toContain('SELECT "anonymizedAt" FROM "Customers"');
       expect(sql).toContain('FOR SHARE');
     });
 
+    it('there is no column probe any more: nothing is read outside the transaction', async () => {
+      await service.checkout(null, AGENCY, { id: ACCOUNT_A });
+      expect((prisma as { $queryRaw?: unknown }).$queryRaw).toBeUndefined();
+    });
+
     it('an anonymized account is 401 INVALID_CUSTOMER_TOKEN, nothing created', async () => {
-      probe.mockResolvedValue([{ present: true }]);
       tx.$queryRaw.mockResolvedValue([{ anonymizedAt: new Date() }]);
       const r = await errorCodeOf(
         service.checkout(null, AGENCY, { id: ACCOUNT_A }),
@@ -528,7 +520,6 @@ describe('CheckoutService (story 20.4: buyer ID, expected account, account lock)
     });
 
     it('an account that no longer exists is 401 too', async () => {
-      probe.mockResolvedValue([{ present: true }]);
       tx.$queryRaw.mockResolvedValue([]);
       const r = await errorCodeOf(
         service.checkout(null, AGENCY, { id: ACCOUNT_A }),
@@ -536,76 +527,19 @@ describe('CheckoutService (story 20.4: buyer ID, expected account, account lock)
       expect(r).toMatchObject({ status: 401 });
     });
 
-    it('a guest takes no lock and runs no probe', async () => {
-      probe.mockResolvedValue([{ present: true }]);
+    it('a failing lock statement (e.g. a database not migrated yet) fails the checkout: closed, never open', async () => {
+      tx.$queryRaw.mockRejectedValue(
+        new Error('column "anonymizedAt" does not exist'),
+      );
+      await expect(
+        service.checkout(null, AGENCY, { id: ACCOUNT_A }),
+      ).rejects.toThrow(/anonymizedAt/);
+      expect(tx.order.create).not.toHaveBeenCalled();
+    });
+
+    it('a guest takes no lock', async () => {
       await service.checkout('cart-1', AGENCY);
       expect(calls).not.toContain('lock');
-      expect(probe).not.toHaveBeenCalled();
-    });
-
-    it('without the column (before 20.6) the hook stays off and checkout works', async () => {
-      probe.mockResolvedValue([{ present: false }]);
-      await service.checkout(null, AGENCY, { id: ACCOUNT_A });
-      expect(calls).not.toContain('lock');
-      expect(tx.order.create).toHaveBeenCalledTimes(1);
-    });
-
-    it('a probe that fails once is checked again right away (no sale lost, nothing cached as "absent")', async () => {
-      probe
-        .mockRejectedValueOnce(new Error('boom'))
-        .mockResolvedValue([{ present: true }]);
-      await service.checkout(null, AGENCY, { id: ACCOUNT_A });
-      expect(probe).toHaveBeenCalledTimes(2);
-      expect(calls[0]).toBe('lock'); // the guard is ON: the error was not read as "absent"
-      expect(tx.order.create).toHaveBeenCalledTimes(1);
-    });
-
-    it('a probe that fails twice FAILS CLOSED (503 CHECKOUT_UNAVAILABLE), caches nothing, and the next request probes again', async () => {
-      probe.mockRejectedValue(new Error('boom'));
-      const r = await errorCodeOf(
-        service.checkout(null, AGENCY, { id: ACCOUNT_A }),
-      );
-      expect(r).toMatchObject({
-        status: 503,
-        errorCode: 'CHECKOUT_UNAVAILABLE',
-      });
-      expect(tx.order.create).not.toHaveBeenCalled();
-      expect(transaction).not.toHaveBeenCalled();
-      probe.mockReset();
-      probe.mockResolvedValue([{ present: true }]);
-      await service.checkout(null, AGENCY, { id: ACCOUNT_A });
-      expect(calls[0]).toBe('lock');
-    });
-  });
-
-  describe('the probe cache (checkout-account-lock.ts)', () => {
-    const db = (impl: () => Promise<{ present: boolean }[]>) => ({
-      $queryRaw: vi.fn(impl),
-    });
-    it('"absent" is cached only ABSENT_TTL_MS; "present" for good', async () => {
-      const d = db(() => Promise.resolve([{ present: false }]));
-      expect(await customerAnonymizedAtExists(d, 1_000)).toBe(false);
-      expect(
-        await customerAnonymizedAtExists(d, 1_000 + ABSENT_TTL_MS - 1),
-      ).toBe(false);
-      expect(d.$queryRaw).toHaveBeenCalledTimes(1);
-      // the migration created the column: seen as soon as the short TTL expires
-      d.$queryRaw.mockResolvedValue([{ present: true }]);
-      expect(await customerAnonymizedAtExists(d, 1_000 + ABSENT_TTL_MS)).toBe(
-        true,
-      );
-      expect(d.$queryRaw).toHaveBeenCalledTimes(2);
-      expect(await customerAnonymizedAtExists(d, 9_999_999)).toBe(true);
-      expect(d.$queryRaw).toHaveBeenCalledTimes(2);
-    });
-
-    it('an error is never cached as "absent"', async () => {
-      const bad = db(() => Promise.reject(new Error('x')));
-      await expect(customerAnonymizedAtExists(bad, 5)).rejects.toMatchObject({
-        status: 503,
-      });
-      const good = db(() => Promise.resolve([{ present: true }]));
-      expect(await customerAnonymizedAtExists(good, 6)).toBe(true);
     });
   });
 
