@@ -1,10 +1,14 @@
+import { makeTestCrypto } from '../../test/helpers/iddoc-test-crypto.js';
 import {
   assertCheckoutShippingPreconditions,
+  prepareCheckoutIdDoc,
   isNewShippingFormat,
   isShippingRequired,
   resolveCheckoutShipping,
 } from './checkout-shipping.js';
 
+const crypto = makeTestCrypto();
+const noId = { crypto, prepared: null };
 const AGENCY = '0b7f3c1e-8d2a-4c5e-9a11-3f6d2b9c7e10';
 const ADDR = '5d1c2f4a-1b3e-4f60-8a7b-9c0d1e2f3a4b';
 
@@ -106,6 +110,7 @@ describe('checkout-shipping (Story 17.4)', () => {
           state: 'DC',
         },
         null,
+        noId,
       );
       expect(r).toMatchObject({
         city: 'Caracas',
@@ -121,7 +126,9 @@ describe('checkout-shipping (Story 17.4)', () => {
       const findFirst = vi.fn().mockResolvedValue({
         recipientName: 'N',
         recipientPhone: '04121234567',
-        recipientIdDoc: 'V-12345678',
+        recipientIdDoc: null,
+        recipientIdDocEnc: crypto.encrypt('V-12345678'),
+        recipientIdDocBlind: crypto.blindIndex('V', '12345678'),
         deliveryMode: 'AGENCY_OFFICE',
         agencyId: AGENCY,
         agencyBranchName: 'Sucursal',
@@ -139,6 +146,7 @@ describe('checkout-shipping (Story 17.4)', () => {
         svc as never,
         { customerAddressId: ADDR, state: 'IGNORED', municipality: 'IGNORED' },
         'cust-1',
+        noId,
       );
       expect(findFirst).toHaveBeenCalledWith({
         where: { id: ADDR, customerId: 'cust-1' },
@@ -166,6 +174,7 @@ describe('checkout-shipping (Story 17.4)', () => {
             usable() as never,
             { customerAddressId: id },
             'cust-1',
+            noId,
           ),
         ).rejects.toMatchObject({
           status: 404,
@@ -181,6 +190,7 @@ describe('checkout-shipping (Story 17.4)', () => {
           usable() as never,
           { municipality: 'Baruta' },
           null,
+          noId,
         ),
       ).rejects.toMatchObject({
         status: 400,
@@ -212,9 +222,12 @@ describe('checkout-shipping (Story 17.4)', () => {
           municipality: 'Baruta',
         },
         null,
+        noId,
       );
+      expect(r).not.toHaveProperty('recipientIdDoc');
+      expect(crypto.decrypt(r.recipientIdDocEnc as string)).toBe('V-12345678');
+      expect(r.recipientIdDocBlind).toBe(crypto.blindIndex('V', '12345678'));
       expect(r).toMatchObject({
-        recipientIdDoc: 'V-12345678',
         recipientPhone: '04121234567',
         deliveryMode: 'HOME_DELIVERY',
         city: 'Baruta',
@@ -244,10 +257,176 @@ describe('checkout-shipping (Story 17.4)', () => {
             municipality: 'B',
           },
           null,
+          noId,
         ),
       ).rejects.toMatchObject({
         status: 422,
         response: { errorCode: 'SHIPPING_AGENCY_UNAVAILABLE' },
+      });
+    });
+  });
+
+  describe('cedula encryption (Story 20.3)', () => {
+    const addr = (over: Record<string, unknown>) => ({
+      recipientName: 'N',
+      recipientPhone: '04121234567',
+      recipientIdDoc: null,
+      recipientIdDocEnc: null,
+      recipientIdDocBlind: null,
+      deliveryMode: 'AGENCY_OFFICE',
+      agencyId: AGENCY,
+      agencyBranchName: 'S',
+      agencyBranchCode: null,
+      addressLine1: null,
+      addressLine2: null,
+      state: 'Miranda',
+      municipality: 'Baruta',
+      parish: null,
+      referencePoint: null,
+      ...over,
+    });
+    const usable = () => ({
+      assertAgencyUsable: vi.fn().mockResolvedValue({}),
+    });
+
+    it('a saved address: Enc/Blind are COPIED from the row, never decrypted nor re-encrypted', async () => {
+      const enc = crypto.encrypt('E-87654321');
+      const blind = crypto.blindIndex('E', '87654321');
+      const spy = {
+        protect: vi.fn(),
+        decrypt: vi.fn(),
+      };
+      const r = await resolveCheckoutShipping(
+        {
+          customerAddress: {
+            findFirst: vi
+              .fn()
+              .mockResolvedValue(
+                addr({ recipientIdDocEnc: enc, recipientIdDocBlind: blind }),
+              ),
+          },
+        } as never,
+        usable() as never,
+        { customerAddressId: ADDR },
+        'cust-1',
+        { crypto: spy, prepared: null },
+      );
+      expect(r.recipientIdDocEnc).toBe(enc);
+      expect(r.recipientIdDocBlind).toBe(blind);
+      expect(spy.protect).not.toHaveBeenCalled();
+      expect(spy.decrypt).not.toHaveBeenCalled();
+    });
+
+    it('a legacy address (plain only, not backfilled yet): the order still gets ciphertext, never plain', async () => {
+      const r = await resolveCheckoutShipping(
+        {
+          customerAddress: {
+            findFirst: vi
+              .fn()
+              .mockResolvedValue(addr({ recipientIdDoc: 'V-12345678' })),
+          },
+        } as never,
+        usable() as never,
+        { customerAddressId: ADDR },
+        'cust-1',
+        noId,
+      );
+      expect(r).not.toHaveProperty('recipientIdDoc');
+      expect(crypto.decrypt(r.recipientIdDocEnc as string)).toBe('V-12345678');
+      expect(r.recipientIdDocBlind).toBe(crypto.blindIndex('V', '12345678'));
+    });
+
+    it('prepareCheckoutIdDoc: encrypts a valid body cedula before the transaction; null otherwise', () => {
+      const p = prepareCheckoutIdDoc(
+        { recipientIdDoc: ' v-12.345.678 ', municipality: 'x' },
+        crypto,
+      );
+      expect(p?.canonical).toBe('V-12345678');
+      expect(crypto.decrypt(p?.enc as string)).toBe('V-12345678');
+      expect(prepareCheckoutIdDoc({ recipientName: 'a' }, crypto)).toBeNull(); // flat format
+      expect(
+        prepareCheckoutIdDoc(
+          { customerAddressId: ADDR, recipientIdDoc: 'V12345678' },
+          crypto,
+        ),
+      ).toBeNull(); // the saved address prevails
+      expect(
+        prepareCheckoutIdDoc(
+          { recipientIdDoc: 'J-123456789', municipality: 'x' },
+          crypto,
+        ),
+      ).toBeNull(); // not a recipient cedula: the builder reports SHIPPING_INVALID
+      expect(
+        prepareCheckoutIdDoc(
+          { recipientIdDoc: 'V-****5678', municipality: 'x' },
+          crypto,
+        ),
+      ).toBeNull(); // a masked value is never a new cedula
+    });
+
+    it('the prepared ciphertext is the one stored (not re-encrypted); a mismatching one is recomputed', async () => {
+      const body = {
+        recipientName: 'Ana',
+        recipientPhone: '04121234567',
+        recipientIdDoc: 'V12345678',
+        deliveryMode: 'home_delivery',
+        shippingAgencyId: AGENCY,
+        addressLine1: 'x',
+        state: 'M',
+        municipality: 'B',
+      };
+      const prepared = prepareCheckoutIdDoc(body, crypto);
+      const spy = { protect: vi.fn() };
+      const same = await resolveCheckoutShipping(
+        {} as never,
+        usable() as never,
+        body,
+        null,
+        {
+          crypto: spy,
+          prepared,
+        },
+      );
+      expect(same.recipientIdDocEnc).toBe(prepared?.enc);
+      expect(spy.protect).not.toHaveBeenCalled();
+      const other = prepareCheckoutIdDoc(
+        { ...body, recipientIdDoc: 'V87654321' },
+        crypto,
+      );
+      const r = await resolveCheckoutShipping(
+        {} as never,
+        usable() as never,
+        body,
+        null,
+        {
+          crypto,
+          prepared: other,
+        },
+      );
+      expect(crypto.decrypt(r.recipientIdDocEnc as string)).toBe('V-12345678');
+    });
+
+    it('a masked cedula in the body is SHIPPING_INVALID (never stored as a cedula)', async () => {
+      await expect(
+        resolveCheckoutShipping(
+          {} as never,
+          usable() as never,
+          {
+            recipientName: 'Ana',
+            recipientPhone: '04121234567',
+            recipientIdDoc: 'V-****5678',
+            deliveryMode: 'home_delivery',
+            shippingAgencyId: AGENCY,
+            addressLine1: 'x',
+            state: 'M',
+            municipality: 'B',
+          },
+          null,
+          noId,
+        ),
+      ).rejects.toMatchObject({
+        status: 400,
+        response: { errorCode: 'SHIPPING_INVALID' },
       });
     });
   });

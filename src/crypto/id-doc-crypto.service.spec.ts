@@ -290,4 +290,73 @@ describe('protect / batch / serialize', () => {
     for (const v of ['V-12345678', 'v1:abc', '', null, 5])
       expect(svc.isEncrypted(v)).toBe(false);
   });
+
+  describe('helpers for the migration scripts (Story 20.3)', () => {
+    it('knownVersions lists the versions, never keys', () => {
+      const { svc } = make();
+      expect(svc.knownVersions()).toEqual([1, 2]);
+    });
+
+    it('checkStored: ok / undecryptable / plain_mismatch / blind_mismatch, never returns a value', () => {
+      const { svc } = make();
+      const enc = svc.encrypt('V-12345678');
+      const blind = svc.blindIndex('V', '12345678');
+      expect(svc.checkStored(enc)).toBe('ok');
+      expect(
+        svc.checkStored(enc, { expectedPlain: ' v-12.345.678 ', blind }),
+      ).toBe('ok');
+      expect(svc.checkStored(enc, { expectedPlain: 'V-12345679' })).toBe(
+        'plain_mismatch',
+      );
+      expect(
+        svc.checkStored(enc, { blind: svc.blindIndex('V', '12345679') }),
+      ).toBe('blind_mismatch');
+      expect(svc.checkStored(enc, { blind: null })).toBe('blind_mismatch'); // a parsed value must have an index
+      expect(svc.checkStored('V-12345678')).toBe('undecryptable');
+      expect(
+        svc.checkStored(enc.slice(0, -2) + (enc.endsWith('AA') ? 'BB' : 'AA')),
+      ).toBe('undecryptable');
+      // unparsed legacy: canonical text, no blind (null is the right answer)
+      const legacy = svc.protect('12345678')!;
+      expect(legacy.unparsed).toBe(true);
+      expect(
+        svc.checkStored(legacy.enc, { expectedPlain: '12345678', blind: null }),
+      ).toBe('ok');
+      expect(svc.checkStored(legacy.enc, { blind: 'a'.repeat(64) })).toBe(
+        'blind_mismatch',
+      );
+    });
+
+    it('reencryptChecked moves to the target version keeping the value; fails closed on a bad input', () => {
+      const { svc } = make();
+      const v1 = svc.encrypt('V-12345678', 1);
+      const v2 = svc.reencryptChecked(v1, 2);
+      expect(v2.startsWith('v2:')).toBe(true);
+      expect(svc.checkStored(v2, { expectedPlain: 'V-12345678' })).toBe('ok');
+      expect(() => svc.reencryptChecked('garbage', 2)).toThrow(
+        IdDocDecryptError,
+      );
+      expect(() => svc.reencryptChecked(v1, 9)).toThrow();
+    });
+
+    it('the keyring can change between batches: values of both versions are read', () => {
+      const { svc: a, env } = make();
+      const b = new IdDocCryptoService({
+        get: (k: string): string | undefined =>
+          ({ ...env, IDDOC_ENC_ACTIVE_KEY: '2' })[k],
+      } as never);
+      b.onModuleInit();
+      const first = a.protect('V-11111111')!.enc; // written under v1
+      const second = b.protect('E-22222222')!.enc; // written under v2
+      expect([a.keyVersionOf(first), a.keyVersionOf(second)]).toEqual([1, 2]);
+      for (const svc of [a, b]) {
+        expect(svc.checkStored(first, { expectedPlain: 'V-11111111' })).toBe(
+          'ok',
+        );
+        expect(svc.checkStored(second, { expectedPlain: 'E-22222222' })).toBe(
+          'ok',
+        );
+      }
+    });
+  });
 });

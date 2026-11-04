@@ -209,7 +209,7 @@ describe('Customer addresses update/default/delete (e2e, Story 17.3)', () => {
     expect(r.body).toMatchObject({
       id: a2.id,
       state: 'Zulia',
-      recipientIdDoc: 'E-987654321',
+      recipientIdDoc: 'E-****4321', // Story 20.3: always masked
       label: 'Oficina',
       municipality: 'Baruta',
       isDefault: false,

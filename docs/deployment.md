@@ -1188,7 +1188,7 @@ La cédula es obligatoria en las facturas y se conserva durante el plazo fiscal.
 
 1. Genera la clave nueva y añade `2:<clave>` a `IDDOC_ENC_KEYS` (conservando la `1`). Copia el llavero actualizado al gestor de secretos.
 2. Cambia `IDDOC_ENC_ACTIVE_KEY=2` y reinicia: lo nuevo se cifra con la `2`, lo antiguo sigue leyéndose con la `1` (sin ventana de parada).
-3. Re-cifra lo antiguo con el script de 20.3 (`pnpm iddoc:reencrypt --to 2`; aún no existe). Cuando `iddoc:report` no muestre filas `v1`, y solo entonces, puedes retirar la `1`.
+3. Re-cifra lo antiguo con `pnpm iddoc:reencrypt --to 2 [--dry-run]` (Story 20.3, sección 15.5). Cuando `iddoc:report` no muestre filas `v1`, y solo entonces, puedes retirar la `1`.
 
 El **índice ciego no rota con la clave de cifrado** (A97). Cambiar `IDDOC_BLIND_KEY` obliga a descifrar y recalcular el índice de todas las filas (procedimiento previsto en 20.3); hasta entonces, no la cambies.
 
@@ -1210,5 +1210,63 @@ El logger de la app (`RedactingLogger`, en `main.ts` y en `pnpm tcg:ingest`) sus
 ### 14.7 Lo que NO está verificado
 
 - Nada se ha probado en un VPS real ni con las claves reales de Angel; los tests usan claves desechables.
-- Con `deploy.sh`, solo se comprueba que las líneas existan; la validez la comprueba el arranque de la app (si falla, el servicio no levanta y el despliegue lo detecta en el reinicio).
+- Desde la Story 20.3, `deploy.sh` valida el llavero con el mismo analizador que el arranque (`parseIdDocKeyring`) antes de migrar y de reiniciar (sección 15.3); ya no depende de que la app caiga al reiniciar.
 - El respaldo y la prueba de restauración de las claves (14.2) son un procedimiento operativo que Angel debe ejecutar; el código no lo hace.
+
+## 15. Epic 20, Story 20.3: cédula cifrada en la base de datos (migración fase 1, backfill, máscara)
+
+Esta sección es para Angel. Desde 20.3 la cédula **solo se escribe cifrada** (`recipientIdDocEnc` + índice ciego `recipientIdDocBlind`) y **todas las vistas de cliente, públicas y de admin la devuelven enmascarada** (`V-****5678`). La cédula de una orden **no se purga ni se enmascara de forma irreversible** (se necesita para la factura): queda cifrada y recuperable durante el plazo fiscal. Los scripts de esta story no pueden tocarla (lo comprueba un test estático).
+
+### 15.1 Qué cambia
+
+- **Migración `20261106100000_iddoc_encrypted_columns`** (100 % aditiva, `BEGIN; ... COMMIT;`): `Orders` gana `recipientIdDocEnc`, `recipientIdDocBlind`, `buyerIdType` (+ enum `BuyerIdType`), `buyerIdDocEnc`, `buyerIdDocBlind`, `buyerLegalName`; `Customer_Addresses` gana `recipientIdDocEnc`, `recipientIdDocBlind` y su `recipientIdDoc` pasa a admitir NULL. Tres índices btree sobre las columnas ciegas. **No se elimina ni se reescribe ninguna columna en claro.** Verificado sobre un clon con datos de desarrollo: el hash de `Orders` (sin las columnas nuevas) es idéntico antes y después.
+- **El código nuevo** escribe solo `Enc/Blind` (la columna en claro queda NULL en filas nuevas) y lee `Enc ?? plano` hasta la fase 2.
+- **Rollback de la app:** el build anterior verá NULL en las filas nuevas (cédula ausente, no corrupta). Las columnas en claro no se tocan. Si se vuelve al build anterior **después** del backfill, las filas ya cifradas conservan su claro (el backfill no lo borra), así que el build anterior sigue leyéndolas.
+- **No existe la fase 2** (`..._drop_plain_iddoc`): es una release posterior y separada, no está en la carpeta de migraciones.
+
+### 15.2 La migración sobre `Orders` en producción (sigue 12.2 y 12.3)
+
+La migración empieza con `BEGIN;`, fija `SET LOCAL lock_timeout = '10s'` y toma **primero** `LOCK TABLE` sobre `Customer_Addresses` y `Orders`: si no consigue el lock falla entera y **no deja nada a medias** (probado sobre un clon: un lector que retiene `Orders` 14 s hace fallar la migración con `55P03` a los 10 s y no queda ni el tipo, ni las columnas, ni los índices; reintentar sin el lector la aplica). `deploy.sh` además añade `options=-c lock_timeout=<ms>` a la URL de migración (12.2). Si la espera vence: `pnpm prisma migrate resolve --rolled-back 20261106100000_iddoc_encrypted_columns` y reintenta fuera de hora punta (12.3; aquí no hace falta limpiar objetos). Los tres `CREATE INDEX` no son `CONCURRENTLY` (van dentro de la transacción): mientras se construyen, `Orders` no admite escrituras; con las tablas de una tienda son milisegundos. Medido solo sobre un clon pequeño: **no** sobre una tabla grande.
+
+### 15.3 Despliegue (lo que hace `deploy/deploy.sh`)
+
+1. Comprueba que las tres variables existan **y** que formen un llavero válido con `parseIdDocKeyring` (`node dist/crypto/cli/check-keyring.js --env-file <.env>`; lee el archivo como datos, no lo ejecuta; imprime nombres de variables y versiones, nunca claves). Una copia de `.env.example` pasa el `grep` pero **no** esta validación: el despliegue se detiene antes de migrar y de reiniciar.
+2. `prisma migrate deploy`, reinicio y health check, como antes.
+3. **Después del reinicio** corre `pnpm iddoc:backfill` y `pnpm iddoc:backfill --check` (con `DATABASE_URL`, el rol limitado del servicio; límite de 30 min, `IDDOC_BACKFILL_TIMEOUT_SECONDS`). Si fallan, **el servicio no se toca** (sigue levantado y sirve: lo no cifrado todavía se lee por el respaldo y todo lo nuevo se escribe cifrado), el despliegue termina con código 1 (el job de CI queda rojo) y el log imprime el comando exacto para reanudar. El backfill es idempotente y reanudable.
+
+### 15.4 Antes del primer despliegue
+
+1. **Local:** `pnpm iddoc:keys` añade al `.env` local las tres líneas que falten (claves generadas al vuelo; no imprime valores, no pisa líneas existentes, es idempotente, se niega a correr con `NODE_ENV=production`, bajo `/opt/212cc` o sobre un archivo que declare producción). `--file <ruta>` apunta a otro archivo. **Guarda una copia de las claves** (14.2) antes de cifrar datos reales.
+2. **Servidor:** las claves reales se generan a mano (`openssl rand -base64 32`, 14.1) y se guardan en un gestor de secretos **antes** de desplegar: el backfill cifra datos reales con ellas.
+3. Respalda la base de datos antes del primer backfill.
+
+### 15.5 Comandos (todos por lotes, con `DATABASE_URL`)
+
+| Comando | Qué hace | Código de salida |
+|---|---|---|
+| `pnpm iddoc:backfill` | Cifra todo claro sin `Enc` de `Orders` y `Customer_Addresses` (lotes de 500, una transacción corta por lote) y registra `DATA_MIGRATION_RUN`. Idempotente, reanudable. Opciones `--batch-size N`, `--pause-ms N`. | 0 ok; 1 hubo errores; 3 problema de claves (no escribió nada) |
+| `pnpm iddoc:backfill --verify` | Descifra **todas** las filas, compara con el claro normalizado (si aún existe) y recalcula el índice ciego. Solo lectura. | 1 ante cualquier diferencia o claro sin cifrar |
+| `pnpm iddoc:backfill --check` | Healthcheck: sale con 1 si queda claro sin cifrar (los valores vacíos no cuentan) o un cifrado malformado. | 0 / 1 |
+| `pnpm iddoc:backfill --scrub` | **Opcional y posterior, solo la libreta de direcciones.** Hace un `--verify` real dentro de la misma corrida y, si pasa, vuelve a verificar cada fila bajo bloqueo antes de poner `recipientIdDoc = NULL`. **Nunca** acepta `Orders`. No se ejecuta en esta story. | 1 si el verify falla (no toca nada) |
+| `pnpm iddoc:reencrypt --to <N> [--dry-run]` | Rotación (14.3): re-cifra a la versión `N`, con prueba en memoria por valor y escritura con comparación (`WHERE enc = <viejo>`), sin cambiar el enmascarado ni el índice ciego. `--dry-run` descifra y cuenta (también detecta valores ilegibles) sin escribir ni registrar. | 1 si algún valor es ilegible |
+| `pnpm iddoc:report` | Filas por versión de clave y claros sin cifrar. Cuando no muestre `v1`, puede retirarse la clave `1`. | 0 |
+| `pnpm iddoc:keys [--file ruta]` | Ver 15.4. Solo desarrollo local. | 2 si se niega |
+
+**Claves:** antes de escribir, los comandos comprueban (a) que la clave activa cifra y descifra, (b) que **cada versión de clave guardada en la base** exista en `IDDOC_ENC_KEYS` y descifre de verdad una muestra (una clave equivocada bajo una versión conocida falla la autenticación), y (c) que `IDDOC_BLIND_KEY` reproduzca un índice ciego guardado. Si algo falla: código 3, mensaje con variable y versión (nunca un valor) y **cero escrituras**. Si el llavero activo cambia entre lotes, ambas versiones se leen y se verifican.
+
+**Carrera con escrituras nuevas:** cada `UPDATE` exige `Enc IS NULL` y que el claro siga siendo el que se leyó; si la app (o un build antiguo) cambió la fila entre medias, no se pisa. Las filas nuevas se escriben ya cifradas, así que no entran al escaneo; una fila en claro que un build antiguo inserte "detrás" del cursor se detecta en una segunda pasada (hasta 3) o en `--check`. Un build antiguo que **edite el claro** de una fila ya cifrada deja un `Enc` desfasado: `--verify` lo informa (`plainMismatch`).
+
+**Auditoría:** cada corrida (backfill, verify, scrub, reencrypt real) escribe un `DATA_MIGRATION_RUN` con solo contadores (modo, resultado, filas, duración), al final de su propia transacción corta, con el rol limitado. Una corrida cortada a la fuerza (kill -9) no llega a escribirlo. Si la auditoría no está disponible, el trabajo ya confirmado se mantiene, el comando lo dice y sale con código 1.
+
+### 15.6 Quién lee la cédula (inventario verificado con `grep recipientIdDoc|idDoc` sobre `src/`, `scripts/`, `prisma/`)
+
+Lectores de `Order.recipientIdDoc*`: solo `OrderLookupService.toDetailDto` (lookup público por token, vistas del cliente y `admin/orders/:id`, todos por el serializador único). Lectores de `CustomerAddress.recipientIdDoc*`: `CustomerAddressesService.toAddressResponse` (serializador) y `resolveCheckoutShipping` (copia `Enc/Blind` sin descifrar). Las listas de admin, correos, comprobantes, dashboard y reportes **no** leen la cédula. Ninguna búsqueda usa `LIKE` sobre ella. No hay ningún `decrypt` fuera de `src/crypto/` (test estático ampliado a `scripts/`, `prisma/` y a formas como `svc['decrypt']`, alias, `.call` y `createDecipheriv`).
+
+**Edición de dirección:** `recipientIdDoc` ausente, nulo, vacío o **enmascarado** (`V-****5678`, que es lo que devuelve la API) conserva la cédula guardada; un valor nuevo se normaliza, se cifra de nuevo y borra el claro anterior; uno inválido da 400 `SHIPPING_INVALID`. Un valor enmascarado al **crear** o en el **checkout** es 400.
+
+### 15.7 Lo medido (disposable Postgres 17 en contenedor, rol limitado `collectorsclub_d203_app`, 12 000 órdenes + 3 000 direcciones sintéticas, máquina de desarrollo)
+
+- Backfill de 12 262 filas (con 4 hilos de carga simulada de checkouts, lecturas y ediciones de dirección): 1 478 ms, 25 lotes, retraso máximo del event loop 15,4 ms. Latencia de la carga: checkout p99 12,5 ms durante el backfill frente a 4,1 ms sin él; lecturas p99 6,3 ms frente a 3,9 ms; 0 errores. Segunda corrida: 0 filas cifradas. `--verify` de 17 243 filas: 0,8 s. `iddoc:reencrypt --to 2` de 17 243 filas: 5,5 s; después `iddoc:report` muestra 0 filas `v1`.
+- Corte forzado (kill -9) a mitad de la corrida y reanudación: sin pérdidas ni duplicados.
+- **No verificado:** un VPS real; checkouts HTTP concurrentes contra el servidor Nest durante el backfill (la carga fue de SQL equivalente, la app sí se probó con checkouts reales en los e2e, pero no a la vez); tablas de millones de filas; `deploy.sh` entero (solo su tramo posterior al reinicio, con `pnpm` simulado); la restauración de claves de 14.2.
+

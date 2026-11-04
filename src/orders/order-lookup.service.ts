@@ -2,6 +2,7 @@ import { HttpStatus, Injectable } from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
 import { buildTrackingUrl } from '../shipping/tracking-url.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
 import type {
   Order,
   OrderLine,
@@ -57,7 +58,10 @@ type OrderWithRelations = Order & {
  */
 @Injectable()
 export class OrderLookupService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly idDocCrypto: IdDocCryptoService,
+  ) {}
 
   /**
    * Story 5.1 AC1. `OrderAccessTokenGuard` itself only ever loads a bare
@@ -162,7 +166,14 @@ export class OrderLookupService {
       city: order.city,
       state: order.state,
       country: order.country,
-      recipientIdDoc: order.recipientIdDoc,
+      // Story 20.3 (FR-125): the only exit of the cedula in order views: masked, `Enc ?? plain`.
+      recipientIdDoc: this.idDocCrypto.serialize(
+        order.recipientIdDocEnc,
+        order.recipientIdDoc,
+      ),
+      buyerIdDoc: this.idDocCrypto.serialize(order.buyerIdDocEnc),
+      buyerIdType: order.buyerIdType,
+      buyerLegalName: order.buyerLegalName,
       deliveryMode: order.deliveryMode
         ? order.deliveryMode.toLowerCase()
         : null,

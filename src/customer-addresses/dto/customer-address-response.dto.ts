@@ -15,7 +15,14 @@ export class CustomerAddressResponseDto {
   @ApiProperty({ type: String, nullable: true }) label: string | null;
   @ApiProperty() recipientName: string;
   @ApiProperty() recipientPhone: string;
-  @ApiProperty({ example: 'V-12345678' }) recipientIdDoc: string;
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: 'V-****5678',
+    description:
+      'Story 20.3 (FR-125): ALWAYS masked (type + last 4 digits); the full value is never returned. On edit, omit the field (or send it blank) to keep the stored cedula; never send this masked value back as a new one (it is ignored).',
+  })
+  recipientIdDoc: string | null;
   @ApiProperty({ enum: DELIVERY_MODES }) deliveryMode: string;
   @ApiProperty({ type: CustomerAddressAgencyDto })
   agency: CustomerAddressAgencyDto;

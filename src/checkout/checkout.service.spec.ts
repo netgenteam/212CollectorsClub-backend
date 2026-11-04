@@ -1,3 +1,5 @@
+import { makeTestCrypto } from '../../test/helpers/iddoc-test-crypto.js';
+import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
 import { createHash } from 'node:crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { CheckoutService } from './checkout.service.js';
@@ -125,6 +127,7 @@ describe('CheckoutService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: STRIPE_CLIENT, useValue: stripeClient },
         { provide: ShippingValidationService, useValue: {} },
+        { provide: IdDocCryptoService, useValue: makeTestCrypto() },
         {
           provide: ConsentService,
           // Story 19.4: no document in force => nothing to accept (see consent.service.spec.ts).

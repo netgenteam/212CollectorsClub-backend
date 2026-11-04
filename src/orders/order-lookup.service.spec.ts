@@ -1,3 +1,4 @@
+import { makeTestCrypto } from '../../test/helpers/iddoc-test-crypto.js';
 import { OrderLookupService } from './order-lookup.service.js';
 import {
   FulfillmentType,
@@ -5,6 +6,8 @@ import {
   OrderStatus,
   PaymentRail,
 } from '../generated/prisma/enums.js';
+
+const crypto = makeTestCrypto();
 
 function buildOrderWithLines(
   overrides: Partial<{
@@ -29,6 +32,10 @@ function buildOrderWithLines(
     state: 'Distrito Capital',
     country: 'Venezuela',
     recipientIdDoc: null,
+    recipientIdDocEnc: null,
+    buyerIdType: null,
+    buyerIdDocEnc: null,
+    buyerLegalName: null,
     deliveryMode: null,
     shippingAgencyId: null,
     shippingAgency: null,
@@ -78,7 +85,7 @@ describe('OrderLookupService', () => {
       order: { findUniqueOrThrow: vi.fn() },
       orderStatusHistory: { findMany: vi.fn() },
     };
-    service = new OrderLookupService(prisma as never);
+    service = new OrderLookupService(prisma as never, crypto);
   });
 
   describe('getDetail', () => {
@@ -107,6 +114,9 @@ describe('OrderLookupService', () => {
           state: 'Distrito Capital',
           country: 'Venezuela',
           recipientIdDoc: null,
+          buyerIdDoc: null,
+          buyerIdType: null,
+          buyerLegalName: null,
           deliveryMode: null,
           agencyBranchName: null,
           agencyBranchCode: null,
@@ -226,7 +236,7 @@ describe('OrderLookupService (customer orders)', () => {
         findMany: vi.fn().mockResolvedValue([order]),
       },
     };
-    const service = new OrderLookupService(prisma as never);
+    const service = new OrderLookupService(prisma as never, crypto);
     const res = await service.listForCustomer('c1', 2, 20);
     expect(prisma.order.count).toHaveBeenCalledWith({
       where: { customerId: 'c1' },
@@ -248,7 +258,10 @@ describe('OrderLookupService (customer orders)', () => {
 
   it('getDetailForCustomer: filters id AND customerId in one query; no match -> 404', async () => {
     const findFirst = vi.fn().mockResolvedValue(null);
-    const service = new OrderLookupService({ order: { findFirst } } as never);
+    const service = new OrderLookupService(
+      { order: { findFirst } } as never,
+      crypto,
+    );
     await expect(
       service.getDetailForCustomer('c1', 'o1'),
     ).rejects.toMatchObject({
@@ -272,7 +285,10 @@ describe('OrderLookupService (customer orders)', () => {
         },
       ],
     });
-    const service = new OrderLookupService({ order: { findFirst } } as never);
+    const service = new OrderLookupService(
+      { order: { findFirst } } as never,
+      crypto,
+    );
     const res = await service.getDetailForCustomer('c1', 'order-1');
     expect(res.statusHistory).toEqual([
       {
@@ -288,7 +304,7 @@ describe('OrderLookupService (customer orders)', () => {
   it('Story 17.5: serializes shipping snapshot, builds trackingUrl and drops the template', async () => {
     const findUniqueOrThrow = vi.fn().mockResolvedValue({
       ...order,
-      recipientIdDoc: 'V-1',
+      recipientIdDocEnc: crypto.encrypt('V-12345678'),
       deliveryMode: 'HOME_DELIVERY',
       trackingNumber: 'A/1',
       shippingAgency: {
@@ -297,9 +313,12 @@ describe('OrderLookupService (customer orders)', () => {
         trackingUrlTemplate: 'https://t.test/{trackingNumber}',
       },
     });
-    const service = new OrderLookupService({
-      order: { findUniqueOrThrow },
-    } as never);
+    const service = new OrderLookupService(
+      {
+        order: { findUniqueOrThrow },
+      } as never,
+      crypto,
+    );
     const res = await service.getDetail('order-1');
     expect(findUniqueOrThrow).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -309,7 +328,7 @@ describe('OrderLookupService (customer orders)', () => {
       }),
     );
     expect(res.fulfillment).toMatchObject({
-      recipientIdDoc: 'V-1',
+      recipientIdDoc: 'V-****5678',
       deliveryMode: 'home_delivery',
       shippingAgency: { name: 'MRW', code: 'MRW' },
       trackingNumber: 'A/1',

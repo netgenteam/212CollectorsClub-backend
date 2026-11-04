@@ -4,9 +4,12 @@ import { ApiException } from '../common/api-exception.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { ShippingValidationService } from '../shipping/shipping-validation.service.js';
 import {
+  canonicalRecipientIdDoc,
+  isMaskedIdDoc,
   validateShippingInput,
   type ShippingInput,
 } from '../shipping/shipping-validators.js';
+import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
 import type { CustomerAddressResponseDto } from './dto/customer-address-response.dto.js';
 import type { UpdateCustomerAddressDto } from './dto/update-customer-address.dto.js';
 import type { CreateCustomerAddressDto } from './dto/create-customer-address.dto.js';
@@ -37,13 +40,20 @@ type AddressRow = Prisma.CustomerAddressGetPayload<{
   include: typeof WITH_AGENCY;
 }>;
 
-export function toAddressResponse(row: AddressRow): CustomerAddressResponseDto {
+/**
+ * Story 20.3 (AD-97, FR-125): the cedula leaves ONLY through the single serializer (masked,
+ * `Enc ?? plain`); the field keeps its name. `crypto` is the injected service.
+ */
+export function toAddressResponse(
+  row: AddressRow,
+  crypto: Pick<IdDocCryptoService, 'serialize'>,
+): CustomerAddressResponseDto {
   return {
     id: row.id,
     label: row.label,
     recipientName: row.recipientName,
     recipientPhone: row.recipientPhone,
-    recipientIdDoc: row.recipientIdDoc,
+    recipientIdDoc: crypto.serialize(row.recipientIdDocEnc, row.recipientIdDoc),
     deliveryMode: row.deliveryMode.toLowerCase(),
     agency: row.agency,
     agencyBranchName: row.agencyBranchName,
@@ -66,7 +76,12 @@ export class CustomerAddressesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly shipping: ShippingValidationService,
+    private readonly idDocCrypto: IdDocCryptoService,
   ) {}
+
+  private toResponse(row: AddressRow): CustomerAddressResponseDto {
+    return toAddressResponse(row, this.idDocCrypto);
+  }
 
   async list(customerId: string): Promise<CustomerAddressResponseDto[]> {
     const rows = await this.prisma.customerAddress.findMany({
@@ -74,7 +89,7 @@ export class CustomerAddressesService {
       include: WITH_AGENCY,
       orderBy: [{ isDefault: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
     });
-    return rows.map(toAddressResponse);
+    return rows.map((r) => this.toResponse(r));
   }
 
   async create(
@@ -90,10 +105,12 @@ export class CustomerAddressesService {
         { errors: checked.errors },
       );
     }
-    const value = checked.value;
+    const { recipientIdDoc: canonicalId, ...value } = checked.value;
     const label = dto.label?.trim() || null;
+    // Encrypted BEFORE the transaction; the plain column is not written (stays NULL).
+    const protectedId = this.idDocCrypto.protect(canonicalId);
 
-    return toAddressResponse(
+    return this.toResponse(
       await this.runLocked(customerId, async (tx) => {
         const count = await tx.customerAddress.count({ where: { customerId } });
         if (count >= MAX_ADDRESSES) {
@@ -115,6 +132,8 @@ export class CustomerAddressesService {
             agencyId: dto.agencyId,
             label,
             ...value,
+            recipientIdDocEnc: protectedId?.enc ?? null,
+            recipientIdDocBlind: protectedId?.blind ?? null,
             deliveryMode: toDbMode(value.deliveryMode),
             isDefault: count === 0,
           },
@@ -191,13 +210,24 @@ export class CustomerAddressesService {
         'At least one field is required.',
       );
     }
-    return toAddressResponse(
+    // Story 20.3 (A87): an absent, null or blank cedula KEEPS the stored (encrypted) one, and so
+    // does a MASKED one (`V-****5678`, which is what this API returns: a client that echoes it
+    // back did not type a new cedula and must never overwrite the real one with it). Anything
+    // else is re-normalized and re-encrypted, BEFORE the transaction.
+    const idRaw =
+      typeof patch.recipientIdDoc === 'string'
+        ? patch.recipientIdDoc.trim()
+        : '';
+    const newId = idRaw !== '' && !isMaskedIdDoc(idRaw) ? idRaw : null;
+    const newCanonical = newId === null ? null : canonicalRecipientIdDoc(newId);
+    const protectedId =
+      newCanonical === null ? null : this.idDocCrypto.protect(newCanonical);
+    return this.toResponse(
       await this.runLocked(customerId, async (tx) => {
         const row = await this.findOwned(tx, customerId, id);
         const merged = {
           recipientName: row.recipientName,
           recipientPhone: row.recipientPhone,
-          recipientIdDoc: row.recipientIdDoc,
           deliveryMode: row.deliveryMode.toLowerCase(),
           agencyBranchName: row.agencyBranchName,
           agencyBranchCode: row.agencyBranchCode,
@@ -208,8 +238,11 @@ export class CustomerAddressesService {
           addressLine2: row.addressLine2,
           referencePoint: row.referencePoint,
           ...patch,
+          recipientIdDoc: newId,
         } as ShippingInput;
-        const checked = validateShippingInput(merged);
+        const checked = validateShippingInput(merged, {
+          idDoc: newId === null ? 'keep' : 'required',
+        });
         // agencyId is not part of validateShippingInput; null means "clear",
         // which a required field cannot do.
         const nullAgency = (patch.agencyId as unknown) === null;
@@ -228,7 +261,8 @@ export class CustomerAddressesService {
             },
           );
         }
-        const value = checked.value;
+        const { recipientIdDoc: _unused, ...value } = checked.value;
+        void _unused;
         // A52: activity only matters when the agency is being (re)chosen.
         await this.shipping.assertAgencyUsable(
           patch.agencyId ?? row.agencyId,
@@ -243,6 +277,14 @@ export class CustomerAddressesService {
             label: 'label' in patch ? patch.label?.trim() || null : row.label,
             ...value,
             deliveryMode: toDbMode(value.deliveryMode),
+            // Only a NEW cedula touches the columns; the plain one it replaces is cleared.
+            ...(protectedId
+              ? {
+                  recipientIdDocEnc: protectedId.enc,
+                  recipientIdDocBlind: protectedId.blind,
+                  recipientIdDoc: null,
+                }
+              : {}),
           },
           include: WITH_AGENCY,
         });
@@ -254,7 +296,7 @@ export class CustomerAddressesService {
     customerId: string,
     id: string,
   ): Promise<CustomerAddressResponseDto> {
-    return toAddressResponse(
+    return this.toResponse(
       await this.runLocked(customerId, async (tx) => {
         const row = await this.findOwned(tx, customerId, id);
         if (!row.isDefault) {

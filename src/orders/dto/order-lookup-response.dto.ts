@@ -58,12 +58,35 @@ export class OrderFulfillmentDto {
   country: string | null;
 
   @ApiPropertyOptional({
-    example: 'V-12345678',
+    example: 'V-****5678',
     nullable: true,
     description:
-      'Story 17.5: recipient national ID snapshot; null on legacy orders.',
+      'Story 17.5 / 20.3 (FR-125): recipient national ID snapshot, ALWAYS masked (type + last 4 digits) in this view; the full value only comes from the admin reveal action. Null on legacy orders without one.',
   })
   recipientIdDoc: string | null;
+
+  @ApiPropertyOptional({
+    example: 'J-****6789',
+    nullable: true,
+    description:
+      'Story 20.3 (AD-97): fiscal ID of the buyer, masked. Null until Story 20.4 writes it and on historical orders (A88).',
+  })
+  buyerIdDoc: string | null;
+
+  @ApiPropertyOptional({
+    enum: ['V', 'E', 'J', 'P', 'G'],
+    nullable: true,
+    description:
+      'Story 20.3 (AD-97): type letter of the buyer ID; null as above.',
+  })
+  buyerIdType: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Story 20.3 (AD-97): legal name for J/G buyers; null as above.',
+  })
+  buyerLegalName: string | null;
 
   @ApiPropertyOptional({
     example: 'agency_office',

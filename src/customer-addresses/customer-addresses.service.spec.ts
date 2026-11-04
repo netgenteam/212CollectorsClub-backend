@@ -1,6 +1,12 @@
+import { makeTestCrypto } from '../../test/helpers/iddoc-test-crypto.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { ApiException } from '../common/api-exception.js';
-import { CustomerAddressesService } from './customer-addresses.service.js';
+import {
+  CustomerAddressesService,
+  toAddressResponse,
+} from './customer-addresses.service.js';
+
+const crypto = makeTestCrypto();
 
 const dto = {
   agencyId: 'a',
@@ -35,6 +41,7 @@ function build(count: number, createImpl?: () => Promise<unknown>) {
     {
       assertAgencyUsable: assert,
     } as never,
+    crypto,
   );
   return { svc, create, assert, tx };
 }
@@ -67,10 +74,13 @@ describe('CustomerAddressesService.create', () => {
     ).data;
     expect(data).toMatchObject({
       isDefault: true,
-      recipientIdDoc: 'V-12345678',
       recipientPhone: '04121234567',
       deliveryMode: 'HOME_DELIVERY',
     });
+    // 20.3: only Enc/Blind are written; the plain column is not part of the data at all.
+    expect(data).not.toHaveProperty('recipientIdDoc');
+    expect(crypto.decrypt(data.recipientIdDocEnc as string)).toBe('V-12345678');
+    expect(data.recipientIdDocBlind).toBe(crypto.blindIndex('V', '12345678'));
   });
 
   it('subsequent address is not default', async () => {
@@ -122,6 +132,8 @@ describe('CustomerAddressesService.create', () => {
   });
 });
 
+const ENC_OLD = crypto.encrypt('V-12345678');
+const BLIND_OLD = crypto.blindIndex('V', '12345678');
 const U1 = '11111111-1111-4111-8111-111111111111';
 
 function buildWrite(opts: {
@@ -137,7 +149,9 @@ function buildWrite(opts: {
           label: null,
           recipientName: 'Maria',
           recipientPhone: '+584121234567',
-          recipientIdDoc: 'V-12345678',
+          recipientIdDoc: null,
+          recipientIdDocEnc: ENC_OLD,
+          recipientIdDocBlind: BLIND_OLD,
           deliveryMode: 'HOME_DELIVERY',
           agencyBranchName: null,
           agencyBranchCode: null,
@@ -172,6 +186,7 @@ function buildWrite(opts: {
   const svc = new CustomerAddressesService(
     prisma as never,
     { assertAgencyUsable: assert } as never,
+    crypto,
   );
   return { svc, ca, tx, assert };
 }
@@ -243,10 +258,111 @@ describe('CustomerAddressesService.update', () => {
       }
     ).data;
     expect(data).not.toHaveProperty('isDefault');
-    expect(data).toMatchObject({
+    expect(data).toMatchObject({ state: 'Zulia' });
+    // A87: no cedula in the patch -> the stored ciphertext is untouched (not even re-written).
+    for (const k of [
+      'recipientIdDoc',
+      'recipientIdDocEnc',
+      'recipientIdDocBlind',
+    ])
+      expect(data).not.toHaveProperty(k);
+  });
+
+  it.each([
+    ['blank', ''],
+    ['spaces', '   '],
+    ['null', null],
+    ['the masked value the API returned (V-****5678)', 'V-****5678'],
+    ['a masked legacy value (****5678)', '****5678'],
+  ])('a %s recipientIdDoc keeps the stored cedula', async (_n, v) => {
+    const { svc, ca } = buildWrite({});
+    await svc.update('c', U1, {
       state: 'Zulia',
-      recipientIdDoc: 'V-12345678',
+      recipientIdDoc: v as unknown as string,
     });
+    const data = (
+      (ca.update.mock.calls[0] as unknown[])[0] as {
+        data: Record<string, unknown>;
+      }
+    ).data;
+    for (const k of [
+      'recipientIdDoc',
+      'recipientIdDocEnc',
+      'recipientIdDocBlind',
+    ])
+      expect(data).not.toHaveProperty(k);
+  });
+
+  it('a masked value alone is not a change but is not an error either (a client echoing the form)', async () => {
+    const { svc, ca } = buildWrite({});
+    await expect(
+      svc.update('c', U1, { recipientIdDoc: 'V-****5678' }),
+    ).resolves.toBeDefined();
+    const data = (
+      (ca.update.mock.calls[0] as unknown[])[0] as {
+        data: Record<string, unknown>;
+      }
+    ).data;
+    expect(data).not.toHaveProperty('recipientIdDocEnc');
+  });
+
+  it('a new cedula is re-normalized, re-encrypted, re-indexed and the plain column cleared', async () => {
+    const { svc, ca } = buildWrite({});
+    await svc.update('c', U1, { recipientIdDoc: 'e 87.654.321' });
+    const data = (
+      (ca.update.mock.calls[0] as unknown[])[0] as {
+        data: Record<string, unknown>;
+      }
+    ).data;
+    expect(crypto.decrypt(data.recipientIdDocEnc as string)).toBe('E-87654321');
+    expect(data.recipientIdDocBlind).toBe(crypto.blindIndex('E', '87654321'));
+    expect(data.recipientIdDoc).toBeNull();
+  });
+
+  it('an invalid new cedula is SHIPPING_INVALID and writes nothing', async () => {
+    const { svc, ca } = buildWrite({});
+    await expect(
+      svc.update('c', U1, { recipientIdDoc: 'hola' }),
+    ).rejects.toMatchObject({
+      response: {
+        errorCode: 'SHIPPING_INVALID',
+        details: { errors: [{ field: 'recipientIdDoc', code: 'INVALID' }] },
+      },
+    });
+    expect(ca.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('toAddressResponse (FR-125)', () => {
+  const row = (over: Record<string, unknown>) =>
+    ({
+      id: U1,
+      label: null,
+      recipientName: 'M',
+      recipientPhone: '1',
+      recipientIdDoc: null,
+      recipientIdDocEnc: null,
+      deliveryMode: 'HOME_DELIVERY',
+      agency: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...over,
+    }) as never;
+  it('always masked: ciphertext, legacy plain or none', () => {
+    expect(
+      toAddressResponse(row({ recipientIdDocEnc: ENC_OLD }), crypto)
+        .recipientIdDoc,
+    ).toBe('V-****5678');
+    expect(
+      toAddressResponse(row({ recipientIdDoc: 'v12345678' }), crypto)
+        .recipientIdDoc,
+    ).toBe('V-****5678');
+    expect(toAddressResponse(row({}), crypto).recipientIdDoc).toBeNull();
+    const json = JSON.stringify(
+      toAddressResponse(row({ recipientIdDocEnc: ENC_OLD }), crypto),
+    );
+    expect(json).not.toContain('12345678');
+    expect(json).not.toContain(ENC_OLD);
   });
 });
 

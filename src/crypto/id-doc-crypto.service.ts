@@ -170,6 +170,54 @@ export class IdDocCryptoService implements OnModuleInit {
     return this.encrypt(this.decrypt(stored), target);
   }
 
+  /** Key versions this process can decrypt with (for preflight checks: never the keys). */
+  knownVersions(): number[] {
+    return [...this.ring().keys.keys()].sort((a, b) => a - b);
+  }
+
+  /**
+   * Story 20.3 (backfill `--verify`, scrub, reencrypt): checks ONE stored value without ever
+   * returning it, so the scripts never hold a decrypted cedula. Decrypting here keeps every
+   * `decrypt(` call inside `src/crypto/` (the static test of AC5).
+   *   - `undecryptable`: not a ciphertext, unknown key version or altered (tag).
+   *   - `plain_mismatch`: decrypts, but differs from the normalized `expectedPlain`.
+   *   - `blind_mismatch`: decrypts, but `blind` is not the index of that value (a null blind
+   *     is right only for an unparsed legacy value).
+   */
+  checkStored(
+    stored: string,
+    opts: { expectedPlain?: string | null; blind?: string | null } = {},
+  ): 'ok' | 'undecryptable' | 'plain_mismatch' | 'blind_mismatch' {
+    let canonical: string;
+    try {
+      canonical = this.decrypt(stored);
+    } catch {
+      return 'undecryptable';
+    }
+    if (opts.expectedPlain !== undefined && opts.expectedPlain !== null) {
+      const want = normalizeIdDoc(opts.expectedPlain);
+      if (!want || want.canonical !== canonical) return 'plain_mismatch';
+    }
+    if (opts.blind !== undefined) {
+      const got = normalizeIdDoc(canonical);
+      const expectedBlind =
+        got && !got.unparsed ? this.blindIndex(got.type, got.digits) : null;
+      if ((opts.blind ?? null) !== expectedBlind) return 'blind_mismatch';
+    }
+    return 'ok';
+  }
+
+  /**
+   * Re-encrypts under `toVersion` and proves in memory that the new ciphertext holds exactly the
+   * same value as the old one before returning it. Throws `IdDocDecryptError` on any failure.
+   */
+  reencryptChecked(stored: string, toVersion: number): string {
+    const plain = this.decrypt(stored);
+    const next = this.encrypt(plain, toVersion);
+    if (this.decrypt(next) !== plain) throw new IdDocDecryptError();
+    return next;
+  }
+
   // --- Blind index and email hash --------------------------------------------
 
   /**

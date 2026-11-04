@@ -73,8 +73,9 @@ for var in CUSTOMER_AUTH_SECRET; do
   grep -Eq "^${var}=.+" "$ENV_FILE" || fail "$var is missing in $ENV_FILE — see docs/deployment.md §1.5"
 done
 # Story 20.2: the service does not boot without the ID document keyring either
-# (docs/deployment.md section 14). Only presence is checked here; the app
-# validates the values at boot and never prints them.
+# (docs/deployment.md section 14). Only PRESENCE is checked here (cheap, before the
+# checkout/build); the VALUES are validated further down with the app's own parser
+# (Story 20.3), because a copy of .env.example passes a '^VAR=.+' test.
 for var in IDDOC_ENC_KEYS IDDOC_ENC_ACTIVE_KEY IDDOC_BLIND_KEY; do
   grep -Eq "^${var}=.+" "$ENV_FILE" || fail "$var is missing in $ENV_FILE — see docs/deployment.md §14"
 done
@@ -93,6 +94,14 @@ pnpm install --frozen-lockfile
 
 log "building"
 pnpm build
+
+# Story 20.3: validate the ID document keyring with the SAME parser the service runs at boot
+# (parseIdDocKeyring), before the migrations and the restart, so a placeholder or a malformed
+# key stops the deploy here instead of crash-looping the service. Prints variable names and
+# versions only, never a key. The file is read as data (dotenv), not sourced: a copy of
+# .env.example has '<...>' placeholders that bash would choke on.
+log "validating the ID document keyring (parseIdDocKeyring)"
+node dist/crypto/cli/check-keyring.js --env-file "$ENV_FILE" || fail "the ID document keyring in $ENV_FILE is invalid (see above; docs/deployment.md section 14). Nothing was migrated and the service was NOT restarted."
 
 # Explicit, separate migration step — see file header. Uses $ENV_FILE's
 # DATABASE_URL (loaded into the shell below), never an implicit boot-time
@@ -180,13 +189,45 @@ PORT_VALUE="${PORT_VALUE:-3000}"
 log "waiting for health check on 127.0.0.1:${PORT_VALUE}/api/v1/health"
 attempt=0
 max_attempts=15
+HEALTH_OK=1
 until curl --fail --silent --max-time 3 "http://127.0.0.1:${PORT_VALUE}/api/v1/health" >/dev/null; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge "$max_attempts" ]; then
     log "WARNING: health check did not return 200 after ${max_attempts} attempts — check 'systemctl status ${SERVICE_NAME}' and 'journalctl -u ${SERVICE_NAME}' on the VPS"
-    exit 0
+    HEALTH_OK=0
+    break
   fi
   sleep 2
 done
 
+# Story 20.3 (FR-128, AD-96): encrypt the ID documents that are still plain, then prove none is
+# left. This runs AFTER the restart on purpose: the new build already reads `Enc ?? plain` and
+# writes only `Enc`, so the service is fully usable while (and if) the backfill does not finish.
+# A failure here NEVER takes the service down (it is already running) and is NEVER silent: it
+# prints the reason, and the deploy ends with a non-zero status (red CI job) and the exact command
+# to resume. The backfill is idempotent and resumable, and runs with DATABASE_URL, the service's
+# own limited role (not the migration owner).
+BACKFILL_OK=1
+backfill_step() {
+  # `timeout` (coreutils) keeps a stuck run from hanging the deploy; the run is resumable.
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${IDDOC_BACKFILL_TIMEOUT_SECONDS:-1800}" "$@"
+  else
+    "$@"
+  fi
+}
+log "ID documents: pnpm iddoc:backfill"
+if ! backfill_step pnpm iddoc:backfill; then BACKFILL_OK=0; fi
+if [ "$BACKFILL_OK" -eq 1 ]; then
+  log "ID documents: pnpm iddoc:backfill --check"
+  if ! backfill_step pnpm iddoc:backfill --check; then BACKFILL_OK=0; fi
+fi
+if [ "$BACKFILL_OK" -ne 1 ]; then
+  printf '[deploy] ERROR: the ID document backfill or its check FAILED (see the output above). The service %s is UP and serving this build: rows not encrypted yet are still readable (fallback) and every new row is written encrypted. Resume with: cd %s && set -a && source %s && set +a && pnpm iddoc:backfill && pnpm iddoc:backfill --check (docs/deployment.md section 15).\n' "$SERVICE_NAME" "$APP_DIR" "$ENV_FILE" >&2
+  exit 1
+fi
+
+if [ "$HEALTH_OK" -ne 1 ]; then
+  exit 0
+fi
 log "health check OK — deploy of $ENVIRONMENT at $GIT_REF complete"

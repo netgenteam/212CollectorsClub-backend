@@ -71,6 +71,96 @@ describe('redactString (AC7)', () => {
   });
 });
 
+describe('redactString by field-name context (Story 20.3, QA of 20.2)', () => {
+  const V = '12345678';
+  it.each([
+    ['plain key: value', 'recipientIdDoc: 12345678'],
+    ['key=value', 'recipientIdDoc=12345678'],
+    ['JSON', '{"recipientIdDoc":"12345678"}'],
+    ['JSON with spaces', '{ "recipientIdDoc" : "12345678" }'],
+    [
+      'escaped JSON (JSON inside a string)',
+      '{\\"recipientIdDoc\\":\\"12345678\\"}',
+    ],
+    ['single quotes', "recipientIdDoc: '12345678'"],
+    [
+      'Postgres unique key',
+      'duplicate key value violates unique constraint "x_idx"\nDETAIL:  Key (recipientIdDoc)=(12345678) already exists.',
+    ],
+    [
+      'Postgres multi-column key',
+      'Key (customerId, recipientIdDoc)=(a1b2, 12345678) already exists.',
+    ],
+    ['buyer field', 'buyerIdDoc: 12345678'],
+    ['cedula', 'cedula: 12345678'],
+    ['with a space inside the value', 'recipientIdDoc: "12 345 678"'],
+    [
+      'Prisma-style data',
+      'data: { recipientIdDoc: "12345678", recipientName: "Ana" }',
+    ],
+  ])('%s', (_n, line) => {
+    const out = redactString(line);
+    expect(out, line).not.toContain(V);
+    expect(out).not.toContain('12 345 678');
+  });
+
+  it('keeps the label and the surrounding text useful', () => {
+    expect(redactString('failed for recipientIdDoc: 12345678, retrying')).toBe(
+      'failed for recipientIdDoc: [REDACTED], retrying',
+    );
+    expect(
+      redactString('Key (recipientIdDoc)=(12345678) already exists.'),
+    ).toBe('Key (recipientIdDoc)=([REDACTED]) already exists.');
+  });
+
+  it.each([
+    ['ORD-V12345678', 'ORD-V12345678'],
+    ['P-AB123456', 'P-AB123456'],
+    ['P AB123456', 'cedula P AB123456 ok'],
+    ['E-12345678 after a word', 'order-E-12345678'],
+  ])('shapes with a prefix or letters: %s', (_n, line) => {
+    expect(redactString(line)).toContain(REDACTED_ID_DOC);
+    expect(redactString(line)).not.toMatch(/12345678|AB123456/);
+  });
+
+  it('the Enc / Blind columns: ciphertext and blind index never appear', () => {
+    const enc =
+      'v1:' + 'A'.repeat(16) + ':' + 'B'.repeat(22) + ':' + 'C'.repeat(20);
+    const blind = 'ab'.repeat(32);
+    expect(redactString(`recipientIdDocEnc: ${enc}`)).not.toContain('AAAA');
+    expect(
+      redactString(`Key (recipientIdDocBlind)=(${blind}) already exists.`),
+    ).not.toContain(blind);
+    expect(
+      redactString(`row {"buyerIdDocBlind":"${blind}","x":1}`),
+    ).not.toContain(blind);
+    expect(redactString(`stored ${enc} in the row`)).toBe(
+      'stored [REDACTED_ENC] in the row',
+    );
+  });
+
+  it('does not touch what is not a cedula', () => {
+    const safe = [
+      'recipientName: Ana, municipality: Baruta',
+      'order 4821 pid 1234567 PENDING1 PAYMENT2 PAGO-MOVIL-7',
+      'cart e1234567-89ab-4cde-8f01-23456789abcd item a1b2-e12345678901',
+      'status: v1:ok',
+      'recipientIdDoc: [REDACTED]',
+    ];
+    for (const s of safe) expect(redactString(s), s).toBe(s);
+    expect(
+      redactString('recipientIdDoc: [REDACTED] and recipientIdDoc: 12345678'),
+    ).toBe('recipientIdDoc: [REDACTED] and recipientIdDoc: [REDACTED]');
+  });
+
+  it('is fast on a huge line without the keywords', () => {
+    const t = Date.now();
+    redactString('x'.repeat(2_000_000));
+    redactString('recipientIdDoc: 1 '.repeat(20_000));
+    expect(Date.now() - t).toBeLessThan(1500);
+  });
+});
+
 describe('redactDeep (AC7)', () => {
   it('masks sensitive keys at any depth, in arrays and in nested objects', () => {
     const input = {

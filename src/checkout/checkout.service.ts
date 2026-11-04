@@ -36,8 +36,10 @@ import {
 import { ShippingValidationService } from '../shipping/shipping-validation.service.js';
 import {
   assertCheckoutShippingPreconditions,
+  prepareCheckoutIdDoc,
   resolveCheckoutShipping,
 } from './checkout-shipping.js';
+import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
 import { FxRateService } from '../fx/fx-rate.service.js';
 import { ConsentService } from '../legal/consent.service.js';
 import { ConsentContext } from '../generated/prisma/enums.js';
@@ -168,6 +170,7 @@ export class CheckoutService {
     private readonly shipping: ShippingValidationService,
     private readonly fxRates: FxRateService,
     private readonly consent: ConsentService,
+    private readonly idDocCrypto: IdDocCryptoService,
   ) {}
 
   /**
@@ -228,6 +231,10 @@ export class CheckoutService {
     // pending_verification.
     const isStripe = dto.paymentRail === CheckoutPaymentRail.STRIPE;
 
+    // Story 20.3 (AD-96/97): the cedula is normalized and encrypted HERE, before the
+    // transaction opens (synchronous, no I/O, a few microseconds).
+    const preparedIdDoc = prepareCheckoutIdDoc(dto, this.idDocCrypto);
+
     const result = await this.prisma.$transaction(
       async (tx): Promise<CheckoutTransactionResult> => {
         // Story 19.4 (AD-92, FR-114): FIRST statement of the transaction,
@@ -248,6 +255,7 @@ export class CheckoutService {
           this.shipping,
           dto,
           customer?.id ?? null,
+          { crypto: this.idDocCrypto, prepared: preparedIdDoc },
         );
 
         const cart = await tx.cart.findFirst({

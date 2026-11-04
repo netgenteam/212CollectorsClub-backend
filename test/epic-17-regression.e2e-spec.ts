@@ -267,7 +267,7 @@ describe('Epic 17 regression (e2e, Story 17.6)', { timeout: 60000 }, () => {
       b = await customer('b');
       const first = (await postAddr(a.s, addrBody()).expect(201)).body as Addr;
       expect(first).toMatchObject({
-        recipientIdDoc: 'V-12345678',
+        recipientIdDoc: 'V-****5678',
         isDefault: true,
       });
       const second = (
@@ -368,7 +368,6 @@ describe('Epic 17 regression (e2e, Story 17.6)', { timeout: 60000 }, () => {
         await prisma.order.findUniqueOrThrow({ where: { id: orderId } }),
       ).toMatchObject({
         shippingAgencyId: agency.id,
-        recipientIdDoc: 'V-12345678',
         deliveryMode: 'HOME_DELIVERY',
         municipality: 'Baruta',
         city: 'Baruta',
@@ -422,7 +421,7 @@ describe('Epic 17 regression (e2e, Story 17.6)', { timeout: 60000 }, () => {
           trackingNumber: 'AB-123',
           trackingUrl: 'https://track.test/AB-123/x',
           shippingAgency: { code: agency.code },
-          recipientIdDoc: 'V-12345678',
+          recipientIdDoc: 'V-****5678', // Story 20.3: masked in every view
         });
         expect(JSON.stringify(body)).not.toContain('trackingUrlTemplate');
       }

@@ -601,16 +601,27 @@ model Order {
 
   /// Story 17.1 (AD-70): national-shipping snapshot. All nullable — historical
   /// orders (incl. PICKUP) keep null; values are copied, no FK to the address.
-  recipientIdDoc   String?         @db.VarChar(12)
-  deliveryMode     DeliveryMode?
-  shippingAgencyId String?         @db.Uuid
-  shippingAgency   ShippingAgency? @relation(fields: [shippingAgencyId], references: [id], onDelete: SetNull)
-  agencyBranchName String?         @db.VarChar(150)
-  agencyBranchCode String?         @db.VarChar(50)
-  municipality     String?         @db.VarChar(100)
-  parish           String?         @db.VarChar(100)
-  referencePoint   String?         @db.VarChar(200)
-  trackingNumber   String?         @db.VarChar(64)
+  recipientIdDoc      String?         @db.VarChar(12)
+  /// Story 20.3 (AD-96): the cedula lives ONLY encrypted (AES-256-GCM `v<N>:...`) from here on;
+  /// the plain column above is read as a fallback until phase 2 and is NULL on new rows. The
+  /// Blind column is the keyed equality index (HMAC), never a LIKE target. Orders keep these for
+  /// the whole fiscal term (A86): no script purges or masks them irreversibly.
+  recipientIdDocEnc   String?         @db.Text
+  recipientIdDocBlind String?         @db.VarChar(64)
+  /// Story 20.3 (AD-96/97): fiscal ID of the buyer (written from Story 20.4; NULL on historical orders, A88).
+  buyerIdType         BuyerIdType?
+  buyerIdDocEnc       String?         @db.Text
+  buyerIdDocBlind     String?         @db.VarChar(64)
+  buyerLegalName      String?         @db.VarChar(200)
+  deliveryMode        DeliveryMode?
+  shippingAgencyId    String?         @db.Uuid
+  shippingAgency      ShippingAgency? @relation(fields: [shippingAgencyId], references: [id], onDelete: SetNull)
+  agencyBranchName    String?         @db.VarChar(150)
+  agencyBranchCode    String?         @db.VarChar(50)
+  municipality        String?         @db.VarChar(100)
+  parish              String?         @db.VarChar(100)
+  referencePoint      String?         @db.VarChar(200)
+  trackingNumber      String?         @db.VarChar(64)
 
   totalUsd        Decimal       @db.Decimal(10, 2)
   /// Null for Stripe orders (AD-3) — only ever set, once, for Pago Móvil.
@@ -667,6 +678,8 @@ model Order {
   @@index([stripePaymentIntentId])
   @@index([shippingAgencyId])
   @@index([status, createdAt])
+  @@index([recipientIdDocBlind])
+  @@index([buyerIdDocBlind])
   @@map("Orders")
 }
 
@@ -1159,6 +1172,15 @@ enum DeliveryMode {
   HOME_DELIVERY
 }
 
+/// Story 20.3 (AD-96, FR-127): type letter of the buyer's fiscal ID.
+enum BuyerIdType {
+  V
+  E
+  J
+  P
+  G
+}
+
 /// Story 17.1 (AD-70, FR-82): shipping agency catalog (MRW, Zoom, Tealca,
 /// Domesa), seeded inside the migration. `code` is UPPER-case.
 model ShippingAgency {
@@ -1203,30 +1225,34 @@ model ShippingBranch {
 /// "Customer_Addresses_customerId_default_key" ON ("customerId") WHERE "isDefault"
 /// (hand-written at the end of migration 20261026100000; one default per customer).
 model CustomerAddress {
-  id               String         @id @default(uuid()) @db.Uuid
-  customerId       String         @db.Uuid
-  customer         Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  agencyId         String         @db.Uuid
-  agency           ShippingAgency @relation(fields: [agencyId], references: [id], onDelete: Restrict)
-  label            String?        @db.VarChar(50)
-  recipientName    String         @db.VarChar(200)
-  recipientPhone   String         @db.VarChar(20)
-  recipientIdDoc   String         @db.VarChar(12)
-  deliveryMode     DeliveryMode
-  agencyBranchName String?        @db.VarChar(150)
-  agencyBranchCode String?        @db.VarChar(50)
-  state            String         @db.VarChar(100)
-  municipality     String         @db.VarChar(100)
-  parish           String?        @db.VarChar(100)
-  addressLine1     String?        @db.VarChar(200)
-  addressLine2     String?        @db.VarChar(200)
-  referencePoint   String?        @db.VarChar(200)
-  isDefault        Boolean        @default(false)
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  id                  String         @id @default(uuid()) @db.Uuid
+  customerId          String         @db.Uuid
+  customer            Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  agencyId            String         @db.Uuid
+  agency              ShippingAgency @relation(fields: [agencyId], references: [id], onDelete: Restrict)
+  label               String?        @db.VarChar(50)
+  recipientName       String         @db.VarChar(200)
+  recipientPhone      String         @db.VarChar(20)
+  /// Story 20.3: nullable since the column became a fallback (phase 1 of AD-96); NULL on new rows.
+  recipientIdDoc      String?        @db.VarChar(12)
+  recipientIdDocEnc   String?        @db.Text
+  recipientIdDocBlind String?        @db.VarChar(64)
+  deliveryMode        DeliveryMode
+  agencyBranchName    String?        @db.VarChar(150)
+  agencyBranchCode    String?        @db.VarChar(50)
+  state               String         @db.VarChar(100)
+  municipality        String         @db.VarChar(100)
+  parish              String?        @db.VarChar(100)
+  addressLine1        String?        @db.VarChar(200)
+  addressLine2        String?        @db.VarChar(200)
+  referencePoint      String?        @db.VarChar(200)
+  isDefault           Boolean        @default(false)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
 
   @@index([customerId, createdAt])
   @@index([agencyId])
+  @@index([recipientIdDocBlind])
   @@map("Customer_Addresses")
 }
 
@@ -1500,21 +1526,21 @@ model ConsentRecord {
 /// `AuditService` with raw SQL, which a static test enforces. `seq` is gapless and assigned by the service.
 /// Raw reads/writes use unqualified names so the e2e can run them against a sandbox schema.
 model AuditEvent {
-  seq         BigInt                   @id
-  occurredAt  DateTime                 @db.Timestamptz(3)
-  actorType   String                   @db.VarChar(16)
-  actorId     String?                  @db.Uuid
-  action      String                   @db.VarChar(64)
-  entityType  String                   @db.VarChar(64)
-  entityId    String                   @db.VarChar(128)
+  seq         BigInt               @id
+  occurredAt  DateTime             @db.Timestamptz(3)
+  actorType   String               @db.VarChar(16)
+  actorId     String?              @db.Uuid
+  action      String               @db.VarChar(64)
+  entityType  String               @db.VarChar(64)
+  entityId    String               @db.VarChar(128)
   before      Json?
   after       Json?
-  reason      String?                  @db.VarChar(500)
-  requestId   String?                  @db.Uuid
+  reason      String?              @db.VarChar(500)
+  requestId   String?              @db.Uuid
   ip          Unsupported("inet")?
-  hashVersion Int                      @default(1) @db.SmallInt
-  prevHash    String                   @db.Char(64)
-  hash        String                   @unique @db.Char(64)
+  hashVersion Int                  @default(1) @db.SmallInt
+  prevHash    String               @db.Char(64)
+  hash        String               @unique @db.Char(64)
 
   @@index([occurredAt])
   @@index([action, seq])

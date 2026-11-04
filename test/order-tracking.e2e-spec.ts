@@ -221,7 +221,7 @@ describe('Order shipping exposure + tracking (e2e)', () => {
     const check = (f: Record<string, unknown>) => {
       expect(f).toMatchObject({
         type: 'delivery',
-        recipientIdDoc: 'V-12345678',
+        recipientIdDoc: 'V-****5678', // Story 20.3: masked in every view
         deliveryMode: 'agency_office',
         agencyBranchName: 'Sucursal Test',
         agencyBranchCode: 'ST-1',

@@ -1,3 +1,4 @@
+import { makeTestCrypto } from '../../test/helpers/iddoc-test-crypto.js';
 import { FxRateService } from '../fx/fx-rate.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { CheckoutService } from './checkout.service.js';
@@ -74,6 +75,7 @@ describe('CheckoutService (account)', () => {
           Promise.resolve({ now: new Date(), versions: {} }),
         recordConsents: () => Promise.resolve(0),
       } as never,
+      makeTestCrypto(),
     );
   });
 

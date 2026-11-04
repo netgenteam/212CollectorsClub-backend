@@ -9,6 +9,7 @@ import request from 'supertest';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { expectOnlyEncrypted } from './helpers/iddoc-assert.js';
 import { registerConsent } from './helpers/legal-consent.js';
 
 const PASSWORD = 'Correct-horse-17-4!';
@@ -316,11 +317,11 @@ describe('Checkout shipping (e2e, Story 17.4)', { timeout: 30000 }, () => {
       const o = await prisma.order.findUniqueOrThrow({
         where: { id: (res.body as Chk).orderId },
       });
+      expectOnlyEncrypted(o, 'V-12345678'); // Story 20.3: encrypted, plain column NULL
       expect(o).toMatchObject({
         fulfillmentType: 'DELIVERY',
         recipientName: 'Maria Perez',
         recipientPhone: '+584121234567',
-        recipientIdDoc: 'V-12345678',
         deliveryMode: 'HOME_DELIVERY',
         shippingAgencyId: mrw.id,
         state: 'Miranda',
@@ -453,7 +454,6 @@ describe('Checkout shipping (e2e, Story 17.4)', { timeout: 30000 }, () => {
         fulfillmentType: 'DELIVERY',
         recipientName: 'Saved Name',
         recipientPhone: '04121234567',
-        recipientIdDoc: 'V-12345678',
         deliveryMode: 'HOME_DELIVERY',
         shippingAgencyId: mrw.id,
         state: 'Miranda',
@@ -465,9 +465,10 @@ describe('Checkout shipping (e2e, Story 17.4)', { timeout: 30000 }, () => {
         referencePoint: 'Saved ref',
         country: 'Venezuela',
       };
-      expect(
-        await prisma.order.findUniqueOrThrow({ where: { id } }),
-      ).toMatchObject(expected);
+      const snap = await prisma.order.findUniqueOrThrow({ where: { id } });
+      expect(snap).toMatchObject(expected);
+      // The address row was a legacy one (plain only): the order still stores ciphertext only.
+      expectOnlyEncrypted(snap, 'V-12345678');
       await prisma.customerAddress.update({
         where: { id: addrId },
         data: { recipientName: 'Changed', municipality: 'Chacao' },

@@ -137,7 +137,7 @@ describe('Customer addresses list/create (e2e, Story 17.2)', () => {
     const a1 = r1.body as Addr;
     expect(a1).toMatchObject({
       isDefault: true,
-      recipientIdDoc: 'V-12345678',
+      recipientIdDoc: 'V-****5678', // Story 20.3: always masked
       recipientPhone: '+584121234567',
       deliveryMode: 'home_delivery',
     });

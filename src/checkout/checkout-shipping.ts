@@ -3,7 +3,9 @@ import { ApiException } from '../common/api-exception.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import type { DeliveryMode } from '../generated/prisma/enums.js';
 import type { ShippingValidationService } from '../shipping/shipping-validation.service.js';
+import type { PreparedIdDoc } from '../crypto/id-doc-crypto.service.js';
 import {
+  canonicalRecipientIdDoc,
   validateShippingInput,
   type DeliveryModeWire,
   type ShippingFieldError,
@@ -29,11 +31,28 @@ export interface CheckoutShippingInput {
   referencePoint?: string;
 }
 
-/** Values copied onto `Order` (never a FK to the address: AD-74). */
+/** What the checkout needs from `IdDocCryptoService` (a seam for unit tests). */
+export interface IdDocProtector {
+  protect(raw: unknown): PreparedIdDoc | null;
+}
+
+/**
+ * Story 20.3 (AD-96/97): the cedula is normalized and ENCRYPTED in the service BEFORE the
+ * transaction opens (no CPU work and no way to throw inside it); the snapshot builder only
+ * receives `{enc, blind}`. `prepared` is `null` when there is nothing to encrypt (saved address,
+ * legacy flat format) or the value is not valid (the builder then reports SHIPPING_INVALID).
+ */
+export interface CheckoutIdDoc {
+  crypto: IdDocProtector;
+  prepared: PreparedIdDoc | null;
+}
+
+/** Values copied onto `Order` (never a FK to the address: AD-74). The plain `recipientIdDoc` is never written (stays NULL). */
 export interface OrderShippingData {
   recipientName: string;
   recipientPhone: string;
-  recipientIdDoc: string | null;
+  recipientIdDocEnc: string | null;
+  recipientIdDocBlind: string | null;
   deliveryMode: DeliveryMode | null;
   shippingAgencyId: string | null;
   agencyBranchName: string | null;
@@ -119,11 +138,35 @@ export function assertCheckoutShippingPreconditions(
   }
 }
 
-function fromValue(v: ShippingValue, agencyId: string): OrderShippingData {
+/**
+ * Pure and synchronous, no I/O: call it BEFORE `$transaction`. Mirrors the validation of the body
+ * path (`canonicalRecipientIdDoc`); an invalid value yields `null` and the builder rejects it.
+ */
+export function prepareCheckoutIdDoc(
+  dto: CheckoutShippingInput,
+  crypto: IdDocProtector,
+): PreparedIdDoc | null {
+  if (!isNewShippingFormat(dto) || dto.customerAddressId !== undefined) {
+    return null;
+  }
+  if (typeof dto.recipientIdDoc !== 'string') return null;
+  const canonical = canonicalRecipientIdDoc(dto.recipientIdDoc.trim());
+  return canonical === null ? null : crypto.protect(canonical);
+}
+
+function fromValue(
+  v: ShippingValue,
+  agencyId: string,
+  idDoc: CheckoutIdDoc,
+): OrderShippingData {
+  const same =
+    idDoc.prepared !== null && idDoc.prepared.canonical === v.recipientIdDoc;
+  const p = same ? idDoc.prepared : idDoc.crypto.protect(v.recipientIdDoc);
   return {
     recipientName: v.recipientName,
     recipientPhone: v.recipientPhone,
-    recipientIdDoc: v.recipientIdDoc,
+    recipientIdDocEnc: p?.enc ?? null,
+    recipientIdDocBlind: p?.blind ?? null,
     deliveryMode:
       v.deliveryMode === 'home_delivery' ? 'HOME_DELIVERY' : 'AGENCY_OFFICE',
     shippingAgencyId: agencyId,
@@ -150,12 +193,14 @@ export async function resolveCheckoutShipping(
   shipping: ShippingValidationService,
   dto: CheckoutShippingInput & { city?: string },
   customerId: string | null,
+  idDoc: CheckoutIdDoc,
 ): Promise<OrderShippingData> {
   if (!isNewShippingFormat(dto)) {
     return {
       recipientName: dto.recipientName as string,
       recipientPhone: dto.recipientPhone as string,
-      recipientIdDoc: null,
+      recipientIdDocEnc: null,
+      recipientIdDocBlind: null,
       deliveryMode: null,
       shippingAgencyId: null,
       agencyBranchName: null,
@@ -187,10 +232,20 @@ export async function resolveCheckoutShipping(
       { requireActive: true },
       tx,
     );
+    // The ciphertext and its blind index are COPIED from the row, never decrypted. A row the
+    // backfill has not reached yet (plain only) is encrypted here so the order never stores plain.
+    let enc = addr.recipientIdDocEnc;
+    let blind = addr.recipientIdDocBlind;
+    if (!enc && addr.recipientIdDoc) {
+      const p = idDoc.crypto.protect(addr.recipientIdDoc);
+      enc = p?.enc ?? null;
+      blind = p?.blind ?? null;
+    }
     return {
       recipientName: addr.recipientName,
       recipientPhone: addr.recipientPhone,
-      recipientIdDoc: addr.recipientIdDoc,
+      recipientIdDocEnc: enc,
+      recipientIdDocBlind: blind,
       deliveryMode: addr.deliveryMode,
       shippingAgencyId: addr.agencyId,
       agencyBranchName: addr.agencyBranchName,
@@ -235,5 +290,5 @@ export async function resolveCheckoutShipping(
     { requireActive: true },
     tx,
   );
-  return fromValue(checked.value, agencyId);
+  return fromValue(checked.value, agencyId, idDoc);
 }

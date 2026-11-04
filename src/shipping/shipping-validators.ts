@@ -1,3 +1,5 @@
+import { normalizeIdDoc } from '../crypto/id-doc-normalize.js';
+
 export type DeliveryModeWire = 'agency_office' | 'home_delivery';
 
 export interface ShippingInput {
@@ -39,12 +41,22 @@ export type ShippingValidation =
   | { value: ShippingValue; errors?: undefined }
   | { value?: undefined; errors: ShippingFieldError[] };
 
-/** Story 17.2 (AD-71): `v12345678` -> `V-12345678`; anything else -> null. */
-export function normalizeIdDoc(raw: string): string | null {
-  const s = raw.toUpperCase().replace(/[\s.-]/g, '');
-  const m = /^([VE])(\d{6,9})$/.exec(s);
-  return m ? `${m[1]}-${m[2]}` : null;
+/**
+ * Story 17.2 (AD-71) + 20.3: the RECIPIENT rule for a delivery: only V/E with 6..9 digits.
+ * `v12345678` -> `V-12345678`; anything else -> null. The canonical text comes from the single
+ * normalizer of `src/crypto` (`normalizeIdDoc`, A87): this function only adds the policy
+ * (types and length), it does not parse by itself, so the two can never disagree on what the
+ * same cedula looks like. (It used to be a second function with the same name.)
+ */
+export function canonicalRecipientIdDoc(raw: string): string | null {
+  const n = normalizeIdDoc(raw);
+  if (!n || n.unparsed) return null;
+  if (n.type !== 'V' && n.type !== 'E') return null;
+  return /^\d{6,9}$/.test(n.digits) ? n.canonical : null;
 }
+
+/** A value the API itself returns (`V-****5678`) and a client may echo back: never a new cedula. */
+export const isMaskedIdDoc = (raw: string): boolean => raw.includes('*');
 
 /** Strips separators; optional leading `+`; 10-15 digits, else null. */
 export function normalizePhone(raw: string): string | null {
@@ -64,6 +76,7 @@ const clean = (v: string | null | undefined): string | null => {
  */
 export function validateShippingInput(
   input: ShippingInput,
+  opts: { idDoc?: 'required' | 'keep' } = {},
 ): ShippingValidation {
   const errors: ShippingFieldError[] = [];
   const need = (field: string, v: string | null): string => {
@@ -85,12 +98,16 @@ export function validateShippingInput(
     else recipientPhone = p;
   }
 
+  // `keep` (address edit, Story 20.3): the stored cedula is encrypted and stays as it is, so it is
+  // not validated here; the value returned is '' and the caller must not write it.
   let recipientIdDoc = '';
   const idRaw = clean(input.recipientIdDoc);
-  if (idRaw === null)
+  if (opts.idDoc === 'keep') {
+    // nothing to check
+  } else if (idRaw === null)
     errors.push({ field: 'recipientIdDoc', code: 'REQUIRED' });
   else {
-    const d = normalizeIdDoc(idRaw);
+    const d = canonicalRecipientIdDoc(idRaw);
     if (d === null) errors.push({ field: 'recipientIdDoc', code: 'INVALID' });
     else recipientIdDoc = d;
   }

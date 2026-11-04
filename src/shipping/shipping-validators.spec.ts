@@ -1,11 +1,11 @@
 import {
-  normalizeIdDoc,
+  canonicalRecipientIdDoc,
   normalizePhone,
   validateShippingInput,
   type ShippingInput,
 } from './shipping-validators.js';
 
-describe('normalizeIdDoc', () => {
+describe('canonicalRecipientIdDoc', () => {
   it.each([
     ['v12345678', 'V-12345678'],
     [' V 12.345.678 ', 'V-12345678'],
@@ -17,7 +17,7 @@ describe('normalizeIdDoc', () => {
     ['V-1234567890', null],
     ['', null],
   ])('%s -> %s', (raw, expected) => {
-    expect(normalizeIdDoc(raw)).toBe(expected);
+    expect(canonicalRecipientIdDoc(raw)).toBe(expected);
   });
 });
 
