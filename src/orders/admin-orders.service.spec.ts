@@ -255,7 +255,7 @@ describe('AdminOrdersService', () => {
         prisma.order.findMany.mockResolvedValue([]);
         prisma.order.count.mockResolvedValue(0);
 
-        await service.listOrders(buildQuery({ idDoc: raw }));
+        await service.listOrders(buildQuery(), raw);
 
         const expected = blindOf('V-12345678');
         expect(prisma.order.findMany).toHaveBeenCalledWith(
@@ -278,10 +278,8 @@ describe('AdminOrdersService', () => {
       prisma.order.findMany.mockResolvedValue([]);
       prisma.order.count.mockResolvedValue(0);
       await service.listOrders(
-        buildQuery({
-          idDoc: 'E-81234567',
-          status: AdminOrderStatusFilter.PAID,
-        }),
+        buildQuery({ status: AdminOrderStatusFilter.PAID }),
+        'E-81234567',
       );
       expect(prisma.order.count).toHaveBeenCalledWith({
         where: {
@@ -310,7 +308,7 @@ describe('AdminOrdersService', () => {
       'rejects %j with 400 ID_DOC_FILTER_INVALID and never echoes it',
       async (raw) => {
         try {
-          await service.listOrders(buildQuery({ idDoc: raw }));
+          await service.listOrders(buildQuery(), raw);
           expect.unreachable('should have thrown');
         } catch (err) {
           expect(err).toBeInstanceOf(ApiException);
@@ -334,10 +332,23 @@ describe('AdminOrdersService', () => {
       },
     );
 
+    it('the GET query DTO has no idDoc at all (a cedula never comes from a URL)', () => {
+      expect(Object.keys(new ListAdminOrdersQueryDto())).not.toContain('idDoc');
+      // without the second argument no idDoc filter is built, whatever else the query carries
+      const q = { ...buildQuery(), idDoc: 'V-12345678' } as never;
+      prisma.order.findMany.mockResolvedValue([]);
+      prisma.order.count.mockResolvedValue(0);
+      return service.listOrders(q).then(() => {
+        expect(prisma.order.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({ where: {} }),
+        );
+      });
+    });
+
     it('a valid RIF with a wrong check digit is searchable (finds nothing, does not fail)', async () => {
       prisma.order.findMany.mockResolvedValue([]);
       prisma.order.count.mockResolvedValue(0);
-      const r = await service.listOrders(buildQuery({ idDoc: 'J-123456780' }));
+      const r = await service.listOrders(buildQuery(), 'J-123456780');
       expect(r.data).toEqual([]);
     });
   });

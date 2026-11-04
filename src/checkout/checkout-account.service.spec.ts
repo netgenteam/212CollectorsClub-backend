@@ -2,6 +2,7 @@ import { fakeAudit } from '../../test/helpers/fake-audit.js';
 import { makeTestCrypto } from '../../test/helpers/iddoc-test-crypto.js';
 import { FxRateService } from '../fx/fx-rate.service.js';
 import { Prisma } from '../generated/prisma/client.js';
+import { resetCustomerAnonymizedAtProbe } from './checkout-account-lock.js';
 import { CheckoutService } from './checkout.service.js';
 import {
   CheckoutFulfillmentType,
@@ -27,6 +28,7 @@ describe('CheckoutService (account)', () => {
   let service: CheckoutService;
 
   beforeEach(() => {
+    resetCustomerAnonymizedAtProbe();
     tx = {
       cart: { findFirst: vi.fn(), delete: vi.fn() },
       fxRateSetting: { findUnique: vi.fn() },
@@ -65,6 +67,8 @@ describe('CheckoutService (account)', () => {
     service = new CheckoutService(
       {
         $transaction: transaction,
+        // The anonymizedAt probe (a missing $queryRaw used to be swallowed as "absent": fail-open).
+        $queryRaw: vi.fn().mockResolvedValue([{ present: false }]),
         customer: { findUnique: customerFind },
       } as never,
       {} as never,

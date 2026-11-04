@@ -5,9 +5,7 @@ import {
   IsEnum,
   IsInt,
   IsOptional,
-  IsString,
   Max,
-  MaxLength,
   Min,
 } from 'class-validator';
 
@@ -68,6 +66,10 @@ export enum AdminOrdersSortOrder {
  * turn any malformed value (e.g. `page=abc`, an out-of-enum `status`) into
  * a stable 400 before this ever reaches `AdminOrdersService` (NFR-4/NFR-3
  * pattern).
+ *
+ * Story 20.4: there is NO `idDoc` here on purpose. A cedula never travels in a URL (FR-124); the
+ * search by cedula is `POST /admin/orders/search` (`SearchAdminOrdersDto`), and the controller
+ * answers 400 to a GET that carries one.
  */
 export class ListAdminOrdersQueryDto {
   @ApiPropertyOptional({
@@ -122,17 +124,6 @@ export class ListAdminOrdersQueryDto {
   )
   @IsBoolean()
   refundPending?: boolean;
-
-  @ApiPropertyOptional({
-    example: 'V-12345678',
-    maxLength: 30,
-    description:
-      'Story 20.4 (FR-126): exact ID document search (recipient OR buyer), by blind index. Accepts V12345678, v-12.345.678... Equality only: no partial match, no LIKE. A value that is not a complete valid ID is 400 ID_DOC_FILTER_INVALID; no match is an empty list. The value is never logged. Prefer a short-lived admin session: it travels in the URL (nginx logs the path only, see docs/deployment.md 16.6).',
-  })
-  @IsOptional()
-  @IsString()
-  @MaxLength(30)
-  idDoc?: string;
 
   @ApiPropertyOptional({
     enum: AdminOrdersSortOrder,

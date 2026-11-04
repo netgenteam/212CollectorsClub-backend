@@ -325,7 +325,7 @@ export class CheckoutDto {
 
   @ApiPropertyOptional({
     description:
-      'Story 20.4: legal name for the invoice. Required when buyerId.type is J or G; ignored otherwise.',
+      'Story 20.4: legal name for the invoice. Required when buyerId.type is J or G; ignored otherwise. It must NOT contain a cedula/RIF (e.g. `Emp V-87654321 C.A.`, or the company own RIF): that is 400 BUYER_ID_INVALID, field buyerLegalName, reason CONTAINS_ID_DOC (rejected, not cut: the invoice would carry a different name).',
     maxLength: 200,
   })
   @IsOptional()

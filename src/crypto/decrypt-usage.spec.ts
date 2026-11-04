@@ -91,6 +91,27 @@ describe('decrypt usage is confined (AC5, widened in 20.3)', () => {
     }
   });
 
+  it('the reveal service exposes ONE public method (a clear value never leaves without its audit event)', () => {
+    // Story 20.4: `verifyStored` used to be public, returned the clear value and slipped past the
+    // allowlist above (which only looks at the token `decrypt`). Every other method of the class
+    // must be `private` or `#private`; a new public one (e.g. the invoice generator's) is a privacy
+    // decision that has to be added here on purpose, together with the event it records.
+    const text = stripComments(
+      readFileSync(
+        join(process.cwd(), 'src', 'crypto', 'id-doc-reveal.service.ts'),
+        'utf8',
+      ),
+    );
+    const body = text.slice(text.indexOf('export class IdDocRevealService'));
+    const publicMethods = [
+      ...body.matchAll(/^ {2}(?:async\s+)?([A-Za-z_]\w*)\s*[(<]/gm),
+    ]
+      .map((m) => m[1])
+      .filter((n) => n !== 'constructor');
+    expect(publicMethods).toEqual(['revealOrderIdDoc']);
+    expect(body).toMatch(/^ {2}#verifyStored\(/m);
+  });
+
   it.each([
     ['direct call', 'crypto.decrypt(x)'],
     ['spaced call', 'svc.decrypt (x)'],

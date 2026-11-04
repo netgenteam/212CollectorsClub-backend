@@ -11,6 +11,7 @@ import * as argon2 from 'argon2';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { AdminOrdersService } from './../src/orders/admin-orders.service.js';
 import { appCrypto } from './helpers/iddoc-assert.js';
 import { registerConsent } from './helpers/legal-consent.js';
 
@@ -187,6 +188,12 @@ describe(
       request(server())
         .get(`/api/v1/admin/orders${path}`)
         .set('Authorization', `Bearer ${adminToken}`);
+    /** Story 20.4 (FR-124): the cedula search is a POST: the value travels in the body, never in a URL. */
+    const adminSearch = (body: unknown) =>
+      request(server())
+        .post('/api/v1/admin/orders/search')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send(body as object);
 
     /** Captures everything written to stdout/stderr while `fn` runs (the Nest logger prints there). */
     async function captureLogs<T>(
@@ -438,6 +445,45 @@ describe(
           'buyerLegalName',
         );
       });
+
+      it.each([
+        'Emp V-87654321 C.A.',
+        'Inversiones Uno J-070133805 C.A.', // the company's own RIF in its legal name
+      ])(
+        'a cedula / RIF inside buyerLegalName (%s) => 400 BUYER_ID_INVALID CONTAINS_ID_DOC, no Order, never echoed',
+        async (buyerLegalName) => {
+          const body = flat({
+            buyerId: { type: 'J', number: '070133805' },
+            buyerLegalName,
+          });
+          await rejected(
+            body,
+            'BUYER_ID_INVALID',
+            'buyerLegalName',
+            'CONTAINS_ID_DOC',
+          );
+          const cookie = await guestCart();
+          const res = await request(server())
+            .post('/api/v1/checkout')
+            .set('Cookie', cookie)
+            .send(body);
+          expect(JSON.stringify(res.body)).not.toMatch(/87654321|070133805/);
+          // a legitimate legal name with a short alphanumeric token still sells
+          const ok = await request(server())
+            .post('/api/v1/checkout')
+            .set('Cookie', cookie)
+            .send(
+              flat({
+                buyerId: { type: 'J', number: '070133805' },
+                buyerLegalName: 'Inversiones G-20000 C.A.',
+              }),
+            );
+          expect(ok.status).toBe(201);
+          expect(
+            (await orderRow((ok.body as Chk).orderId)).buyerLegalName,
+          ).toBe('Inversiones G-20000 C.A.');
+        },
+      );
 
       it('buyerSameAsRecipient in the legacy flat format => BUYER_ID_REQUIRED', async () => {
         await rejected(
@@ -783,10 +829,11 @@ describe(
       });
     });
 
-    describe('AC6: GET /admin/orders?idDoc= (exact blind-index search)', () => {
+    describe('AC6: POST /admin/orders/search {idDoc} (exact blind-index search; the cedula never in a URL)', () => {
       it('401 without a token', async () => {
         await request(server())
-          .get('/api/v1/admin/orders?idDoc=V-12345678')
+          .post('/api/v1/admin/orders/search')
+          .send({ idDoc: 'V-12345678' })
           .expect(401);
       });
 
@@ -809,9 +856,8 @@ describe(
             `v${r}`,
             ` V-${r.slice(0, 1)}.${r.slice(1, 4)}.${r.slice(4)} `,
           ]) {
-            const res = await adminGet(
-              `?idDoc=${encodeURIComponent(spelling)}`,
-            ).expect(200);
+            const res = await adminSearch({ idDoc: spelling }).expect(200);
+            expect(res.headers['cache-control']).toBe('no-store');
             const got = (res.body as { data: { orderId: string }[] }).data
               .map((d) => d.orderId)
               .sort();
@@ -821,38 +867,137 @@ describe(
             );
           }
           // the buyer E-b of the first order
-          const eb = await adminGet(`?idDoc=E-${b}`).expect(200);
+          const eb = await adminSearch({ idDoc: `E-${b}` }).expect(200);
           expect(
             (eb.body as { data: { orderId: string }[] }).data.map(
               (d) => d.orderId,
             ),
           ).toEqual([ids[0]]);
           // same digits, other type: no match
-          const wrongType = await adminGet(`?idDoc=E-${r}`).expect(200);
+          const wrongType = await adminSearch({ idDoc: `E-${r}` }).expect(200);
           expect((wrongType.body as { data: unknown[] }).data).toEqual([]);
           // a prefix is a valid-length V of its own (7 digits) and finds nothing: no partial match
-          const prefix = await adminGet(`?idDoc=V-${r.slice(0, 7)}`).expect(
-            200,
-          );
+          const prefix = await adminSearch({
+            idDoc: `V-${r.slice(0, 7)}`,
+          }).expect(200);
           expect((prefix.body as { data: unknown[] }).data).toEqual([]);
           // combined with other filters (AND)
-          const combined = await adminGet(
-            `?idDoc=V-${r}&paymentRail=stripe`,
-          ).expect(200);
+          const combined = await adminSearch({
+            idDoc: `V-${r}`,
+            paymentRail: 'stripe',
+          }).expect(200);
           expect((combined.body as { data: unknown[] }).data).toEqual([]);
+          // pagination and sort are the ones of the GET list
+          const page = await adminSearch({
+            idDoc: `V-${r}`,
+            limit: 1,
+            page: 2,
+            sortOrder: 'asc',
+          }).expect(200);
+          expect(page.body).toMatchObject({
+            meta: { page: 2, limit: 1, total: 2, totalPages: 2 },
+          });
+          expect((page.body as { data: unknown[] }).data).toHaveLength(1);
           // an invalid search is a 400 that does not echo the value
-          const bad = await adminGet(`?idDoc=V-${r.slice(0, 3)}`).expect(400);
+          const bad = await adminSearch({ idDoc: `V-${r.slice(0, 3)}` }).expect(
+            400,
+          );
           expect((bad.body as Err).errorCode).toBe('ID_DOC_FILTER_INVALID');
           expect(JSON.stringify(bad.body)).not.toContain(r.slice(0, 3));
           for (const v of ['12345678', 'V-****5678', "V-1' OR 1=1", 'V-%']) {
-            await adminGet(`?idDoc=${encodeURIComponent(v)}`).expect(400);
+            await adminSearch({ idDoc: v }).expect(400);
           }
-          await adminGet('?idDoc=V-12345678&idDoc=V-12345679').expect(400);
+          // body shape: required, string, unknown properties, bad filters
+          for (const body of [
+            {},
+            { idDoc: 12345678 },
+            { idDoc: ['V-12345678'] },
+            { idDoc: '' },
+            { idDoc: 'V'.repeat(31) },
+            { idDoc: 'V-12345678', extra: 1 },
+            { idDoc: 'V-12345678', page: 0 },
+            { idDoc: 'V-12345678', limit: 101 },
+            { idDoc: 'V-12345678', status: 'nope' },
+            { idDoc: 'V-12345678', refundPending: 'true' },
+          ]) {
+            await adminSearch(body).expect(400);
+          }
         });
         expect(other.status).toBe(201);
-        // AC6: no idDoc search parameter reaches a log
+        // AC6: the cedula of a search reaches no log
         expect(out).not.toContain(r);
         expect(out).not.toContain(b);
+      });
+
+      it('GET /admin/orders carrying a cedula is 400 ID_DOC_IN_URL_NOT_ALLOWED: no echo, nothing queried (also idDoc[], idDoc[a], repeated, any case)', async () => {
+        const r = synth();
+        const svc = app.get(AdminOrdersService);
+        const spy = vi.spyOn(svc, 'listOrders');
+        try {
+          const { out } = await captureLogs(async () => {
+            for (const q of [
+              `?idDoc=V-${r}`,
+              `?idDoc[]=V-${r}`,
+              `?idDoc[a]=V-${r}`,
+              `?idDoc[0]=V-${r}&idDoc[1]=V-${r}`,
+              `?idDoc=V-${r}&idDoc=V-${r}`,
+              `?IDDOC=V-${r}`,
+              `?status=paid&idDoc=${encodeURIComponent(`v ${r}`)}`,
+              `?idDoc=`,
+              `?recipientIdDoc=V-${r}`,
+              `?cedula=V-${r}`,
+            ]) {
+              const res = await adminGet(q).expect(400);
+              expect((res.body as Err).errorCode).toBe(
+                'ID_DOC_IN_URL_NOT_ALLOWED',
+              );
+              expect(JSON.stringify(res.body)).not.toContain(r);
+            }
+          });
+          expect(spy).not.toHaveBeenCalled();
+          expect(out).not.toContain(r);
+        } finally {
+          spy.mockRestore();
+        }
+        // a GET without it still lists (and an unauthenticated one is 401 first)
+        await adminGet('?limit=1').expect(200);
+        await request(server())
+          .get(`/api/v1/admin/orders?idDoc=V-${r}`)
+          .expect(401);
+      });
+
+      it('Swagger documents the POST search and no idDoc query parameter on the GET', async () => {
+        const doc = (await request(server()).get('/api/docs-json').expect(200))
+          .body as {
+          paths: Record<
+            string,
+            Record<
+              string,
+              {
+                parameters?: { name: string }[];
+                requestBody?: unknown;
+                responses: Record<string, unknown>;
+              }
+            >
+          >;
+        };
+        const get = doc.paths['/api/v1/admin/orders'].get;
+        expect((get.parameters ?? []).map((p) => p.name)).not.toContain(
+          'idDoc',
+        );
+        expect(JSON.stringify(get.responses)).toContain(
+          'ID_DOC_IN_URL_NOT_ALLOWED',
+        );
+        const post = doc.paths['/api/v1/admin/orders/search'].post;
+        expect(JSON.stringify(post.requestBody)).toContain(
+          'SearchAdminOrdersDto',
+        );
+        expect(JSON.stringify(post.responses)).toContain(
+          'ID_DOC_FILTER_INVALID',
+        );
+        expect(Object.keys(post.responses)).toEqual(
+          expect.arrayContaining(['200', '400', '401']),
+        );
       });
     });
 
@@ -924,7 +1069,7 @@ describe(
         expect(new Set(rows.map((o) => o.buyerIdDocBlind)).size).toBe(1);
         // ... with a fresh IV each: the ciphertexts differ
         expect(new Set(rows.map((o) => o.buyerIdDocEnc)).size).toBe(3);
-        const found = await adminGet(`?idDoc=V-${n}`).expect(200);
+        const found = await adminSearch({ idDoc: `V-${n}` }).expect(200);
         expect((found.body as { meta: { total: number } }).meta.total).toBe(3);
       });
     });
@@ -1035,9 +1180,15 @@ describe(
         ]) {
           expect(text).toContain(code);
         }
+        // FR-124: the cedula is in the BODY of the POST search; the GET documents only the 400.
         const list = JSON.stringify(doc.paths['/api/v1/admin/orders'].get);
-        expect(list).toContain('idDoc');
-        expect(list).toContain('ID_DOC_FILTER_INVALID');
+        expect(list).not.toContain('"name":"idDoc"');
+        expect(list).toContain('ID_DOC_IN_URL_NOT_ALLOWED');
+        const search = JSON.stringify(
+          doc.paths['/api/v1/admin/orders/search'].post,
+        );
+        expect(search).toContain('SearchAdminOrdersDto');
+        expect(search).toContain('ID_DOC_FILTER_INVALID');
         const schemas = JSON.stringify(
           (
             doc as unknown as {

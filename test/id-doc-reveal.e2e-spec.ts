@@ -172,6 +172,11 @@ describe('Reveal of the full ID document (e2e, Story 20.4) on a sandbox audit sc
          FROM "Audit_Events" WHERE "action" = 'ID_DOC_REVEALED' ORDER BY "seq"`,
     );
   const count = async () => (await events()).length;
+  const integrityEvents = async () =>
+    c.sb.exec(
+      `SELECT "seq","action","actorType","actorId"::text AS "actorId","entityType","entityId","after","requestId"::text AS "requestId"
+         FROM "Audit_Events" WHERE "action" = 'ID_DOC_INTEGRITY_FAILED' ORDER BY "seq"`,
+    );
 
   const recipientNo = synth();
   const buyerNo = synth();
@@ -263,7 +268,7 @@ describe('Reveal of the full ID document (e2e, Story 20.4) on a sandbox audit sc
     expect(res.headers['cache-control']).toBe('no-store');
   });
 
-  it('the cipher moved from another order is NOT delivered: 500 ID_DOC_INTEGRITY_FAILED, reported, no event', async () => {
+  it('the cipher moved from another order is NOT delivered: 500 ID_DOC_INTEGRITY_FAILED, reported and AUDITED (ID_DOC_INTEGRITY_FAILED event), no reveal event', async () => {
     const other = appCrypto.protect(`V-${synth()}`);
     const mine = appCrypto.protect(`V-${synth()}`);
     const moved = await mkOrder(c, {
@@ -271,6 +276,7 @@ describe('Reveal of the full ID document (e2e, Story 20.4) on a sandbox audit sc
       recipientBlind: other?.blind, // the row says "other's" blind, the cipher is another value
     });
     const before = await count();
+    const beforeIntegrity = (await integrityEvents()).length;
     const spy = vi
       .spyOn(Logger.prototype, 'error')
       .mockImplementation(() => undefined);
@@ -288,7 +294,54 @@ describe('Reveal of the full ID document (e2e, Story 20.4) on a sandbox audit sc
     } finally {
       spy.mockRestore();
     }
+    // no REVEAL event (nothing was revealed, no slot of the limit) ...
     expect(await count()).toBe(before);
+    // ... but the attempt IS on the chain: admin, order, field, reason; never the value
+    const ev = await integrityEvents();
+    expect(ev).toHaveLength(beforeIntegrity + 1);
+    expect(ev[ev.length - 1]).toMatchObject({
+      action: 'ID_DOC_INTEGRITY_FAILED',
+      actorType: 'ADMIN',
+      actorId: c.admins[0].id,
+      entityType: 'Order',
+      entityId: moved,
+      after: { field: 'recipient', reason: 'BLIND_MISMATCH' },
+    });
+    expect(JSON.stringify(ev)).not.toMatch(/9\d{8}|v1:/);
+  });
+
+  it('an integrity failure whose audit cannot be written is 503 AUDIT_UNAVAILABLE (never a 500 with a hole in the log)', async () => {
+    const other = appCrypto.protect(`V-${synth()}`);
+    const mine = appCrypto.protect(`V-${synth()}`);
+    const moved = await mkOrder(c, {
+      recipientEnc: mine?.enc,
+      recipientBlind: other?.blind,
+    });
+    const before = (await integrityEvents()).length;
+    await c.sb.exec(
+      `ALTER TABLE "Audit_Events" ADD CONSTRAINT "e2e_no_insert_i" CHECK (false) NOT VALID`,
+    );
+    const spy = vi
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    try {
+      const res = await reveal(moved, 'recipient').expect(503);
+      expect(res.body.errorCode).toBe('AUDIT_UNAVAILABLE');
+      expect(JSON.stringify(res.body)).not.toMatch(/9\d{8}|v1:/);
+      // the integrity failure itself was still reported
+      expect(spy.mock.calls.map((x) => String(x[0])).join('\n')).toContain(
+        `ID_DOC_INTEGRITY_FAILED order=${moved}`,
+      );
+    } finally {
+      spy.mockRestore();
+      await c.sb.exec(
+        `ALTER TABLE "Audit_Events" DROP CONSTRAINT "e2e_no_insert_i"`,
+      );
+    }
+    expect(await integrityEvents()).toHaveLength(before);
+    // once the audit works again the same order answers the 500 and leaves its event
+    await reveal(moved, 'recipient').expect(500);
+    expect(await integrityEvents()).toHaveLength(before + 1);
   });
 
   it('a tampered ciphertext and a parsed value with a NULL blind are refused too', async () => {
@@ -306,6 +359,13 @@ describe('Reveal of the full ID document (e2e, Story 20.4) on a sandbox audit sc
     expect(
       (await reveal(nb, 'recipient').expect(500)).body.details.reason,
     ).toBe('BLIND_MISSING');
+    // both are on the chain with their reason
+    const ev = (await integrityEvents()).slice(-2);
+    expect(ev.map((e) => e.after)).toEqual([
+      { field: 'recipient', reason: 'DECRYPT_FAILED' },
+      { field: 'recipient', reason: 'BLIND_MISSING' },
+    ]);
+    expect(ev.map((e) => e.entityId)).toEqual([t, nb]);
   });
 
   it('an unparsed legacy value (no type, no blind) is delivered flagged, and the event says so', async () => {

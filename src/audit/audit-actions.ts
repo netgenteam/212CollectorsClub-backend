@@ -52,6 +52,8 @@ export const AUDIT_ACTIONS = {
   // Privacy
   CUSTOMER_ANONYMIZED: { emittedBy: '20.6' },
   ID_DOC_REVEALED: { emittedBy: '20.4' },
+  // A reveal whose stored value failed the integrity check (moved ciphertext, tampering, bad key).
+  ID_DOC_INTEGRITY_FAILED: { emittedBy: '20.4' },
   // Payments and orders
   PAYMENT_PAGO_MOVIL_CONFIRMED: {
     emittedBy: '20.5',

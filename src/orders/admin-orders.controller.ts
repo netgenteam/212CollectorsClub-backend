@@ -23,9 +23,10 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { ApiException } from '../common/api-exception.js';
 import { AdminAuthGuard } from '../common/admin-auth.guard.js';
+import { assertNoIdDocInQuery } from '../common/id-doc-not-in-url.js';
 import type { RequestWithAdminUser } from '../common/admin-auth.guard.js';
 import {
   IdDocRateLimitedError,
@@ -47,6 +48,7 @@ import {
   UpdateOrderTrackingDto,
 } from './dto/admin-order-tracking.dto.js';
 import { ListAdminOrdersQueryDto } from './dto/list-admin-orders-query.dto.js';
+import { SearchAdminOrdersDto } from './dto/search-admin-orders.dto.js';
 import { PaginatedAdminOrdersResponseDto } from './dto/paginated-admin-orders-response.dto.js';
 import { AdminPaymentDecisionResponseDto } from './dto/admin-payment-decision-response.dto.js';
 import { AdminFulfillmentDecisionResponseDto } from './dto/admin-fulfillment-decision-response.dto.js';
@@ -130,7 +132,7 @@ export class AdminOrdersController {
   @ApiResponse({
     status: HttpStatus.BAD_REQUEST,
     description:
-      'A malformed query param, e.g. an out-of-enum status/paymentRail, or page/limit outside their valid range.',
+      'A malformed query param, e.g. an out-of-enum status/paymentRail, or page/limit outside their valid range; or errorCode ID_DOC_IN_URL_NOT_ALLOWED if the URL carries an ID document (`idDoc`, `idDoc[]`...): use POST /admin/orders/search. The value is not echoed and nothing is queried.',
   })
   @ApiResponse({
     status: HttpStatus.UNAUTHORIZED,
@@ -138,8 +140,45 @@ export class AdminOrdersController {
   })
   listOrders(
     @Query() query: ListAdminOrdersQueryDto,
+    @Req() request: Request,
   ): Promise<PaginatedAdminOrdersResponseDto> {
+    // Story 20.4 (FR-124): a cedula never travels in a URL. Looked at on the raw query (the DTO
+    // strips unknown keys, which used to turn `?idDoc[]=` into an unfiltered list).
+    assertNoIdDocInQuery(request.query, 'POST /admin/orders/search');
     return this.adminOrdersService.listOrders(query);
+  }
+
+  @Post('search')
+  @HttpCode(HttpStatus.OK)
+  @ApiBody({ type: SearchAdminOrdersDto })
+  @ApiOperation({
+    summary: 'Search Orders by exact ID document (admin)',
+    description:
+      'Story 20.4 (FR-124/126). Same list as GET /admin/orders (same pagination, sort and `status`/`paymentRail`/`refundPending` filters, same response) restricted to the Orders whose RECIPIENT or BUYER ID document equals `idDoc`, by blind index. The cedula goes in the BODY because a URL is written to proxy and web-server error logs. Equality only: no partial match, no LIKE. Never errors on no matches (empty page, 200). The value is never logged nor echoed. `GET /admin/orders?idDoc=` (also `idDoc[]=`) is 400 ID_DOC_IN_URL_NOT_ALLOWED.',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Paginated Orders matching the ID document and the filters.',
+    type: PaginatedAdminOrdersResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      'errorCode ID_DOC_FILTER_INVALID (`details = {field: "idDoc", reason: "INVALID_FORMAT"}`: not a complete valid ID document), or a malformed body field (unknown property, page/limit out of range, bad enum).',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'errorCode INVALID_ADMIN_TOKEN.',
+  })
+  searchOrders(
+    @Body(strictBody(SearchAdminOrdersDto))
+    dto: Readonly<SearchAdminOrdersDto>,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<PaginatedAdminOrdersResponseDto> {
+    // Orders of a person found by cedula: never cached by a proxy or the browser.
+    res.setHeader('Cache-Control', 'no-store');
+    const { idDoc, ...filters } = dto;
+    return this.adminOrdersService.listOrders(filters, idDoc);
   }
 
   @Get('reconciliation')
@@ -468,12 +507,12 @@ export class AdminOrdersController {
   @ApiResponse({
     status: HttpStatus.INTERNAL_SERVER_ERROR,
     description:
-      'errorCode ID_DOC_INTEGRITY_FAILED: the stored value cannot be read back, or does not match the row blind index (e.g. a ciphertext moved from another order). Nothing is delivered and nothing is audited; `details.reason` says why. Logged for review.',
+      'errorCode ID_DOC_INTEGRITY_FAILED: the stored value cannot be read back, or does not match the row blind index (e.g. a ciphertext moved from another order). Nothing is delivered; `details.reason` (BLIND_MISMATCH, BLIND_MISSING, DECRYPT_FAILED, ENC_MALFORMED) says why. The attempt is logged and audited as `ID_DOC_INTEGRITY_FAILED` (admin, order, field, reason; never the value; it uses no slot of the hourly limit). If that event cannot be written the answer is 503 AUDIT_UNAVAILABLE instead.',
   })
   @ApiResponse({
     status: HttpStatus.SERVICE_UNAVAILABLE,
     description:
-      'errorCode AUDIT_UNAVAILABLE: the audit event could not be committed (database error or chain lock wait expired). The value is NOT delivered; retry in a few seconds.',
+      'errorCode AUDIT_UNAVAILABLE: the audit event (the reveal, or the integrity-failure one) could not be committed (database error or chain lock wait expired). The value is NOT delivered; retry in a few seconds.',
   })
   async revealIdDoc(
     @Param('orderId', ParseUUIDPipe) orderId: string,

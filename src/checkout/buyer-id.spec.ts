@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { Logger } from '@nestjs/common';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiException } from '../common/api-exception.js';
 import {
   isBuyerIdRequired,
+  resetBuyerIdSwitchWarnings,
   resolveBuyerId,
   validateBuyerId,
   type BuyerShippingContext,
@@ -286,6 +288,56 @@ describe('resolveBuyerId (AC1-AC2)', () => {
         ),
       ).toBe('buyerLegalName:TOO_LONG');
     });
+    it.each([
+      'Emp V-87654321 C.A.',
+      'Emp (V-87654321) C.A.',
+      'Emp C.I. 87654321 C.A.',
+      'Inversiones Uno J-070133805 C.A.', // the company's OWN RIF inside its legal name
+      'Inversiones Uno RIF J-07013380-5 C.A.',
+      'Inversiones Uno J070133805',
+      'Inversiones Uno E-81234567',
+      'Ｖ-８７６５４３２１ Emp', // fullwidth
+    ])(
+      'a cedula or RIF inside the legal name is REJECTED, not cut: %s',
+      (name) => {
+        const f = failure(() =>
+          resolveBuyerId(
+            {
+              buyerId: { type: 'J', number: '070133805' },
+              buyerLegalName: name,
+            },
+            AGENCY,
+            opts,
+          ),
+        );
+        expect(f.status).toBe(400);
+        expect(f.errorCode).toBe('BUYER_ID_INVALID');
+        expect(f.details).toEqual({
+          field: 'buyerLegalName',
+          reason: 'CONTAINS_ID_DOC',
+        });
+        // the value is never echoed
+        expect(JSON.stringify(f)).not.toMatch(/8765|0701|8123/);
+      },
+    );
+
+    it.each([
+      'Inversiones G-20000 C.A.', // too few digits for a cedula: a lot or a brand
+      'Edificio P-12345 S.R.L.',
+      'Banco de Venezuela S.A.',
+      'Tienda 3era Avenida, C.A.',
+      'Comercial 2024 1000 C.A.',
+      "Mary's Cards & Co. (2021)",
+    ])('a legitimate legal name passes untouched: %s', (name) => {
+      expect(
+        resolveBuyerId(
+          { buyerId: { type: 'J', number: '070133805' }, buyerLegalName: name },
+          AGENCY,
+          opts,
+        ),
+      ).toMatchObject({ kind: 'explicit', legalName: name });
+    });
+
     it('a non-string legal name is invalid', () => {
       expect(
         code(() =>
@@ -439,11 +491,49 @@ describe('resolveBuyerId (AC1-AC2)', () => {
 });
 
 describe('isBuyerIdRequired (the deployment switch)', () => {
+  const warn = () =>
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  beforeEach(() => resetBuyerIdSwitchWarnings());
+
   it('only the exact string "true" turns it on; the default is OFF', () => {
-    expect(isBuyerIdRequired({})).toBe(false);
-    for (const v of ['', 'false', 'TRUE', 'True', '1', 'yes', ' true']) {
-      expect(isBuyerIdRequired({ CHECKOUT_REQUIRE_BUYER_ID: v })).toBe(false);
+    const spy = warn();
+    try {
+      expect(isBuyerIdRequired({})).toBe(false);
+      for (const v of ['', 'false', 'TRUE', 'True', '1', 'yes', ' true']) {
+        expect(isBuyerIdRequired({ CHECKOUT_REQUIRE_BUYER_ID: v })).toBe(false);
+      }
+      expect(isBuyerIdRequired({ CHECKOUT_REQUIRE_BUYER_ID: 'true' })).toBe(
+        true,
+      );
+    } finally {
+      spy.mockRestore();
     }
-    expect(isBuyerIdRequired({ CHECKOUT_REQUIRE_BUYER_ID: 'true' })).toBe(true);
+  });
+
+  it('unset, "true" and "false" are silent; EVERY other value warns (any environment), once per value', () => {
+    const spy = warn();
+    const prev = process.env.NODE_ENV;
+    try {
+      for (const env of ['test', 'development', 'production']) {
+        process.env.NODE_ENV = env;
+        resetBuyerIdSwitchWarnings();
+        spy.mockClear();
+        for (const ok of [undefined, 'true', 'false']) {
+          isBuyerIdRequired({ CHECKOUT_REQUIRE_BUYER_ID: ok });
+        }
+        expect(spy).not.toHaveBeenCalled();
+        for (const bad of ['TRUE', 'True', '1', 'yes', ' true', '', 'on']) {
+          isBuyerIdRequired({ CHECKOUT_REQUIRE_BUYER_ID: bad });
+          isBuyerIdRequired({ CHECKOUT_REQUIRE_BUYER_ID: bad }); // read per request: no flood
+        }
+        expect(spy).toHaveBeenCalledTimes(7);
+        expect(String(spy.mock.calls[0][0])).toContain(
+          'CHECKOUT_REQUIRE_BUYER_ID="TRUE" is not recognized',
+        );
+      }
+    } finally {
+      process.env.NODE_ENV = prev;
+      spy.mockRestore();
+    }
   });
 });

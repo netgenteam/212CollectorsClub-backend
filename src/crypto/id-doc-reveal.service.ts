@@ -21,6 +21,8 @@ export const REVEAL_FIELDS: readonly RevealField[] = ['recipient', 'buyer'];
 
 export const ID_DOC_REVEAL_MAX_PER_HOUR_DEFAULT = 30;
 export const ID_DOC_REVEAL_ACTION = 'ID_DOC_REVEALED' as const;
+/** Story 20.4: a reveal that failed its integrity check (moved/tampered/unreadable value). */
+export const ID_DOC_INTEGRITY_ACTION = 'ID_DOC_INTEGRITY_FAILED' as const;
 
 /** `ID_DOC_REVEAL_MAX_PER_HOUR`, read on every call; anything that is not a positive integer is the default (30). */
 export function idDocRevealMaxPerHour(
@@ -101,8 +103,18 @@ const unavailable = (reason: string): ApiException =>
  * Order of the flow: read + decrypt + verify IN MEMORY (nothing leaves) -> audit transaction of
  * its own, COMMITTED (rate limit counted inside the chain lock, then the `ID_DOC_REVEALED`
  * event, no value) -> only then the value is returned. No event, no delivery. A failed
- * integrity check never writes an event (nothing was revealed) and does not use a slot of the
- * hourly limit.
+ * integrity check is a risk event, so it IS audited (`ID_DOC_INTEGRITY_FAILED`: admin, order,
+ * field, reason; never the value) through the regular emitter transaction; it does not use a slot
+ * of the hourly limit (nothing was revealed). If that event cannot be written the answer is 503
+ * AUDIT_UNAVAILABLE (fail-closed, same as the reveal), and the failure is logged either way.
+ *
+ * Plaintext discipline: the ONLY public method that can return a cedula in clear is
+ * `revealOrderIdDoc`, and it never returns before its event is committed. `#verifyStored` and
+ * `#fromLegacy` are runtime-private (`#`), not just TypeScript-private, and a static test
+ * (`decrypt-usage.spec.ts`) fails if this class gains another public method. The future invoice
+ * generator must NOT get the value through a side door: it needs its own explicit method here
+ * (e.g. `revealForInvoice`) that records an event the same way, or an explicit, reviewed decision
+ * to do without one (add it to that test's list on purpose).
  *
  * Lock discipline (AD-99, "using it safely"): the transaction takes the chain-head lock, runs ONE
  * indexed count and inserts the event as its LAST statement through `AuditService.record`; there
@@ -119,8 +131,8 @@ export class IdDocRevealService {
     private readonly crypto: IdDocCryptoService,
   ) {}
 
-  /** Verifies a stored value against its blind index (pure given the crypto service; no I/O). */
-  verifyStored(
+  /** Verifies a stored value against its blind index (pure given the crypto service; no I/O). Private: it returns the clear value. */
+  #verifyStored(
     field: RevealField,
     enc: string,
     blind: string | null,
@@ -180,9 +192,9 @@ export class IdDocRevealService {
     let revealed: RevealedIdDoc;
     try {
       if (enc) {
-        revealed = this.verifyStored(field, enc, blind);
+        revealed = this.#verifyStored(field, enc, blind);
       } else if (legacy && legacy.trim() !== '') {
-        revealed = this.fromLegacy(field, legacy, blind);
+        revealed = this.#fromLegacy(field, legacy, blind);
       } else {
         throw new ApiException(
           HttpStatus.NOT_FOUND,
@@ -197,6 +209,8 @@ export class IdDocRevealService {
         this.logger.error(
           `ID_DOC_INTEGRITY_FAILED order=${orderId} field=${field} reason=${err.reason}`,
         );
+        // ... and audited: nothing was revealed, but someone tried and the data is wrong.
+        await this.commitIntegrityEvent(orderId, field, admin.id, err.reason);
       }
       throw err;
     }
@@ -206,13 +220,13 @@ export class IdDocRevealService {
   }
 
   /** A legacy plain value (or a ciphertext left in the plain column during the transition). */
-  private fromLegacy(
+  #fromLegacy(
     field: RevealField,
     legacy: string,
     blind: string | null,
   ): RevealedIdDoc {
     if (this.crypto.isEncrypted(legacy)) {
-      return this.verifyStored(field, legacy, blind);
+      return this.#verifyStored(field, legacy, blind);
     }
     const n = normalizeIdDoc(legacy);
     if (!n) {
@@ -224,6 +238,38 @@ export class IdDocRevealService {
       );
     }
     return { value: n.canonical, unparsed: n.unparsed };
+  }
+
+  /**
+   * `ID_DOC_INTEGRITY_FAILED`: the regular emitter transaction (chain lock taken at the end, one
+   * INSERT). No rate-limit count and no value. Any failure to write it is 503 AUDIT_UNAVAILABLE
+   * (the integrity error itself is already logged above).
+   */
+  private async commitIntegrityEvent(
+    orderId: string,
+    field: RevealField,
+    adminId: string,
+    reason: IntegrityReason,
+  ): Promise<void> {
+    try {
+      await this.audit.transaction((_tx, audit) => {
+        audit.add({
+          actorType: 'ADMIN',
+          actorId: adminId,
+          action: ID_DOC_INTEGRITY_ACTION,
+          entityType: 'Order',
+          entityId: orderId,
+          after: { field, reason },
+        });
+        return Promise.resolve();
+      });
+    } catch (err) {
+      if (err instanceof ApiException) throw err;
+      this.logger.error(
+        `ID_DOC integrity audit failed: ${String(err)} (order=${orderId} field=${field})`,
+      );
+      throw unavailable('WRITE_FAILED');
+    }
   }
 
   /**

@@ -1,5 +1,6 @@
-import { HttpStatus } from '@nestjs/common';
+import { HttpStatus, Logger } from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
+import { splitIdDocFromName } from '../crypto/id-doc-in-name.js';
 import { normalizeIdDoc } from '../crypto/id-doc-normalize.js';
 import {
   isRifCheckDigitStrict,
@@ -63,11 +64,34 @@ export type ResolvedBuyerId =
       fromBody: { type: 'V' | 'E'; canonical: string } | null;
     };
 
-/** Read on every call (never cached): only the exact string `true` makes the buyer ID mandatory. */
+const switchLogger = new Logger('BuyerIdSwitch');
+const warnedValues = new Set<string>();
+
+/** Test hook: forget which unrecognized values were already warned about. */
+export function resetBuyerIdSwitchWarnings(): void {
+  warnedValues.clear();
+}
+
+/**
+ * Read on every call (never cached): only the exact string `true` makes the buyer ID mandatory.
+ * That is deliberate (the interim switch defaults OFF so the legacy storefront keeps selling),
+ * but a typo must not turn it off in silence: anything that is neither unset, `true` nor `false`
+ * (`TRUE`, `1`, `yes`, ` true`, empty) leaves it OFF and logs a WARN, in EVERY environment. The
+ * WARN is once per distinct value (the switch is read per request) and names the value (it is a
+ * deployment flag, not personal data), so changing the value warns again.
+ */
 export function isBuyerIdRequired(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
-  return env.CHECKOUT_REQUIRE_BUYER_ID === 'true';
+  const raw = env.CHECKOUT_REQUIRE_BUYER_ID;
+  if (raw === 'true') return true;
+  if (raw !== undefined && raw !== 'false' && !warnedValues.has(raw)) {
+    warnedValues.add(raw);
+    switchLogger.warn(
+      `CHECKOUT_REQUIRE_BUYER_ID=${JSON.stringify(raw.slice(0, 40))} is not recognized: only the exact string "true" turns the buyer ID requirement ON (and "false" or unset keep it OFF). It stays OFF. Fix the value (docs/deployment.md 16.2).`,
+    );
+  }
+  return false;
 }
 
 export const buyerIdRequired = (field: string, reason: string): ApiException =>
@@ -170,6 +194,16 @@ function legalNameOf(raw: unknown, required: boolean): string | null {
   }
   if (clean.length > BUYER_LEGAL_NAME_MAX) {
     throw buyerIdInvalid('buyerLegalName', 'TOO_LONG');
+  }
+  // A cedula or RIF inside the legal name would sit in clear in the database and in every view
+  // (the very thing FR-123/FR-125 forbid). REJECTED, not cleaned: the legal name is what goes on
+  // the invoice, so silently cutting `Emp V-87654321 C.A.` into `Emp C.A.` would invoice a
+  // different name than the buyer typed, and the buyer's own RIF belongs in `buyerId`. The
+  // detector is `splitIdDocFromName`, which only fires on an UNAMBIGUOUS token (type letter plus
+  // the digit count that type really has, or a `CI`/`cedula` label), so a legitimate name such as
+  // `Inversiones G-20000 C.A.` or `Edificio P-12345` passes.
+  if (splitIdDocFromName(clean).found) {
+    throw buyerIdInvalid('buyerLegalName', 'CONTAINS_ID_DOC');
   }
   return clean;
 }

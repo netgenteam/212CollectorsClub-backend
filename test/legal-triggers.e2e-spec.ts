@@ -138,6 +138,15 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
   });
 
   it('real document: UPDATE, DELETE and TRUNCATE of versions/audit rows fail with integrity_constraint_violation (rolled back)', async () => {
+    // Counted BEFORE and compared AFTER (not "== 0"): other suites of the same run legitimately
+    // leave audit rows with no document (`IDENTITY_UPDATED` of the seller identity, Story 20.5),
+    // and the run order of files is not fixed (vitest runs previously failed files first).
+    const countRows = () =>
+      sql(
+        `SELECT (SELECT count(*)::int FROM "Legal_Document_Versions" v JOIN "Legal_Documents" d ON d."id"=v."documentId" WHERE NOT d."isSandbox") AS v,
+                (SELECT count(*)::int FROM "Legal_Audit_Logs" a WHERE a."documentId" IS NULL OR a."documentId" IN (SELECT "id" FROM "Legal_Documents" WHERE NOT "isSandbox")) AS a`,
+      );
+    const before = await countRows();
     const results: Record<string, string> = {};
     const messages: Record<string, string> = {};
     await prisma
@@ -281,11 +290,8 @@ describe('Legal immutability triggers & seed (e2e, Story 19.1)', () => {
     expect(Object.keys(results)).toHaveLength(17);
     // Nothing leaked out of the rolled-back transaction.
     expect(await realLegalFingerprint(sql)).toBe(fingerprint);
-    const n = await sql(
-      `SELECT (SELECT count(*)::int FROM "Legal_Document_Versions" v JOIN "Legal_Documents" d ON d."id"=v."documentId" WHERE NOT d."isSandbox") AS v,
-              (SELECT count(*)::int FROM "Legal_Audit_Logs" a WHERE a."documentId" IS NULL OR a."documentId" IN (SELECT "id" FROM "Legal_Documents" WHERE NOT "isSandbox")) AS a`,
-    );
-    expect(n[0]).toEqual({ v: 0, a: 0 });
+    expect(await countRows()).toEqual(before);
+    expect(before[0].v).toBe(0); // the real documents have no committed versions
   });
 
   it('sandbox document: rows can be updated and deleted (cleanup works), TRUNCATE still fails', async () => {

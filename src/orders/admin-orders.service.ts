@@ -9,6 +9,7 @@ import { Prisma } from '../generated/prisma/client.js';
 import type { Order } from '../generated/prisma/client.js';
 import type { OrderStatus, PaymentRail } from '../generated/prisma/enums.js';
 import { ListAdminOrdersQueryDto } from './dto/list-admin-orders-query.dto.js';
+import type { SearchAdminOrdersDto } from './dto/search-admin-orders.dto.js';
 import { AdminOrderListItemDto } from './dto/admin-order-list-item.dto.js';
 import {
   AdminOrdersPaginationMetaDto,
@@ -110,8 +111,13 @@ export class AdminOrdersService {
     return this.idDocCrypto.blindIndex(n.type, n.digits);
   }
 
+  /**
+   * `idDoc` comes ONLY from `POST /admin/orders/search` (never from a URL, FR-124): it is a
+   * separate argument so the GET query DTO cannot carry it.
+   */
   async listOrders(
-    query: ListAdminOrdersQueryDto,
+    query: ListAdminOrdersQueryDto | Omit<SearchAdminOrdersDto, 'idDoc'>,
+    idDoc?: string,
   ): Promise<PaginatedAdminOrdersResponseDto> {
     const { page, limit, sortOrder } = query;
     const offset = (page - 1) * limit;
@@ -134,8 +140,8 @@ export class AdminOrdersService {
     }
 
     // Story 20.4 (AC6): exact match on either blind index (both indexed); never LIKE.
-    if (query.idDoc !== undefined) {
-      const blind = this.idDocBlindOrThrow(query.idDoc);
+    if (idDoc !== undefined) {
+      const blind = this.idDocBlindOrThrow(idDoc);
       where.OR = [{ recipientIdDocBlind: blind }, { buyerIdDocBlind: blind }];
     }
 

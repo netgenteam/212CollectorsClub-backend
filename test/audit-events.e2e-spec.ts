@@ -779,3 +779,25 @@ describe('AuditService / chain / immutability on sandbox schemas (e2e, Story 20.
     });
   });
 });
+
+describe('the sandbox helper refuses to fall through to public."Audit_Events" (e2e, Story 20.4 follow-up)', () => {
+  it('a sandbox that lost its table makes exec() throw instead of reading or writing public', async () => {
+    const sb = await createAuditSandbox();
+    try {
+      // healthy: the helper works and the table is the sandbox's own
+      await expect(
+        sb.exec(`SELECT count(*)::int AS n FROM "Audit_Events"`),
+      ).resolves.toEqual([{ n: 0 }]);
+      // the sandbox table disappears (DROP inside the sandbox only)
+      await sb.exec(`DROP TABLE "Audit_Events" CASCADE`);
+      await expect(
+        sb.exec(`SELECT count(*)::int AS n FROM "Audit_Events"`),
+      ).rejects.toThrow(/no "Audit_Events" table/);
+      await expect(
+        sb.exec(`SELECT 1 FROM "Audit_Events" LIMIT 1`),
+      ).rejects.toThrow(/Refusing to continue/);
+    } finally {
+      await sb.drop();
+    }
+  });
+});

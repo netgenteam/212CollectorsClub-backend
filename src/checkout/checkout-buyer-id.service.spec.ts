@@ -3,7 +3,11 @@ import { makeTestCrypto } from '../../test/helpers/iddoc-test-crypto.js';
 import { FxRateService } from '../fx/fx-rate.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { CheckoutService } from './checkout.service.js';
-import { resetCustomerAnonymizedAtProbe } from './checkout-account-lock.js';
+import {
+  ABSENT_TTL_MS,
+  customerAnonymizedAtExists,
+  resetCustomerAnonymizedAtProbe,
+} from './checkout-account-lock.js';
 import {
   CheckoutFulfillmentType,
   CheckoutPaymentRail,
@@ -546,10 +550,62 @@ describe('CheckoutService (story 20.4: buyer ID, expected account, account lock)
       expect(tx.order.create).toHaveBeenCalledTimes(1);
     });
 
-    it('a failing probe never breaks a sale', async () => {
-      probe.mockRejectedValue(new Error('boom'));
+    it('a probe that fails once is checked again right away (no sale lost, nothing cached as "absent")', async () => {
+      probe
+        .mockRejectedValueOnce(new Error('boom'))
+        .mockResolvedValue([{ present: true }]);
       await service.checkout(null, AGENCY, { id: ACCOUNT_A });
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(calls[0]).toBe('lock'); // the guard is ON: the error was not read as "absent"
       expect(tx.order.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('a probe that fails twice FAILS CLOSED (503 CHECKOUT_UNAVAILABLE), caches nothing, and the next request probes again', async () => {
+      probe.mockRejectedValue(new Error('boom'));
+      const r = await errorCodeOf(
+        service.checkout(null, AGENCY, { id: ACCOUNT_A }),
+      );
+      expect(r).toMatchObject({
+        status: 503,
+        errorCode: 'CHECKOUT_UNAVAILABLE',
+      });
+      expect(tx.order.create).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+      probe.mockReset();
+      probe.mockResolvedValue([{ present: true }]);
+      await service.checkout(null, AGENCY, { id: ACCOUNT_A });
+      expect(calls[0]).toBe('lock');
+    });
+  });
+
+  describe('the probe cache (checkout-account-lock.ts)', () => {
+    const db = (impl: () => Promise<{ present: boolean }[]>) => ({
+      $queryRaw: vi.fn(impl),
+    });
+    it('"absent" is cached only ABSENT_TTL_MS; "present" for good', async () => {
+      const d = db(() => Promise.resolve([{ present: false }]));
+      expect(await customerAnonymizedAtExists(d, 1_000)).toBe(false);
+      expect(
+        await customerAnonymizedAtExists(d, 1_000 + ABSENT_TTL_MS - 1),
+      ).toBe(false);
+      expect(d.$queryRaw).toHaveBeenCalledTimes(1);
+      // the migration created the column: seen as soon as the short TTL expires
+      d.$queryRaw.mockResolvedValue([{ present: true }]);
+      expect(await customerAnonymizedAtExists(d, 1_000 + ABSENT_TTL_MS)).toBe(
+        true,
+      );
+      expect(d.$queryRaw).toHaveBeenCalledTimes(2);
+      expect(await customerAnonymizedAtExists(d, 9_999_999)).toBe(true);
+      expect(d.$queryRaw).toHaveBeenCalledTimes(2);
+    });
+
+    it('an error is never cached as "absent"', async () => {
+      const bad = db(() => Promise.reject(new Error('x')));
+      await expect(customerAnonymizedAtExists(bad, 5)).rejects.toMatchObject({
+        status: 503,
+      });
+      const good = db(() => Promise.resolve([{ present: true }]));
+      expect(await customerAnonymizedAtExists(good, 6)).toBe(true);
     });
   });
 

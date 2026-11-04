@@ -194,7 +194,9 @@ export class CheckoutService implements OnModuleInit {
 
   /** Story 20.4: a production process that does not enforce the buyer ID says so at boot (once). */
   onModuleInit(): void {
-    if (process.env.NODE_ENV === 'production' && !isBuyerIdRequired()) {
+    // Also warns (any environment) when the variable holds something the switch does not recognize.
+    const required = isBuyerIdRequired();
+    if (process.env.NODE_ENV === 'production' && !required) {
       this.logger.warn(
         'CHECKOUT_REQUIRE_BUYER_ID is not "true": checkouts WITHOUT a buyer fiscal ID are accepted (docs/deployment.md 16.2). Turn it on together with the storefront of Story 20.9.',
       );

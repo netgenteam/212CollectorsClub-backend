@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { parseSandboxName, sandboxName } from './audit-sandbox.js';
+import {
+  assertSandboxTable,
+  mentionsAuditTable,
+  parseSandboxName,
+  sandboxName,
+} from './audit-sandbox.js';
 
 describe('sandbox schema names: only ours are ever dropped by the global setup', () => {
   it('parses what sandboxName() makes', () => {
@@ -25,5 +30,41 @@ describe('sandbox schema names: only ours are ever dropped by the global setup',
     'public',
   ])('rejects the foreign name %s', (name) => {
     expect(parseSandboxName(name)).toBeNull();
+  });
+});
+
+describe('the sandbox never falls through to public."Audit_Events"', () => {
+  it('assertSandboxTable throws when the sandbox table does not exist', async () => {
+    const query = (ok: boolean) => Promise.resolve({ rows: [{ ok }] }) as never;
+    await expect(
+      assertSandboxTable({ query: () => query(false) }, 'audit_t_x'),
+    ).rejects.toThrow(/no "Audit_Events" table/);
+    await expect(
+      assertSandboxTable({ query: () => query(true) }, 'audit_t_x'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('asks about the table QUALIFIED with the sandbox schema (never the search_path)', async () => {
+    const seen: unknown[][] = [];
+    await assertSandboxTable(
+      {
+        query: ((_q: string, p: unknown[]) => {
+          seen.push(p);
+          return Promise.resolve({ rows: [{ ok: true }] });
+        }) as never,
+      },
+      'audit_t_abc',
+    );
+    expect(seen).toEqual([['"audit_t_abc"."Audit_Events"']]);
+  });
+
+  it.each([
+    ['SELECT * FROM "Audit_Events"', true],
+    ['SELECT count(*) FROM Audit_Events', true],
+    ['ALTER TABLE "Audit_Events" ADD CONSTRAINT x CHECK (false)', true],
+    ['SELECT 1 FROM "Orders"', false],
+    ['SELECT 1 FROM "Audit_Events_occurredAt_idx_x"', false],
+  ])('mentionsAuditTable(%j) = %s', (sql, expected) => {
+    expect(mentionsAuditTable(sql)).toBe(expected);
   });
 });

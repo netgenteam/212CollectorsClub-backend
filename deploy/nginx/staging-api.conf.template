@@ -17,11 +17,13 @@
 # nginx installed on this dev machine). See docs/deployment.md for what
 # Angel must still confirm on the real VPS.
 
-# Story 20.4 (FR-126, NFR-20.5): the admin order search takes the cedula in the query string
-# (`GET /api/v1/admin/orders?idDoc=V-12345678`). The default `combined` format logs the whole request
-# line, query string included, so a cedula would land in the access log. This format logs the
-# normalized path (`$uri`, no query string) instead. (`error_log` lines for upstream failures still
-# print the full request line: see docs/deployment.md 16.6.)
+# Story 20.4 (FR-124, NFR-20.5): a cedula never travels in a URL (the admin order search is
+# `POST /api/v1/admin/orders/search` with the cedula in the BODY), so no access log can hold one.
+# This format is kept as defence in depth: it logs the normalized path (`$uri`, no query string)
+# instead of the whole request line, so no query string (an old client still sending `?idDoc=`,
+# a token in a link...) reaches the access log. `error_log` still prints the full request line on
+# upstream failures: that is why the contract, not this format, is what keeps cedulas out of URLs
+# (docs/deployment.md 16.6).
 log_format cc_staging_noquery '$remote_addr - $remote_user [$time_local] '
                           '"$request_method $uri $server_protocol" $status $body_bytes_sent '
                           '"$http_referer" "$http_user_agent"';

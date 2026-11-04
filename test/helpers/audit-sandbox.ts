@@ -140,6 +140,32 @@ const clientUrl = (url: string): string => {
   return u.toString();
 };
 
+/**
+ * The sandbox works through `search_path = <sandbox>, public` and unqualified names. If the
+ * sandbox table is ever missing (a test that dropped or renamed it, a migration that failed
+ * half-way), every unqualified `"Audit_Events"` silently resolves to `public."Audit_Events"`:
+ * the throw-away clone of the real, immutable table. A test would then read and WRITE the wrong
+ * table and still look green. So the sandbox is VERIFIED (at creation, and before any helper
+ * statement that names the table) and throws instead of falling through.
+ */
+export async function assertSandboxTable(
+  client: Pick<pg.Client, 'query'>,
+  schema: string,
+): Promise<void> {
+  const r = await client.query(`SELECT to_regclass($1) IS NOT NULL AS "ok"`, [
+    `"${schema}"."Audit_Events"`,
+  ]);
+  if ((r.rows[0] as { ok?: boolean } | undefined)?.ok !== true) {
+    throw new Error(
+      `Audit sandbox "${schema}" has no "Audit_Events" table: unqualified statements would fall through to public."Audit_Events". Refusing to continue.`,
+    );
+  }
+}
+
+/** True when a statement names the audit table (so it would resolve through the search_path). */
+export const mentionsAuditTable = (sql: string): boolean =>
+  /\bAudit_Events\b/.test(sql);
+
 export async function createAuditSandbox(
   opts: { noTriggers?: boolean; extraSql?: string } = {},
 ): Promise<AuditSandbox> {
@@ -155,6 +181,7 @@ export async function createAuditSandbox(
     await client.query(sql);
     for (const more of auditHardeningSql(schema)) await client.query(more);
     if (opts.extraSql) await client.query(opts.extraSql);
+    await assertSandboxTable(client, schema);
   } catch (err) {
     await client
       .query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
@@ -166,8 +193,10 @@ export async function createAuditSandbox(
   return {
     schema,
     url: urlWithSearchPath(admin, schema),
-    exec: async (q, params) =>
-      (await client.query(q, params)).rows as Record<string, unknown>[],
+    exec: async (q, params) => {
+      if (mentionsAuditTable(q)) await assertSandboxTable(client, schema);
+      return (await client.query(q, params)).rows as Record<string, unknown>[];
+    },
     drop: async () => {
       if (closed) return;
       closed = true;

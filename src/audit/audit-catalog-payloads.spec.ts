@@ -49,6 +49,10 @@ const SAMPLES: Record<AuditAction, AuditPayload[]> = {
   ID_DOC_REVEALED: [
     { field: 'buyer', orderId: uuid(), idDocType: 'V', revealedInHour: 7 },
   ],
+  ID_DOC_INTEGRITY_FAILED: [
+    { field: 'buyer', reason: 'BLIND_MISMATCH' },
+    { field: 'recipient', reason: 'DECRYPT_FAILED' },
+  ],
   PAYMENT_PAGO_MOVIL_CONFIRMED: [
     {
       orderId: uuid(),
@@ -250,6 +254,7 @@ describe('public seller fields: explicit per action, never general', () => {
     'ORDER_STATUS_CHANGED',
     'ORDER_TRACKING_CHANGED',
     'ID_DOC_REVEALED',
+    'ID_DOC_INTEGRITY_FAILED',
     'CONSENT_RECORDED',
     'LOGIN_ADMIN_FAILED',
     'DATA_EXPORTED',
