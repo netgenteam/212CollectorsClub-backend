@@ -5,6 +5,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module.js';
+import { applyTrustProxy } from './common/trust-proxy.js';
 import { applyRequestContext } from './common/request-id.middleware.js';
 import { applyJsonBodyLimit } from './common/json-body-limit.js';
 import { createGlobalValidationPipe } from './common/global-validation-pipe.js';
@@ -25,16 +26,12 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const port = configService.get<number>('PORT', 3000);
 
-  // Story 6.1 (FR-19, NFR-2): the deployment topology is always
-  // VPSprod -> Nginx -> this NestJS app (one reverse-proxy hop, per the
-  // Architecture's deployment diagram) — trusting exactly 1 proxy hop
-  // makes Express's own `req.ip` resolve to the real client IP from
-  // `X-Forwarded-For` instead of Nginx's own address. `@nestjs/throttler`'s
-  // default tracker (used by ContactController's per-IP rate limit) reads
-  // `req.ip`, so this is what makes "5 requests/IP/10min" key on the
-  // actual client rather than every request looking like it came from the
-  // same reverse proxy.
-  app.set('trust proxy', 1);
+  // Story 6.1 (FR-19, NFR-2) / 20.5: `req.ip` is the REAL client address, taken from
+  // `X-Forwarded-For` only when the connection comes from a loopback proxy (Nginx, or the Next
+  // server on the same host) and only the address that proxy added: see `common/trust-proxy.ts`.
+  // `@nestjs/throttler` (contact, simulator, admin login...), the view rate limit and the audit
+  // events (`RequestContext.ip`) all read `req.ip`.
+  applyTrustProxy(app, configService.get<string>('TRUST_PROXY'));
 
   // Story 19.2 (A78, QA E): JSON bodies are capped at 100 KB (Express' default)
   // everywhere, except PUT /admin/legal/:slug/draft (a 200 KB Markdown draft,
@@ -124,6 +121,10 @@ async function bootstrap() {
     .build();
   const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('api/docs', app, swaggerDocument);
+
+  // Story 20.5: closing the app (SIGTERM from systemd) flushes what the services keep pending,
+  // such as the discarded failed-login counts (`AdminLoginFailureSummary`).
+  app.enableShutdownHooks();
 
   await app.listen(port);
 }

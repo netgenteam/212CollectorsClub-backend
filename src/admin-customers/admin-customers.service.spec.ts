@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import { VERIFICATION_PREFIX } from '../customer-auth/customer-auth.service.js';
 import type { PrismaService } from '../prisma/prisma.service.js';
 import { AdminCustomersService } from './admin-customers.service.js';
+import { fakeAudit } from '../../test/helpers/fake-audit.js';
 
 function setup(customer: { id: string; emailVerified: boolean } | null) {
   const tx = {
@@ -17,16 +18,25 @@ function setup(customer: { id: string; emailVerified: boolean } | null) {
   const prisma = {
     $transaction: vi.fn((fn: (t: typeof tx) => unknown) => fn(tx)),
   };
-  const service = new AdminCustomersService(prisma as unknown as PrismaService);
+  const audit = fakeAudit(prisma);
+  const crypto = { hashEmail: vi.fn().mockReturnValue('h'.repeat(64)) };
+  const service = new AdminCustomersService(
+    prisma as unknown as PrismaService,
+    audit,
+    crypto as never,
+  );
   const log = vi.spyOn(Logger.prototype, 'log').mockImplementation(() => {});
-  return { tx, service, log };
+  return { tx, service, log, audit };
 }
 
 describe('AdminCustomersService.verifyEmail (Story 13.1)', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('verifies, deletes only email-verification rows by value, logs (AC3/4/8)', async () => {
-    const { tx, service, log } = setup({ id: 'c1', emailVerified: false });
+    const { tx, service, log, audit } = setup({
+      id: 'c1',
+      emailVerified: false,
+    });
     await expect(service.verifyEmail('a1', 'ana@example.com')).resolves.toEqual(
       { email: 'ana@example.com', emailVerified: true },
     );
@@ -37,6 +47,16 @@ describe('AdminCustomersService.verifyEmail (Story 13.1)', () => {
     expect(tx.customerVerification.deleteMany).toHaveBeenCalledWith({
       where: { value: 'c1', identifier: { startsWith: VERIFICATION_PREFIX } },
     });
+    // Story 20.5: one event, the email only hashed, the admin as actor.
+    expect(audit.events).toHaveLength(1);
+    expect(audit.events[0]).toMatchObject({
+      actorType: 'ADMIN',
+      actorId: 'a1',
+      action: 'CUSTOMER_EMAIL_VERIFIED_BY_ADMIN',
+      entityId: 'c1',
+      after: { customerId: 'c1', emailHash: 'h'.repeat(64), adminId: 'a1' },
+    });
+    expect(JSON.stringify(audit.events)).not.toContain('ana@example.com');
     expect(JSON.parse(log.mock.calls[0][0] as string)).toEqual({
       event: 'MANUAL_EMAIL_VERIFY',
       adminId: 'a1',
@@ -46,11 +66,15 @@ describe('AdminCustomersService.verifyEmail (Story 13.1)', () => {
   });
 
   it('is idempotent: already_verified (AC5)', async () => {
-    const { tx, service, log } = setup({ id: 'c1', emailVerified: true });
+    const { tx, service, log, audit } = setup({
+      id: 'c1',
+      emailVerified: true,
+    });
     await expect(service.verifyEmail('a1', 'ana@example.com')).resolves.toEqual(
       { email: 'ana@example.com', emailVerified: true },
     );
     expect(tx.customer.update).not.toHaveBeenCalled();
+    expect(audit.events).toHaveLength(0); // nothing changed, nothing emitted
     expect(
       (JSON.parse(log.mock.calls[0][0] as string) as { outcome: string })
         .outcome,

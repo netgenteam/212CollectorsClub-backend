@@ -11,7 +11,7 @@ export const REQUEST_ID_HEADER = 'X-Request-Id';
  * collide ids in the audit log), returns it in the `X-Request-Id` response
  * header (also on errors: it is set before the handler runs) and opens the
  * `RequestContext` for the rest of the request. `ip` is `req.ip`, which is the
- * client address because `trust proxy` is 1 (main.ts).
+ * client address (`trust proxy`, see `common/trust-proxy.ts`).
  */
 export function requestIdMiddleware(
   req: Request,

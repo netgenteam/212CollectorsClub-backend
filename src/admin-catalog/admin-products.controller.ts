@@ -70,6 +70,11 @@ export class AdminProductsController {
   constructor(private readonly adminProductsService: AdminProductsService) {}
 
   @Post()
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @HttpCode(HttpStatus.CREATED)
   @UseInterceptors(
     FilesInterceptor(
@@ -148,8 +153,9 @@ export class AdminProductsController {
   create(
     @Body() dto: CreateProductDto,
     @UploadedFiles() files: Express.Multer.File[] | undefined,
+    @Req() request: RequestWithAdminUser,
   ): Promise<AdminProductResponseDto> {
-    return this.adminProductsService.create(dto, files ?? []);
+    return this.adminProductsService.create(dto, files ?? [], request.user);
   }
 
   @Get()
@@ -251,6 +257,11 @@ export class AdminProductsController {
   }
 
   @Delete(':id')
+  @ApiResponse({
+    status: 503,
+    description:
+      'errorCode AUDIT_UNAVAILABLE: the action could not be written to the immutable audit log (fail-closed, Story 20.5); nothing was changed, retry in a few seconds.',
+  })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Delete (or, if referenced by history, deactivate) a Product',
@@ -268,8 +279,9 @@ export class AdminProductsController {
   })
   remove(
     @Param('id', ParseUUIDPipe) id: string,
+    @Req() request: RequestWithAdminUser,
   ): Promise<{ id: string; hardDeleted: boolean }> {
-    return this.adminProductsService.remove(id);
+    return this.adminProductsService.remove(id, request.user);
   }
 
   @Post(':id/images')

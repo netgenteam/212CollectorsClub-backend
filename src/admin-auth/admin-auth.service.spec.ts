@@ -3,6 +3,7 @@ import * as argon2 from 'argon2';
 import { Prisma } from '../generated/prisma/client.js';
 import { fakeAudit } from '../../test/helpers/fake-audit.js';
 import { AdminAuthService } from './admin-auth.service.js';
+import { AdminLoginFailureSummary } from './admin-login-failure-summary.js';
 import { AdminLoginLimiter } from './admin-login-limiter.js';
 
 vi.mock('argon2', async (importOriginal) => {
@@ -74,6 +75,7 @@ describe('AdminAuthService', () => {
           createHash('sha256').update(e.toLowerCase()).digest('hex'),
       } as never,
       new AdminLoginLimiter({ get: () => undefined } as never),
+      new AdminLoginFailureSummary(audit, { get: () => undefined } as never),
     );
   });
 
@@ -295,7 +297,10 @@ describe('AdminAuthService', () => {
  */
 describe('AdminAuthService.logout', () => {
   let tx: { $queryRaw: ReturnType<typeof vi.fn> };
-  let prisma: { $transaction: ReturnType<typeof vi.fn> };
+  let prisma: {
+    $transaction: ReturnType<typeof vi.fn>;
+    adminSession: { deleteMany: ReturnType<typeof vi.fn> };
+  };
   let audit: ReturnType<typeof fakeAudit>;
   let service: AdminAuthService;
 
@@ -305,7 +310,10 @@ describe('AdminAuthService.logout', () => {
         .fn()
         .mockResolvedValue([{ id: 'sess-1', userId: ADMIN_ID }]),
     };
-    prisma = { $transaction: vi.fn((cb: (t: unknown) => unknown) => cb(tx)) };
+    prisma = {
+      $transaction: vi.fn((cb: (t: unknown) => unknown) => cb(tx)),
+      adminSession: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    };
     audit = fakeAudit(prisma);
     service = new AdminAuthService(
       prisma as never,
@@ -313,6 +321,7 @@ describe('AdminAuthService.logout', () => {
       audit,
       {} as never,
       new AdminLoginLimiter({ get: () => undefined } as never),
+      new AdminLoginFailureSummary(audit, { get: () => undefined } as never),
     );
   });
 
@@ -343,6 +352,27 @@ describe('AdminAuthService.logout', () => {
 
     await expect(service.logout('abc.def')).resolves.toBeUndefined();
     expect(audit.events).toHaveLength(0);
+  });
+
+  it('revokes the session ANYWAY when the audit log is down: logged as an error, answers OK (a logout reduces exposure)', async () => {
+    prisma.$transaction.mockRejectedValueOnce(
+      Object.assign(new Error('AUDIT_UNAVAILABLE'), { status: 503 }),
+    );
+    const err = vi
+      .spyOn(
+        (service as unknown as { logger: { error: (m: string) => void } })
+          .logger,
+        'error',
+      )
+      .mockImplementation(() => undefined);
+
+    await expect(
+      service.logout('sessiontoken123.c2lnbmF0dXJl'),
+    ).resolves.toBeUndefined();
+    expect(prisma.adminSession.deleteMany).toHaveBeenCalledWith({
+      where: { token: 'sessiontoken123' },
+    });
+    expect(String(err.mock.calls[0][0])).toMatch(/LOGOUT_ADMIN/);
   });
 
   it('rejects with INVALID_ADMIN_TOKEN on a value with no signature part (defense in depth)', async () => {

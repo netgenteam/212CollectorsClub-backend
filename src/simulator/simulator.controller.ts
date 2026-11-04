@@ -20,7 +20,7 @@ import {
   type PublicSimulatorSet,
 } from './simulator-sets.service.js';
 
-/** Story 16.4 (AD-67, AD-69): per-IP limit (IP via `trust proxy 1`). */
+/** Story 16.4 (AD-67, AD-69): per-IP limit (IP via `trust proxy`, `common/trust-proxy.ts`). */
 // Resolved per request: .env is loaded by ConfigModule AFTER this file is imported.
 export const simulatorRateLimit = (): number => {
   const n = Number(process.env.SIMULATOR_RATE_LIMIT_PER_MIN ?? 30);

@@ -17,17 +17,24 @@ import {
  *     of EXACTLY this format, never the source database).
  *  2. `CREATE DATABASE <clone> TEMPLATE <source>`. The source is `E2E_DB_SOURCE` (a quiet
  *     template the developer keeps) or the database of `DATABASE_URL`. Postgres only
- *     clones a database nobody else is connected to: it retries for ~60 s and then
- *     aborts telling the developer to stop the dev server (no session is killed).
+ *     clones a database nobody else is connected to (and every refused attempt itself waits
+ *     ~5 s for the other sessions to leave): it retries until a TOTAL of ~60 s have passed
+ *     (a deadline, not an attempt count: 40 attempts took 272 s) and then aborts telling the
+ *     developer to stop the dev server (no session is killed). The clone is tagged with a
+ *     `COMMENT ON DATABASE` that only this run knows.
  *  3. Point `DATABASE_URL` (and `MIGRATE_DATABASE_URL` if set) of the run at the clone
  *     BEFORE the workers are forked, and verify with `current_database()` that the
  *     run really is on a throw-away database (abort otherwise).
- *  4. Teardown: `DROP DATABASE ... WITH (FORCE)` of this run's clone only.
+ *  4. Teardown: `DROP DATABASE ... WITH (FORCE)` of this run's clone only, after a POSITIVE
+ *     check (`assertDroppable`): the name is a clone name, it is neither the source nor the
+ *     database `DATABASE_URL` pointed at, it exists, and its comment is this run's tag.
  * The role that clones needs CREATEDB (the owner / `MIGRATE_DATABASE_URL`).
  */
 const STALE_SECONDS = 3 * 3600;
-const CLONE_ATTEMPTS = 40;
+/** Total time allowed to get a quiet template (see 2 above). */
+export const CLONE_DEADLINE_MS = 60_000;
 const CLONE_WAIT_MS = 1_500;
+const MARKER_PREFIX = 'cc-e2e-throwaway run=';
 
 const q = (ident: string): string => `"${ident.replace(/"/g, '""')}"`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -48,6 +55,44 @@ async function withAdmin<T>(
   }
 }
 
+/**
+ * Positive check run right before every teardown `DROP DATABASE`: the statement is only issued if
+ * ALL of these hold, otherwise it throws and nothing is dropped.
+ *  - `clone` has the throw-away name format and `base` is the prefix of the source;
+ *  - it is not the source database nor the database the run was configured with;
+ *  - it exists in `pg_database`, and its comment is the marker this run wrote when it created it.
+ */
+export async function assertDroppable(
+  c: Pick<pg.Client, 'query'>,
+  clone: string,
+  marker: string,
+  protectedNames: string[],
+): Promise<void> {
+  if (!isThrowawayDbName(clone)) {
+    throw new Error(`Refusing to DROP "${clone}": not a throw-away name.`);
+  }
+  if (protectedNames.includes(clone)) {
+    throw new Error(
+      `Refusing to DROP "${clone}": it is a configured database.`,
+    );
+  }
+  const r = await c.query<{ marker: string | null }>(
+    `SELECT shobj_description(d.oid, 'pg_database') AS marker
+       FROM pg_database d WHERE d.datname = $1`,
+    [clone],
+  );
+  if (r.rows.length !== 1) {
+    throw new Error(
+      `Refusing to DROP "${clone}": it does not exist (exactly one row expected).`,
+    );
+  }
+  if (r.rows[0].marker !== marker) {
+    throw new Error(
+      `Refusing to DROP "${clone}": its comment is not the marker of this run (it was not created by it).`,
+    );
+  }
+}
+
 export default async function setup(): Promise<() => Promise<void>> {
   const appUrl = process.env.DATABASE_URL;
   if (!appUrl) throw new Error('DATABASE_URL is not set');
@@ -62,6 +107,8 @@ export default async function setup(): Promise<() => Promise<void>> {
   const base = sourceName.slice(0, 30);
   const clone = `${base}_e2e_${Math.floor(Date.now() / 1000)}_${randomBytes(4).toString('hex')}`;
 
+  const marker = `${MARKER_PREFIX}${randomBytes(8).toString('hex')}`;
+  const protectedNames = [...new Set([sourceName, dbNameOf(appUrl)])];
   await withAdmin(adminUrl, async (c) => {
     // 1. Stale clones of killed runs.
     const now = Math.floor(Date.now() / 1000);
@@ -74,15 +121,20 @@ export default async function setup(): Promise<() => Promise<void>> {
       if (!m || m[1] !== base || now - Number(m[2]) <= STALE_SECONDS) continue;
       await c.query(`DROP DATABASE IF EXISTS ${q(datname)} WITH (FORCE)`);
     }
-    // 2. Clone (retry while someone else is connected to the template).
+    // 2. Clone (retry while someone else is connected to the template). A DEADLINE, not an attempt
+    //    count: a refused attempt already waits ~5 s inside Postgres for the other sessions.
     let last: unknown;
-    for (let i = 0; i < CLONE_ATTEMPTS; i++) {
+    const t0 = performance.now();
+    for (;;) {
       try {
         await c.query(`CREATE DATABASE ${q(clone)} TEMPLATE ${q(sourceName)}`);
+        // Only this run knows the tag: the teardown refuses to drop anything else.
+        await c.query(`COMMENT ON DATABASE ${q(clone)} IS '${marker}'`);
         return;
       } catch (e) {
         last = e;
         if ((e as { code?: string }).code !== '55006') break; // not "being accessed"
+        if (performance.now() - t0 >= CLONE_DEADLINE_MS) break;
         await sleep(CLONE_WAIT_MS);
       }
     }
@@ -100,9 +152,10 @@ export default async function setup(): Promise<() => Promise<void>> {
     process.env.MIGRATE_DATABASE_URL = withDbName(migrateUrl, clone);
   process.env.E2E_THROWAWAY_DB = clone;
   const drop = async (): Promise<void> => {
-    await withAdmin(adminUrl, (c) =>
-      c.query(`DROP DATABASE IF EXISTS ${q(clone)} WITH (FORCE)`),
-    );
+    await withAdmin(adminUrl, async (c) => {
+      await assertDroppable(c, clone, marker, protectedNames);
+      await c.query(`DROP DATABASE ${q(clone)} WITH (FORCE)`);
+    });
   };
   try {
     assertThrowawayUrl(process.env.DATABASE_URL, 'DATABASE_URL');

@@ -1,5 +1,5 @@
 import { HttpStatus } from '@nestjs/common';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ApiException } from '../common/api-exception.js';
 import { RequestContext } from '../common/request-context.js';
 import {
@@ -7,6 +7,7 @@ import {
   AuditRoundTripError,
   AuditService,
 } from './audit.service.js';
+import { AuditPayloadError } from './audit-payload.js';
 import { GENESIS_HASH, computeAuditHash } from './canonical-json.js';
 
 type Call = { kind: 'exec' | 'query'; sql: string; values: unknown[] };
@@ -281,6 +282,118 @@ describe('AuditService.record (Story 20.1)', () => {
       svc().record(tx, { ...ev, action: 'NOPE' } as never),
     ).rejects.toBeInstanceOf(AuditEventError);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('AuditService: an unserializable payload in PRODUCTION never becomes a 500 (Story 20.5 follow-up)', () => {
+  const insert = (calls: Call[]) =>
+    calls.find((c) => /INSERT INTO "Audit_Events"/.test(c.sql))!;
+  const bad = [
+    ['a function', { f: () => 1 }],
+    ['a symbol', { s: Symbol('x') }],
+    [
+      'nesting beyond the limit',
+      JSON.parse('{"a":'.repeat(40) + '1' + '}'.repeat(40)),
+    ],
+  ] as const;
+  const withMode = async (mode: 'true' | 'false', run: () => Promise<void>) => {
+    const prev = process.env.AUDIT_PAYLOAD_STRICT;
+    process.env.AUDIT_PAYLOAD_STRICT = mode;
+    try {
+      await run();
+    } finally {
+      if (prev === undefined) delete process.env.AUDIT_PAYLOAD_STRICT;
+      else process.env.AUDIT_PAYLOAD_STRICT = prev;
+    }
+  };
+
+  it.each(bad)(
+    'lenient (production): %s is written as a marker, the action goes on and the bug is logged',
+    async (_what, after) => {
+      await withMode('false', async () => {
+        const { calls, tx } = fakeTx();
+        const service = svc();
+        const err = vi
+          .spyOn(
+            (service as unknown as { logger: { error: () => void } }).logger,
+            'error',
+          )
+          .mockImplementation(() => undefined);
+        await expect(
+          service.record(tx, { ...ev, after: after as never }),
+        ).resolves.toMatchObject({ seq: 1 });
+        expect(insert(calls).values[8]).toBe(
+          '{"payloadError":"UNSERIALIZABLE"}',
+        );
+        expect(err).toHaveBeenCalledTimes(1);
+      });
+    },
+  );
+
+  it('lenient: a payload over the size cap is a marker too (a sale is not refused for a big payload)', async () => {
+    await withMode('false', async () => {
+      const { calls, tx } = fakeTx();
+      const service = svc();
+      vi.spyOn(
+        (service as unknown as { logger: { error: () => void } }).logger,
+        'error',
+      ).mockImplementation(() => undefined);
+      await service.record(tx, {
+        ...ev,
+        after: { items: Array.from({ length: 40 }, () => 'y '.repeat(4000)) },
+      });
+      expect(insert(calls).values[8]).toBe('{"payloadError":"UNSERIALIZABLE"}');
+    });
+  });
+
+  it('a long unbroken string is cut BEFORE the value detectors run (they are quadratic: 150 000 characters blocked the loop for 11 s)', async () => {
+    await withMode('false', async () => {
+      const { calls, tx } = fakeTx();
+      const service = svc();
+      vi.spyOn(
+        (service as unknown as { logger: { warn: () => void } }).logger,
+        'warn',
+      ).mockImplementation(() => undefined);
+      const t0 = performance.now();
+      await service.record(tx, { ...ev, after: { t: 'x'.repeat(300_000) } });
+      expect(performance.now() - t0).toBeLessThan(1_000);
+      const stored = JSON.parse(insert(calls).values[8] as string) as {
+        t: string;
+      };
+      expect(stored.t).toHaveLength(8_000);
+    });
+    await withMode('true', async () => {
+      const { tx } = fakeTx();
+      await expect(
+        svc().record(tx, { ...ev, after: { t: 'x'.repeat(300_000) } }),
+      ).rejects.toBeInstanceOf(AuditPayloadError);
+    });
+  });
+
+  it('strict (dev, tests): the same payloads throw AuditPayloadError before any SQL, so the test of the call site fails', async () => {
+    await withMode('true', async () => {
+      for (const [, after] of bad) {
+        const { calls, tx } = fakeTx();
+        await expect(
+          svc().record(tx, { ...ev, after: after as never }),
+        ).rejects.toBeInstanceOf(AuditPayloadError);
+        expect(calls).toHaveLength(0);
+      }
+    });
+  });
+
+  it("the emitters' payload() helper follows the same rule", async () => {
+    const { payload } = await import('./audit-events.js');
+    await withMode('true', () => {
+      expect(() => payload({ d: new Date('nope') })).toThrow(AuditPayloadError);
+      return Promise.resolve();
+    });
+    await withMode('false', () => {
+      expect(payload({ d: new Date('nope') })).toEqual({
+        payloadError: 'UNSERIALIZABLE',
+      });
+      return Promise.resolve();
+    });
   });
 });
 

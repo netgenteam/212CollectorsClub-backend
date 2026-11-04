@@ -36,6 +36,59 @@ const SAMPLES: Record<AuditAction, AuditPayload[]> = {
   LOGIN_ADMIN_FAILED: [
     { emailHash: sha, reason: 'BAD_PASSWORD', attempt: 3, adminFound: false },
   ],
+  LOGIN_ADMIN_FAILED_SUMMARY: [
+    {
+      dropped: 34,
+      windowStart: '2026-11-04T12:00:00.000Z',
+      windowEnd: '2026-11-04T12:01:00.000Z',
+      windowSeconds: 60,
+      distinctIdentifiers: 3,
+      identifierHashes: [sha, 'a'.repeat(64)],
+    },
+  ],
+  CUSTOMER_PASSWORD_RESET: [
+    { customerId: uuid(), via: 'EMAIL_TOKEN', sessionsRevoked: true },
+  ],
+  CUSTOMER_EMAIL_VERIFIED_BY_ADMIN: [
+    { customerId: uuid(), emailHash: sha, adminId: uuid() },
+  ],
+  REFUND_PENDING_RECORDED: [
+    {
+      orderId: uuid(),
+      eventId: 'evt_123',
+      reason: 'NO_STOCK',
+      amountUsd: '12.50',
+    },
+  ],
+  PRODUCT_CREATED: [
+    {
+      productId: uuid(),
+      priceUsd: '12.50',
+      stock: 5,
+      isActive: true,
+      categoryId: uuid(),
+      via: 'MANUAL',
+    },
+  ],
+  PRODUCT_DELETED: [
+    { priceUsd: '12.50', stock: 0, isActive: false, fromMasterCard: true },
+  ],
+  PRODUCT_ACTIVE_CHANGED: [
+    { productId: uuid(), isActive: false, via: 'UPDATE' },
+  ],
+  DATA_IMPORT_RUN: [
+    {
+      runId: uuid(),
+      kind: 'NIGHTLY',
+      status: 'PARTIAL',
+      requestsUsed: 50,
+      cardsSynced: 1200,
+      productsUpdated: 37,
+      errorCount: 0,
+      quotaExhausted: true,
+      bigVariations: 2,
+    },
+  ],
   LOGOUT_ADMIN: [{ sessionId: uuid() }],
   ADMIN_CREDENTIALS_CHANGED: [
     { passwordChanged: true, emailHash: sha, sessionsRevoked: 2 },

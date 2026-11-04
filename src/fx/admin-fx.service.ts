@@ -143,7 +143,13 @@ export class AdminFxService {
     if (outcome.needsRefresh) {
       try {
         // Already committed: what is left of the budget bounds this refresh.
-        const r = await this.within(this.refresher.refresh(dto.source), left());
+        const r = await this.within(
+          this.refresher.refresh(dto.source, {
+            origin: 'ADMIN_REFRESH',
+            adminId: adminUserId,
+          }),
+          left(),
+        );
         refresh = r ? r.status : 'FAILED';
       } catch {
         refresh = 'FAILED';
@@ -381,8 +387,11 @@ export class AdminFxService {
     };
   }
 
-  async refresh(): Promise<RefreshFxResponseDto> {
-    const r = await this.refresher.refresh();
+  async refresh(adminUserId?: string): Promise<RefreshFxResponseDto> {
+    const r = await this.refresher.refresh(undefined, {
+      origin: 'ADMIN_REFRESH',
+      adminId: adminUserId,
+    });
     if (r.status === 'IN_PROGRESS') {
       throw new ApiException(
         HttpStatus.CONFLICT,

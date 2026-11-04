@@ -13,6 +13,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { RequestContext } from '../common/request-context.js';
 import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
+import { AdminLoginFailureSummary } from './admin-login-failure-summary.js';
 import { AdminLoginLimiter } from './admin-login-limiter.js';
 import type { AdminLoginResponseDto } from './dto/admin-login-response.dto.js';
 
@@ -83,6 +84,7 @@ export class AdminAuthService {
     private readonly audit: AuditService,
     private readonly crypto: IdDocCryptoService,
     private readonly limiter: AdminLoginLimiter,
+    private readonly summary: AdminLoginFailureSummary,
   ) {}
 
   /**
@@ -177,33 +179,48 @@ export class AdminAuthService {
    * Deletes the session behind the (already guard-verified) bearer token.
    * `deleteMany` makes it idempotent: a concurrent logout that already
    * removed the row is not an error (never a 500).
+   *
+   * Story 20.5: `LOGOUT_ADMIN` goes in the same transaction as the revocation, so normally the
+   * event exists exactly when the row was removed. But a logout REDUCES exposure (the session
+   * lives up to 8 h): it must never be refused because the audit log is down. If the audit
+   * transaction fails for any reason the session is revoked anyway (plain delete), the failure is
+   * logged with `logger.error` and the answer is the normal 204.
    */
   async logout(rawToken: string): Promise<void> {
     const sessionToken = sessionTokenFromBearer(rawToken);
     if (!sessionToken) {
       throw invalidAdminTokenException();
     }
-    // Story 20.5: `LOGOUT_ADMIN` in the same transaction as the revocation (fail-closed). Only
-    // the call that really removed the row emits (a concurrent repeat deletes 0 rows).
-    await this.audit.transaction(async (tx, audit) => {
-      const rows = await tx.$queryRaw<
-        { id: string; userId: string }[]
-      >`DELETE FROM "Admin_Sessions" WHERE "token" = ${sessionToken} RETURNING "id", "userId"`;
-      if (rows.length === 0) return;
-      audit.add({
-        actorType: 'ADMIN',
-        actorId: rows[0].userId,
-        action: 'LOGOUT_ADMIN',
-        entityType: 'AdminUser',
-        entityId: rows[0].userId,
-        after: { adminId: rows[0].userId, sessionId: rows[0].id },
+    try {
+      await this.audit.transaction(async (tx, audit) => {
+        const rows = await tx.$queryRaw<
+          { id: string; userId: string }[]
+        >`DELETE FROM "Admin_Sessions" WHERE "token" = ${sessionToken} RETURNING "id", "userId"`;
+        if (rows.length === 0) return;
+        audit.add({
+          actorType: 'ADMIN',
+          actorId: rows[0].userId,
+          action: 'LOGOUT_ADMIN',
+          entityType: 'AdminUser',
+          entityId: rows[0].userId,
+          after: { adminId: rows[0].userId, sessionId: rows[0].id },
+        });
       });
-    });
+    } catch (err) {
+      this.logger.error(
+        `LOGOUT_ADMIN could not be audited; revoking the session anyway: ${String(err)}`,
+      );
+      await this.prisma.adminSession.deleteMany({
+        where: { token: sessionToken },
+      });
+    }
   }
 
   /**
    * Counts the failure and schedules the best-effort `LOGIN_ADMIN_FAILED` (never awaited, never
    * throws). `adminId` is null when no admin matched; the typed value is only ever hashed.
+   * A failure the budget (or a write error) leaves out is counted by `AdminLoginFailureSummary`,
+   * which writes ONE `LOGIN_ADMIN_FAILED_SUMMARY` per minute at most.
    */
   private failed(
     ip: string | null,
@@ -211,21 +228,23 @@ export class AdminAuthService {
     adminId: string | null,
   ): void {
     this.limiter.recordFailure(ip, identifier);
+    let emailHash: string;
+    try {
+      emailHash = this.crypto.hashEmail(identifier);
+    } catch (err) {
+      this.logger.error(`LOGIN_ADMIN_FAILED not written: ${String(err)}`);
+      this.summary.noteDropped(null, ip);
+      return;
+    }
     const release = this.limiter.tryAcquireEventSlot();
     if (!release) {
       this.logger.warn(
         `LOGIN_ADMIN_FAILED not written (event budget exhausted; ${this.limiter.droppedEvents} dropped since boot)`,
       );
+      this.summary.noteDropped(emailHash, ip);
       return;
     }
-    let emailHash: string;
-    try {
-      emailHash = this.crypto.hashEmail(identifier);
-    } catch (err) {
-      release();
-      this.logger.error(`LOGIN_ADMIN_FAILED not written: ${String(err)}`);
-      return;
-    }
+    const hash = emailHash;
     const ctx = RequestContext.get();
     void this.audit
       .transaction((_tx, audit) => {
@@ -234,9 +253,9 @@ export class AdminAuthService {
           actorId: null,
           action: 'LOGIN_ADMIN_FAILED',
           entityType: 'AdminUser',
-          entityId: adminId ?? `unknown:${emailHash.slice(0, 16)}`,
+          entityId: adminId ?? `unknown:${hash.slice(0, 16)}`,
           after: {
-            emailHash,
+            emailHash: hash,
             reason: adminId ? 'BAD_PASSWORD' : 'UNKNOWN_USER',
             adminFound: adminId !== null,
           },
@@ -250,6 +269,7 @@ export class AdminAuthService {
         this.logger.error(
           `LOGIN_ADMIN_FAILED could not be written (the 401 was already sent): ${String(err)}`,
         );
+        this.summary.noteDropped(hash, ip);
       })
       .finally(release);
   }

@@ -345,6 +345,93 @@ describe('CustomerAuthService', () => {
     });
   });
 
+  describe('Story 20.5: CUSTOMER_PASSWORD_RESET', () => {
+    const withOwner = (value: string | null, expiresInMs = 60_000) => {
+      const findVerificationValue = vi
+        .fn()
+        .mockResolvedValue(
+          value === null
+            ? null
+            : { value, expiresAt: new Date(Date.now() + expiresInMs) },
+        );
+      (service as unknown as { customerAuth: unknown }).customerAuth = {
+        $context: Promise.resolve({
+          internalAdapter: { findVerificationValue },
+        }),
+        api: { resetPassword },
+      };
+      const events: unknown[] = [];
+      (service as unknown as { audit: unknown }).audit = {
+        transaction: vi.fn(
+          async (
+            fn: (tx: never, a: { add: (e: unknown) => void }) => Promise<void>,
+          ) => {
+            await fn(undefined as never, { add: (e) => void events.push(e) });
+          },
+        ),
+      };
+      return { findVerificationValue, events };
+    };
+
+    it('a successful reset emits one event for the owner of the token (no token, no email)', async () => {
+      const { findVerificationValue, events } = withOwner('cust-1');
+      resetPassword.mockResolvedValue({ status: true });
+      await service.resetPassword('tok-123', 'longenough1');
+      // the owner is read BEFORE BetterAuth consumes the token
+      expect(findVerificationValue).toHaveBeenCalledWith(
+        'reset-password:tok-123',
+      );
+      expect(events).toEqual([
+        expect.objectContaining({
+          actorType: 'CUSTOMER',
+          actorId: 'cust-1',
+          action: 'CUSTOMER_PASSWORD_RESET',
+          entityId: 'cust-1',
+          after: {
+            customerId: 'cust-1',
+            via: 'EMAIL_TOKEN',
+            sessionsRevoked: true,
+          },
+        }),
+      ]);
+      expect(JSON.stringify(events)).not.toContain('tok-123');
+    });
+
+    it('a rejected token emits nothing; an unknown or expired owner emits nothing', async () => {
+      const a = withOwner('cust-1');
+      resetPassword.mockRejectedValue(
+        new APIError('BAD_REQUEST', { message: 'bad', code: 'INVALID_TOKEN' }),
+      );
+      await expect(
+        service.resetPassword('t', 'longenough1'),
+      ).rejects.toBeDefined();
+      expect(a.events).toHaveLength(0);
+      for (const owner of [withOwner(null), withOwner('cust-1', -1_000)]) {
+        resetPassword.mockResolvedValue({ status: true });
+        await service.resetPassword('t', 'longenough1');
+        expect(owner.events).toHaveLength(0);
+      }
+    });
+
+    it('an audit failure never undoes or refuses a reset that already happened (logged as an error)', async () => {
+      withOwner('cust-1');
+      resetPassword.mockResolvedValue({ status: true });
+      (service as unknown as { audit: unknown }).audit = {
+        transaction: vi.fn().mockRejectedValue(new Error('audit down')),
+      };
+      const err = vi
+        .spyOn(
+          (service as unknown as { logger: { error: () => void } }).logger,
+          'error',
+        )
+        .mockImplementation(() => undefined);
+      await expect(
+        service.resetPassword('t', 'longenough1'),
+      ).resolves.toBeUndefined();
+      expect(err).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('timing: no branch awaits work exclusive to the other', () => {
     const SLOW = 150;
     const slow = () => new Promise((r) => setTimeout(() => r({}), SLOW));

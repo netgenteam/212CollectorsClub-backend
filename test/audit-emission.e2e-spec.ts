@@ -6,7 +6,6 @@ import { ConfigService } from '@nestjs/config';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import cookieParser from 'cookie-parser';
-import pg from 'pg';
 import request from 'supertest';
 import Stripe from 'stripe';
 import * as argon2 from 'argon2';
@@ -21,7 +20,12 @@ import { sanitizeAuditPayload } from './../src/audit/audit-payload.js';
 import { publicFieldsOf } from './../src/audit/audit-actions.js';
 import { FAKE_STRIPE_WEBHOOK_SECRET } from './../src/payments-stripe/fake-stripe-client.js';
 import { snapshotFx, restoreFx, type FxState } from './helpers/db-snapshot.js';
-import { adminDatabaseUrl } from './helpers/audit-sandbox.js';
+import { blockAuditAction } from './helpers/block-audit-action.js';
+import { AdminLoginFailureSummary } from './../src/admin-auth/admin-login-failure-summary.js';
+import { CUSTOMER_AUTH } from './../src/auth-core/auth-core.constants.js';
+import type { CustomerAuth } from './../src/auth-core/customer-auth.factory.js';
+import { TcgSyncRunService } from './../src/tcg/tcg-sync-run.service.js';
+import { join } from 'node:path';
 import { withBuyerId } from './helpers/buyer-id.js';
 import {
   seedConsentDocs,
@@ -46,7 +50,10 @@ import {
  *  - AC8 real concurrency and crossings: linear chain verified by `AuditChainVerifier`, no 5xx,
  *    and a PII sweep over every event emitted in the run.
  */
-const TAG = randomUUID().slice(0, 8);
+// 20.5 fix: the tag lands in names/codes that the PII sweep scans. A hex tag starting with `e`
+// followed by 7 digits (`Agencia e1234567`) is a legitimate-looking cedula to the sweep regex
+// (about 1 run in 500): the tag starts with a letter outside [VEJGP] and has no digit run.
+const TAG = `t${randomUUID().replace(/-/g, '').slice(0, 7)}`;
 const PASS = 'correct-horse-battery-staple-20-5';
 const BASE = '/api/v1';
 
@@ -121,28 +128,7 @@ describe('Audit event emission (e2e, Story 20.5)', { timeout: 60_000 }, () => {
     }
   };
 
-  /** Makes every INSERT of one action fail, for real (a CHECK constraint on the owner's DDL). */
-  async function blockAction<T>(
-    action: AuditAction,
-    run: () => Promise<T>,
-  ): Promise<T> {
-    const u = new URL(adminDatabaseUrl());
-    u.searchParams.delete('schema');
-    const c = new pg.Client({ connectionString: u.toString() });
-    await c.connect();
-    const name = `zz_block_${action.toLowerCase()}`.slice(0, 60);
-    try {
-      await c.query(
-        `ALTER TABLE "Audit_Events" ADD CONSTRAINT "${name}" CHECK ("action" <> '${action}') NOT VALID`,
-      );
-      return await run();
-    } finally {
-      await c
-        .query(`ALTER TABLE "Audit_Events" DROP CONSTRAINT IF EXISTS "${name}"`)
-        .catch(() => undefined);
-      await c.end();
-    }
-  }
+  const blockAction = blockAuditAction;
 
   const cookieOf = (res: request.Response, name: string): string =>
     ((res.headers['set-cookie'] as unknown as string[] | undefined) ?? [])
@@ -556,6 +542,15 @@ describe('Audit event emission (e2e, Story 20.5)', { timeout: 60_000 }, () => {
         expect(written.length).toBeLessThanOrEqual(6);
         expect(written.length).toBeGreaterThan(0);
         expect(written.length + dropped).toBe(40);
+        // what the budget threw away is not lost: ONE summary counts it (hashed identifiers)
+        await app.get(AdminLoginFailureSummary).flush();
+        const sum = await eventsAfter(since, 'LOGIN_ADMIN_FAILED_SUMMARY');
+        expect(sum).toHaveLength(1);
+        expect(sum[0]).toMatchObject({
+          actorType: 'SYSTEM',
+          after: { dropped },
+        });
+        expect(JSON.stringify(sum)).not.toContain(`flood-`);
       } finally {
         process.env.AUDIT_LOGIN_FAILED_MAX_PER_MINUTE = '1000';
       }
@@ -581,22 +576,26 @@ describe('Audit event emission (e2e, Story 20.5)', { timeout: 60_000 }, () => {
       expect(rows[0]).toMatchObject({ actorType: 'ADMIN', actorId: adminId });
     });
 
-    it('LOGOUT_ADMIN is fail-closed: 503 and the session is NOT revoked', async () => {
+    it('a logout is NEVER refused because the audit log is down: the session is revoked anyway (an error is logged) and the answer is 204', async () => {
       const login = await request(server())
         .post(`${BASE}/admin/auth/login`)
         .send({ usernameOrEmail: ADMIN_USER, password: PASS })
         .expect(200);
       const t = (login.body as { accessToken: string }).accessToken;
+      const since = await head();
       const res = await blockAction('LOGOUT_ADMIN', () =>
         request(server())
           .post(`${BASE}/admin/auth/logout`)
           .set('Authorization', `Bearer ${t}`),
       );
-      expect(res.status).toBe(503);
+      expect(res.status).toBe(204);
+      // the session is really gone: the same token is now a 401
       await request(server())
         .get(`${BASE}/admin/auth/me`)
         .set('Authorization', `Bearer ${t}`)
-        .expect(200);
+        .expect(401);
+      // not audited (the write failed): no event, and the answer did not depend on it
+      expect(await eventsAfter(since, 'LOGOUT_ADMIN')).toEqual([]);
     });
   });
 
@@ -843,6 +842,133 @@ describe('Audit event emission (e2e, Story 20.5)', { timeout: 60_000 }, () => {
       });
     });
 
+    it('product create / isActive change / delete emit PRODUCT_CREATED / PRODUCT_ACTIVE_CHANGED / PRODUCT_DELETED (ids and money only); no-ops and a failed audit emit nothing and change nothing', async () => {
+      const create = (slug: string) =>
+        request(server())
+          .post(`${BASE}/admin/products`)
+          .set(auth())
+          .field('name', `Emit${TAG} created`)
+          .field('slug', slug)
+          .field('description', 'created by the audit e2e')
+          .field('franchise', 'POKEMON')
+          .field('productType', 'SINGLE_CARD')
+          .field('rarity', 'COMMON')
+          .field('priceUsd', '19.99')
+          .field('stock', '4')
+          .field('categoryId', categoryId)
+          .attach(
+            'images',
+            join(import.meta.dirname, 'fixtures', 'product-image-fixture.png'),
+          );
+      const since = await head();
+      const created = await create(`emit${TAG}-created`);
+      expect(created.status).toBe(201);
+      const id = (created.body as { id: string }).id;
+      productIds.push(id);
+      const c = await eventsAfter(since, 'PRODUCT_CREATED');
+      expect(c).toHaveLength(1);
+      expect(c[0]).toMatchObject({
+        actorType: 'ADMIN',
+        actorId: adminId,
+        entityType: 'Product',
+        entityId: id,
+        before: null,
+        after: {
+          productId: id,
+          priceUsd: '19.99',
+          stock: 4,
+          isActive: true,
+          categoryId,
+          via: 'MANUAL',
+        },
+      });
+      // no title / slug / description in the event
+      expect(JSON.stringify(c[0])).not.toContain(`emit${TAG}-created`);
+
+      // isActive: a real transition emits, the same value again does not
+      const patch = (body: object) =>
+        request(server())
+          .patch(`${BASE}/admin/products/${id}`)
+          .set(auth())
+          .send(body);
+      const s2 = await head();
+      await patch({ isActive: false }).expect(200);
+      await patch({ isActive: false }).expect(200);
+      await patch({ isActive: true }).expect(200);
+      const act = await eventsAfter(s2, 'PRODUCT_ACTIVE_CHANGED');
+      expect(
+        act.map((r) => (r.after as { isActive: boolean }).isActive),
+      ).toEqual([false, true]);
+      expect(act[0]).toMatchObject({
+        actorId: adminId,
+        before: { isActive: true },
+        after: { productId: id, via: 'UPDATE' },
+      });
+
+      // fail-closed: the audit write fails => 503 and the product is NOT created
+      const blocked = await blockAction('PRODUCT_CREATED', () =>
+        create(`emit${TAG}-blocked`),
+      );
+      expect(blocked.status).toBe(503);
+      expect(
+        await prisma.product.count({ where: { slug: `emit${TAG}-blocked` } }),
+      ).toBe(0);
+      // ... and for isActive: the product keeps its state
+      const hidden = await blockAction('PRODUCT_ACTIVE_CHANGED', () =>
+        patch({ isActive: false }),
+      );
+      expect(hidden.status).toBe(503);
+      expect(
+        (await prisma.product.findUniqueOrThrow({ where: { id } })).isActive,
+      ).toBe(true);
+
+      // delete of a product nobody referenced: a real DELETE, one event with what it was
+      const s3 = await head();
+      const del = await request(server())
+        .delete(`${BASE}/admin/products/${id}`)
+        .set(auth())
+        .expect(200);
+      expect(del.body).toMatchObject({ id, hardDeleted: true });
+      const d = await eventsAfter(s3, 'PRODUCT_DELETED');
+      expect(d).toHaveLength(1);
+      expect(d[0]).toMatchObject({
+        actorId: adminId,
+        entityId: id,
+        before: {
+          priceUsd: '19.99',
+          stock: 4,
+          isActive: true,
+          fromMasterCard: false,
+        },
+        after: null,
+      });
+
+      // a product with history cannot be deleted: it is deactivated (and THAT is the event)
+      const kept = await mkProduct({ stock: 5 });
+      await checkout(kept);
+      const s4 = await head();
+      const soft = await request(server())
+        .delete(`${BASE}/admin/products/${kept}`)
+        .set(auth())
+        .expect(200);
+      expect(soft.body).toMatchObject({ id: kept, hardDeleted: false });
+      expect(await eventsAfter(s4, 'PRODUCT_DELETED')).toEqual([]);
+      const fb = await eventsAfter(s4, 'PRODUCT_ACTIVE_CHANGED');
+      expect(fb).toHaveLength(1);
+      expect(fb[0]).toMatchObject({
+        entityId: kept,
+        before: { isActive: true },
+        after: { isActive: false, via: 'DELETE_FALLBACK' },
+      });
+      // fail-closed delete: the audit write fails => 503 and the row is still there
+      const other = await mkProduct({ stock: 1 });
+      const refused = await blockAction('PRODUCT_DELETED', () =>
+        request(server()).delete(`${BASE}/admin/products/${other}`).set(auth()),
+      );
+      expect(refused.status).toBe(503);
+      expect(await prisma.product.count({ where: { id: other } })).toBe(1);
+    });
+
     it('shipping agency create / edit / delete emit SHIPPING_AGENCY_CHANGED; a no-op edit does not', async () => {
       const since = await head();
       const created = await request(server())
@@ -873,6 +999,273 @@ describe('Audit event emission (e2e, Story 20.5)', { timeout: 60_000 }, () => {
       expect(rows[1]).toMatchObject({
         before: { name: `Agencia ${TAG}`, isActive: true },
         after: { name: `Agencia ${TAG} 2`, isActive: false },
+      });
+    });
+  });
+
+  // ─── follow-up: risk actions that had no event ────────────────────────────
+  describe('follow-up: customer accounts, data imports and Stripe refunds pending', () => {
+    it('a customer password reset emits CUSTOMER_PASSWORD_RESET (actor: the customer; no email, no token); an audit outage does not undo or refuse the reset', async () => {
+      const email = `pwr-${TAG}@212collectorsclub.test`;
+      emails.push(email);
+      const customer = await prisma.customer.create({
+        data: { email, name: 'Reset Tester', emailVerified: true },
+      });
+      // The mail carries the token and BetterAuth stores only its hash, so the test plants a
+      // one-time token through BetterAuth's own adapter (the same call `forgot-password` makes).
+      const tokenOf = async (): Promise<string> => {
+        const t = `tok-${TAG}-${randomUUID()}`;
+        const ctx = await app.get<CustomerAuth>(CUSTOMER_AUTH).$context;
+        await ctx.internalAdapter.createVerificationValue({
+          identifier: `reset-password:${t}`,
+          value: customer.id,
+          expiresAt: new Date(Date.now() + 3_600_000),
+        });
+        return t;
+      };
+      const reset = (token: string) =>
+        request(server())
+          .post(`${BASE}/auth/reset-password`)
+          .set('X-Forwarded-For', '198.51.100.77')
+          .send({ token, password: 'Nueva-Contrasena-Larga-1234' });
+
+      const since = await head();
+      const t1 = await tokenOf();
+      await reset(t1).expect(200);
+      const rows = await eventsAfter(since, 'CUSTOMER_PASSWORD_RESET');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        actorType: 'CUSTOMER',
+        actorId: customer.id,
+        entityType: 'Customer',
+        entityId: customer.id,
+        after: { customerId: customer.id, via: 'EMAIL_TOKEN' },
+      });
+      expect(JSON.stringify(rows)).not.toContain(t1);
+      expect(JSON.stringify(rows)).not.toContain(email);
+      // the token is single use: the second try is the same 400 as before and emits nothing
+      const again = await reset(t1);
+      expect(again.status).toBe(400);
+      expect(await eventsAfter(since, 'CUSTOMER_PASSWORD_RESET')).toHaveLength(
+        1,
+      );
+
+      // audit down: the password HAS changed (BetterAuth uses its own connection), so the answer is
+      // still 200 and the failure is logged; nothing is rolled back
+      const t2 = await tokenOf();
+      const res = await blockAction('CUSTOMER_PASSWORD_RESET', () => reset(t2));
+      expect(res.status).toBe(200);
+      const login = await request(server())
+        .post(`${BASE}/auth/login`)
+        .set('X-Forwarded-For', '198.51.100.78')
+        .send({ email, password: 'Nueva-Contrasena-Larga-1234' });
+      expect(login.status).toBe(200);
+    });
+
+    it('admin/customers/verify-email emits CUSTOMER_EMAIL_VERIFIED_BY_ADMIN once per real change (email hashed); fail-closed', async () => {
+      process.env.MANUAL_EMAIL_VERIFY_ENABLED = 'true';
+      try {
+        const email = `vfy-${TAG}@212collectorsclub.test`;
+        emails.push(email);
+        const c = await prisma.customer.create({
+          data: { email, name: 'Verify Tester', emailVerified: false },
+        });
+        const call = () =>
+          request(server())
+            .post(`${BASE}/admin/customers/verify-email`)
+            .set(auth())
+            .send({ email });
+        const since = await head();
+        const blocked = await blockAction(
+          'CUSTOMER_EMAIL_VERIFIED_BY_ADMIN',
+          call,
+        );
+        expect(blocked.status).toBe(503);
+        expect(
+          (await prisma.customer.findUniqueOrThrow({ where: { id: c.id } }))
+            .emailVerified,
+        ).toBe(false);
+        await call().expect(200);
+        await call().expect(200); // already verified: nothing changes, nothing is emitted
+        const rows = await eventsAfter(
+          since,
+          'CUSTOMER_EMAIL_VERIFIED_BY_ADMIN',
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          actorType: 'ADMIN',
+          actorId: adminId,
+          entityType: 'Customer',
+          entityId: c.id,
+          after: { customerId: c.id, adminId },
+        });
+        expect((rows[0].after as { emailHash: string }).emailHash).toMatch(
+          /^[0-9a-f]{64}$/,
+        );
+        expect(JSON.stringify(rows)).not.toContain(email);
+      } finally {
+        delete process.env.MANUAL_EMAIL_VERIFY_ENABLED;
+      }
+    });
+
+    it('a Stripe payment that cannot be honored emits REFUND_PENDING_RECORDED once (NO_STOCK and AFTER_TERMINAL); a redelivery emits nothing; fail-closed answers 5xx and Stripe redelivers', async () => {
+      // 1) paid after the order already failed (expired session): AFTER_TERMINAL
+      const p1 = await mkProduct({ price: '10.00' });
+      const o1 = await checkout(p1, 'stripe');
+      await sendWebhook(
+        webhookBody(
+          'checkout.session.expired',
+          o1.sessionId as string,
+          o1.orderId,
+          1000,
+        ),
+      ).expect(200);
+      const paid1 = webhookBody(
+        'checkout.session.completed',
+        o1.sessionId as string,
+        o1.orderId,
+        1000,
+      );
+      const since = await head();
+      const blocked = await blockAction('REFUND_PENDING_RECORDED', () =>
+        sendWebhook(paid1),
+      );
+      expect(blocked.status).toBeGreaterThanOrEqual(500);
+      // nothing half done: the webhook row was rolled back too, so Stripe's retry is processed
+      expect(
+        await prisma.stripeWebhookEvent.count({
+          where: {
+            orderId: o1.orderId,
+            outcome: { startsWith: 'refund_pending_' },
+          },
+        }),
+      ).toBe(0);
+      expect(await eventsAfter(since, 'REFUND_PENDING_RECORDED')).toEqual([]);
+      await sendWebhook(paid1).expect(200);
+      await sendWebhook(paid1).expect(200); // duplicate
+      const r1 = await eventsAfter(since, 'REFUND_PENDING_RECORDED');
+      expect(r1).toHaveLength(1);
+      expect(r1[0]).toMatchObject({
+        actorType: 'SYSTEM',
+        entityType: 'Order',
+        entityId: o1.orderId,
+        after: {
+          orderId: o1.orderId,
+          reason: 'AFTER_TERMINAL',
+          amountUsd: '10',
+        },
+      });
+
+      // 2) paid but the holds are gone: NO_STOCK (the paid transaction rolls back, a second one records it)
+      const p2 = await mkProduct({ price: '10.00', stock: 5 });
+      const o2 = await checkout(p2, 'stripe');
+      await prisma.$transaction([
+        prisma.stockHold.updateMany({
+          where: { orderId: o2.orderId },
+          data: { releasedAt: new Date() },
+        }),
+        prisma.product.update({ where: { id: p2 }, data: { heldQty: 0 } }),
+      ]);
+      const paid2 = webhookBody(
+        'checkout.session.completed',
+        o2.sessionId as string,
+        o2.orderId,
+        1000,
+      );
+      const s2 = await head();
+      await sendWebhook(paid2).expect(200);
+      await sendWebhook(paid2).expect(200);
+      const r2 = await eventsAfter(s2, 'REFUND_PENDING_RECORDED');
+      expect(r2).toHaveLength(1);
+      expect(r2[0]).toMatchObject({
+        entityId: o2.orderId,
+        after: { reason: 'NO_STOCK', amountUsd: '10' },
+      });
+      expect(await eventsAfter(s2, 'STRIPE_PAYMENT_STATE_CHANGED')).toEqual([]);
+    });
+
+    it('a TCG sync run closes with ONE DATA_IMPORT_RUN carrying the counters (never a row per price); the actor is the admin who started it, else SYSTEM', async () => {
+      const runs = app.get(TcgSyncRunService);
+      const row = await runs.tryStart('NIGHTLY');
+      expect(row).not.toBeNull();
+      const since = await head();
+      await runs.finish(row!.id, {
+        status: 'PARTIAL',
+        requestsUsed: 50,
+        cardsSynced: 1200,
+        productsUpdated: 37,
+        errorCount: 0,
+        quotaExhausted: true,
+        bigVariations: Array.from({ length: 2 }, (_, i) => ({
+          productId: `p${i}`,
+          oldPrice: 1,
+          newPrice: 2,
+          pct: 100,
+        })),
+      });
+      const a = await eventsAfter(since, 'DATA_IMPORT_RUN');
+      expect(a).toHaveLength(1);
+      expect(a[0]).toMatchObject({
+        actorType: 'SYSTEM',
+        actorId: null,
+        entityType: 'TcgSyncRun',
+        entityId: row!.id,
+        after: {
+          runId: row!.id,
+          kind: 'NIGHTLY',
+          status: 'PARTIAL',
+          requestsUsed: 50,
+          cardsSynced: 1200,
+          productsUpdated: 37,
+          errorCount: 0,
+          quotaExhausted: true,
+          bigVariations: 2,
+        },
+      });
+      // the run row is the sync LOCK: with the audit log down it is still closed (error logged)
+      const row2 = await runs.tryStart('INGEST');
+      expect(row2).not.toBeNull();
+      const s2 = await head();
+      await blockAction('DATA_IMPORT_RUN', () =>
+        runs.finish(
+          row2!.id,
+          {
+            status: 'SUCCEEDED',
+            requestsUsed: 1,
+            cardsSynced: 2,
+            errorCount: 0,
+            quotaExhausted: false,
+          },
+          { id: adminId },
+        ),
+      );
+      expect(await eventsAfter(s2, 'DATA_IMPORT_RUN')).toEqual([]);
+      expect(
+        (await prisma.tcgSyncRun.findUniqueOrThrow({ where: { id: row2!.id } }))
+          .status,
+      ).toBe('SUCCEEDED');
+      // an admin-started run: the actor is that admin
+      const row3 = await runs.tryStart('INGEST');
+      const s3 = await head();
+      await runs.finish(
+        row3!.id,
+        {
+          status: 'SUCCEEDED',
+          requestsUsed: 1,
+          cardsSynced: 2,
+          errorCount: 0,
+          quotaExhausted: false,
+        },
+        { id: adminId },
+      );
+      const b = await eventsAfter(s3, 'DATA_IMPORT_RUN');
+      expect(b[0]).toMatchObject({
+        actorType: 'ADMIN',
+        actorId: adminId,
+        after: { kind: 'INGEST' },
+      });
+      await prisma.tcgSyncRun.deleteMany({
+        where: { id: { in: [row!.id, row2!.id, row3!.id] } },
       });
     });
   });
@@ -980,7 +1373,8 @@ describe('Audit event emission (e2e, Story 20.5)', { timeout: 60_000 }, () => {
     };
     const audited: [string, string][] = [
       ['/api/v1/admin/auth/login', 'post'],
-      ['/api/v1/admin/auth/logout', 'post'],
+      ['/api/v1/admin/products', 'post'],
+      ['/api/v1/admin/products/{id}', 'delete'],
       ['/api/v1/admin/orders/{orderId}/confirm-payment', 'post'],
       ['/api/v1/admin/orders/{orderId}/reject-payment', 'post'],
       ['/api/v1/admin/orders/{orderId}/fulfill', 'post'],
@@ -1202,10 +1596,16 @@ describe('Audit event emission (e2e, Story 20.5)', { timeout: 60_000 }, () => {
       const d = await createSandboxDocument(sql, `emit${TAG}`);
       doc.id = d.id;
       doc.slug = d.slug;
+      // Seller_Identity_Settings is a mutable singleton: the identity scenario below changes it
+      // and afterAll puts it back (the Legal_Audit_Logs row it leaves is append-only and carries
+      // this run's own admin id, so no other suite depends on it).
       identityBefore = JSON.stringify(
-        await sql(
-          `SELECT * FROM "Seller_Identity_Settings" WHERE "id" = 'default'`,
-        ),
+        (
+          await sql(
+            `SELECT "legalName","rif","fiscalAddress","contactEmail","phone","updatedById"::text AS "updatedById"
+               FROM "Seller_Identity_Settings" WHERE "id" = 'default'`,
+          )
+        )[0],
       );
       seeded = await seedConsentDocs(sql, {
         terms: [{ versionNumber: 1 }],
@@ -1215,7 +1615,21 @@ describe('Audit event emission (e2e, Story 20.5)', { timeout: 60_000 }, () => {
       });
     });
     afterAll(async () => {
-      void identityBefore;
+      const idb = JSON.parse(identityBefore) as Record<string, string | null>;
+      await sql(
+        `UPDATE "Seller_Identity_Settings"
+            SET "legalName" = $1, "rif" = $2, "fiscalAddress" = $3, "contactEmail" = $4,
+                "phone" = $5, "updatedById" = $6::uuid
+          WHERE "id" = 'default'`,
+        [
+          idb.legalName,
+          idb.rif,
+          idb.fiscalAddress,
+          idb.contactEmail,
+          idb.phone,
+          idb.updatedById,
+        ],
+      ).catch(() => undefined);
       // Acceptance evidence is append-only: release it (delete its orders / customers) so the
       // sandbox documents can go and later checkouts are not asked for consent versions.
       await prisma.order
@@ -1453,12 +1867,11 @@ describe('Audit event emission (e2e, Story 20.5)', { timeout: 60_000 }, () => {
           action: e.action,
           email: EMAIL.test(text),
         }).toMatchObject({ email: false });
-        expect({
-          seq: e.seq,
-          action: e.action,
-          cedula: CEDULA.test(text),
-        }).toMatchObject({ cedula: false });
-        // phones: the free-form regex may match long ids (uuid digits); only flag digit runs outside hex ids
+        // Ids are not documents: the first group of a random uuid is 8 hex characters and, when it
+        // starts with `e` and the other seven are digits (`e8025369-...`), it is a cedula to the
+        // regex below (about 0.2 % of the uuids: a run with ~150 uuids in its events failed 1 time in
+        // 5). So uuids, long hex (hashes) and dates are removed BEFORE the cedula and phone scans;
+        // the exact sentinels above are still searched in the whole text.
         const stripped = text
           .replace(
             /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
@@ -1466,6 +1879,12 @@ describe('Audit event emission (e2e, Story 20.5)', { timeout: 60_000 }, () => {
           )
           .replace(/[0-9a-f]{32,}/gi, '')
           .replace(/\d{4}-\d{2}-\d{2}(T[\d:.]+Z)?/g, '');
+        expect({
+          seq: e.seq,
+          action: e.action,
+          cedula: CEDULA.exec(stripped)?.[0] ?? false,
+        }).toMatchObject({ cedula: false });
+        // phones: the free-form regex may match long ids (uuid digits); only flag digit runs outside hex ids
         expect({
           seq: e.seq,
           action: e.action,

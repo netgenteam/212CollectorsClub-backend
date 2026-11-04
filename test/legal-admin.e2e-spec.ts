@@ -425,10 +425,17 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
           2300,
         );
       expect(Buffer.byteLength(body)).toBeGreaterThan(180_000);
+      const t0 = performance.now();
       const d = await createDraft(docs.draft.slug, body);
+      console.log(
+        `[19.2 A78] ~190 KB draft through the real parser and the Markdown validator: ${(performance.now() - t0).toFixed(0)} ms`,
+      );
       expect(d.revision).toBeGreaterThanOrEqual(1);
       await post(`/${docs.draft.slug}/draft/discard`).expect(204);
-    });
+      // QA 20.5: this is correctness (the limit is accepted), not a time budget: it validates 190 KB
+      // of Markdown in a worker, which under a loaded machine took longer than vitest's 5 s default.
+      // The budgets live in `pnpm test:perf`.
+    }, 60_000);
   });
 
   describe('AC3: concurrency over the real HTTP stack', () => {
@@ -1392,7 +1399,7 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
       const d = await createDraft(slug, bodyMd);
       expect(d.revision).toBeGreaterThanOrEqual(1);
       await post(`/${slug}/draft/discard`).expect(204);
-    });
+    }, 60_000); // correctness, not a budget: see the ~190 KB test of AC2
   });
 
   describe('QA 19.2 F: draft revision is monotonic per document (no ABA)', () => {

@@ -602,6 +602,7 @@ describe('AdminProductsService', () => {
         .mockResolvedValueOnce({
           priceUsd: new Prisma.Decimal('79.99'),
           stock: 25,
+          isActive: true,
         })
         .mockResolvedValue(buildProductRow({ priceUsd: '99.99' }));
 
@@ -624,20 +625,40 @@ describe('AdminProductsService', () => {
     });
 
     it('PATCH { isActive: false } deactivates without touching any other field', async () => {
-      prisma.product.update.mockResolvedValue(buildProductRow());
-      prisma.product.findUnique.mockResolvedValue(
-        buildProductRow({ isActive: false }),
-      );
-
-      const result = await service.update(buildProductRow().id, {
+      prisma.product.update.mockResolvedValue({
+        ...buildProductRow(),
         isActive: false,
       });
+      prisma.product.findUnique
+        // the audited `before` (under the row lock), then `findOne` after the update
+        .mockResolvedValueOnce({
+          priceUsd: new Prisma.Decimal('79.99'),
+          stock: 25,
+          isActive: true,
+        })
+        .mockResolvedValue(buildProductRow({ isActive: false }));
 
-      expect(prisma.product.update).toHaveBeenCalledWith({
-        where: { id: buildProductRow().id },
-        data: { isActive: false },
-      });
+      const result = await service.update(
+        buildProductRow().id,
+        { isActive: false },
+        ADMIN,
+      );
+
+      expect(prisma.product.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: buildProductRow().id },
+          data: { isActive: false },
+        }),
+      );
       expect(result.isActive).toBe(false);
+      // Story 20.5: hiding a product is a risk action: one event, only on a real transition.
+      expect(audit.events).toHaveLength(1);
+      expect(audit.events[0]).toMatchObject({
+        action: 'PRODUCT_ACTIVE_CHANGED',
+        actorId: ADMIN.id,
+        before: { isActive: true },
+        after: { isActive: false, via: 'UPDATE' },
+      });
     });
 
     it('throws NotFoundException on P2025 (no such Product)', async () => {

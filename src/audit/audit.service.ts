@@ -17,6 +17,7 @@ import {
   truncateCodePoints,
 } from './audit-normalize.js';
 import {
+  AuditPayloadError,
   auditPayloadMode,
   redactReason,
   sanitizeAuditPayload,
@@ -374,19 +375,37 @@ export class AuditService {
       what: string,
     ): AuditPayload | null => {
       if (v === undefined || v === null) return null;
-      const { value, issues } = sanitizeAuditPayload(
-        v,
-        mode,
-        `$${what}`,
-        publicFieldsOf(ev.action),
-      );
-      if (value !== null && JSON.stringify(value).length > MAX_PAYLOAD_CHARS) {
-        throw new AuditEventError(
-          `${what} is larger than ${MAX_PAYLOAD_CHARS} characters`,
+      try {
+        const { value, issues } = sanitizeAuditPayload(
+          v,
+          mode,
+          `$${what}`,
+          publicFieldsOf(ev.action),
         );
+        if (
+          value !== null &&
+          JSON.stringify(value).length > MAX_PAYLOAD_CHARS
+        ) {
+          throw new AuditPayloadError(
+            `$${what}`,
+            `larger than ${MAX_PAYLOAD_CHARS} characters`,
+          );
+        }
+        this.logIssues(ev.action, what, issues);
+        return value;
+      } catch (err) {
+        // A payload that cannot be serialized (a bug in an emitter) must not turn a sale or
+        // a payment into a 500 in PRODUCTION (lenient mode): the event is still written, with
+        // a marker instead of the payload, and the bug is logged as an error. In strict mode
+        // (dev, tests) it is thrown: the test of the call site must catch it.
+        if (mode === 'lenient' && err instanceof AuditPayloadError) {
+          this.logger.error(
+            `audit ${ev.action} ${what} could not be serialized; written as a marker: ${err.message}`,
+          );
+          return { payloadError: 'UNSERIALIZABLE' };
+        }
+        throw err;
       }
-      this.logIssues(ev.action, what, issues);
-      return value;
     };
     // Free text typed by a person: masked (never rejected), cut to the column.
     let reason: string | null = null;

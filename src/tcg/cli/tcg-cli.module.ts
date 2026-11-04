@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { PrismaModule } from '../../prisma/prisma.module.js';
+import { AuditModule } from '../../audit/audit.module.js';
 import { TcgModule } from '../tcg.module.js';
 
 /**
@@ -8,6 +9,12 @@ import { TcgModule } from '../tcg.module.js';
  * `ScheduleModule`, no HTTP: only config + Prisma + the TCG module.
  */
 @Module({
-  imports: [ConfigModule.forRoot({ isGlobal: true }), PrismaModule, TcgModule],
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true }),
+    PrismaModule,
+    // Story 20.5: every run writes one `DATA_IMPORT_RUN` event (the run row closes with it).
+    AuditModule,
+    TcgModule,
+  ],
 })
 export class TcgCliModule {}

@@ -220,11 +220,12 @@ export class AdminProductsService {
   async create(
     dto: CreateProductDto,
     files: readonly Express.Multer.File[],
+    admin?: Pick<AuthenticatedAdminUser, 'id'>,
   ): Promise<AdminProductResponseDto> {
     if (dto.masterCardId) {
       // R4: images sent next to a masterCardId are ignored and removed.
       await cleanupUploadedFiles(files);
-      return this.createFromMasterCard(dto, dto.masterCardId);
+      return this.createFromMasterCard(dto, dto.masterCardId, admin);
     }
     if (files.length === 0) {
       throw productImageRequiredException();
@@ -233,7 +234,8 @@ export class AdminProductsService {
     const marketRefs = dto.marketReferences ?? [];
     try {
       assertNoDuplicateMarketReferences(marketRefs);
-      const created = await this.prisma.$transaction(async (tx) => {
+      // Story 20.5: `PRODUCT_CREATED` in the same transaction (flushed last, after the tags).
+      const created = await this.audit.transaction(async (tx, audit) => {
         const product = await tx.product.create({
           data: {
             name: dto.name,
@@ -276,6 +278,7 @@ export class AdminProductsService {
           dto.franchise,
           dto.productType,
         );
+        this.addProductCreated(audit, admin, product, 'MANUAL');
         return product;
       });
 
@@ -303,6 +306,7 @@ export class AdminProductsService {
   private async createFromMasterCard(
     dto: CreateProductDto,
     masterCardId: string,
+    admin?: Pick<AuthenticatedAdminUser, 'id'>,
   ): Promise<AdminProductResponseDto> {
     const card = await this.prisma.masterCard.findUnique({
       where: { id: masterCardId },
@@ -384,7 +388,7 @@ export class AdminProductsService {
       ) {
         const slug = attempt === 1 ? slugBase : `${slugBase}-${attempt}`;
         try {
-          const created = await this.prisma.$transaction(async (tx) => {
+          const created = await this.audit.transaction(async (tx, audit) => {
             const product = await tx.product.create({
               data: {
                 name: card.name.slice(0, 200),
@@ -431,6 +435,7 @@ export class AdminProductsService {
               card.franchise,
               'SINGLE_CARD',
             );
+            this.addProductCreated(audit, admin, product, 'MASTER_CARD');
             return product;
           });
           createdId = created.id;
@@ -571,7 +576,12 @@ export class AdminProductsService {
         dto.franchise !== undefined ||
         dto.productType !== undefined;
       // Story 20.5: a manual price or stock change is audited in the SAME transaction.
-      const audited = dto.priceUsd !== undefined || dto.stock !== undefined;
+      // Hiding/showing a product (`isActive`) is audited too: it is the fastest way to take
+      // a product off the shop.
+      const audited =
+        dto.priceUsd !== undefined ||
+        dto.stock !== undefined ||
+        dto.isActive !== undefined;
       if (marketRefs === undefined && !touchesTags && !audited) {
         await this.prisma.product.update({ where: { id }, data });
       } else {
@@ -587,7 +597,7 @@ export class AdminProductsService {
           const prev = audited
             ? await tx.product.findUnique({
                 where: { id },
-                select: { priceUsd: true, stock: true },
+                select: { priceUsd: true, stock: true, isActive: true },
               })
             : null;
           const stored = await tx.product.update({
@@ -598,11 +608,20 @@ export class AdminProductsService {
               productType: true,
               priceUsd: true,
               stock: true,
+              isActive: true,
               taxonomyTags: { select: { categoryId: true } },
             },
           });
           if (prev) {
             this.addCatalogEvents(audit, admin, id, prev, stored);
+            this.addActiveEvent(
+              audit,
+              admin,
+              id,
+              prev.isActive,
+              stored.isActive,
+              'UPDATE',
+            );
           }
           if (marketRefs !== undefined) {
             await tx.productMarketReference.deleteMany({
@@ -714,7 +733,10 @@ export class AdminProductsService {
    * OrderLine/CartItem/StockHold references) and this call fell back to
    * `isActive = false` instead — the Product row (and every OrderLine that
    * snapshots it) is untouched. */
-  async remove(id: string): Promise<{ id: string; hardDeleted: boolean }> {
+  async remove(
+    id: string,
+    admin?: Pick<AuthenticatedAdminUser, 'id'>,
+  ): Promise<{ id: string; hardDeleted: boolean }> {
     const existing = await this.prisma.product.findUnique({
       where: { id },
       select: { id: true, images: { select: { url: true } } },
@@ -724,7 +746,36 @@ export class AdminProductsService {
     }
 
     try {
-      await this.prisma.product.delete({ where: { id } });
+      // Story 20.5: `PRODUCT_DELETED` (what the row was, no description) in the same transaction
+      // as the DELETE: the row lock makes `before` the committed state, the event is flushed last.
+      await this.audit.transaction(async (tx, audit) => {
+        await this.lockProductOrThrow(tx, id);
+        const prev = await tx.product.findUniqueOrThrow({
+          where: { id },
+          select: {
+            priceUsd: true,
+            stock: true,
+            isActive: true,
+            masterCardId: true,
+          },
+        });
+        await tx.product.delete({ where: { id } });
+        audit.add({
+          ...adminActor(admin),
+          action: 'PRODUCT_DELETED',
+          entityType: 'Product',
+          entityId: id,
+          // No name/slug: a catalog title ("PSA 10 ... 1999") trips the phone/cedula
+          // detectors of the payload guard; the id is what the event is about.
+          before: payload({
+            priceUsd: prev.priceUsd,
+            stock: prev.stock,
+            isActive: prev.isActive,
+            fromMasterCard: prev.masterCardId !== null,
+          }),
+          after: null,
+        });
+      });
     } catch (err) {
       if (isPrismaKnownError(err, 'P2025')) {
         throw productNotFoundException(id);
@@ -733,11 +784,24 @@ export class AdminProductsService {
       // CartItem/StockHold still references this Product (see class doc
       // comment). Deactivate instead of leaving the caller with a bare
       // error; the Product (and every historical OrderLine snapshot) is
-      // left completely untouched by this branch.
+      // left completely untouched by this branch. (The aborted transaction
+      // above wrote no event; the deactivation writes its own.)
       if (isPrismaKnownError(err, 'P2003')) {
-        await this.prisma.product.update({
-          where: { id },
-          data: { isActive: false },
+        await this.audit.transaction(async (tx, audit) => {
+          await this.lockProductOrThrow(tx, id);
+          const prev = await tx.product.findUniqueOrThrow({
+            where: { id },
+            select: { isActive: true },
+          });
+          await tx.product.update({ where: { id }, data: { isActive: false } });
+          this.addActiveEvent(
+            audit,
+            admin,
+            id,
+            prev.isActive,
+            false,
+            'DELETE_FALLBACK',
+          );
         });
         return { id, hardDeleted: false };
       }
@@ -946,6 +1010,56 @@ export class AdminProductsService {
         },
       });
     }
+  }
+
+  /** `PRODUCT_CREATED`: what was created and from where (ids and money only, no title/slug/description). */
+  private addProductCreated(
+    audit: AuditCollector,
+    admin: Pick<AuthenticatedAdminUser, 'id'> | undefined,
+    product: {
+      id: string;
+      priceUsd: Prisma.Decimal;
+      stock: number;
+      isActive: boolean;
+      categoryId: string | null;
+    },
+    via: 'MANUAL' | 'MASTER_CARD',
+  ): void {
+    audit.add({
+      ...adminActor(admin),
+      action: 'PRODUCT_CREATED',
+      entityType: 'Product',
+      entityId: product.id,
+      before: null,
+      after: payload({
+        productId: product.id,
+        priceUsd: product.priceUsd,
+        stock: product.stock,
+        isActive: product.isActive,
+        categoryId: product.categoryId,
+        via,
+      }),
+    });
+  }
+
+  /** `PRODUCT_ACTIVE_CHANGED`: only a real transition of `isActive`. */
+  private addActiveEvent(
+    audit: AuditCollector,
+    admin: Pick<AuthenticatedAdminUser, 'id'> | undefined,
+    productId: string,
+    was: boolean,
+    now: boolean,
+    via: 'UPDATE' | 'DELETE_FALLBACK',
+  ): void {
+    if (was === now) return;
+    audit.add({
+      ...adminActor(admin),
+      action: 'PRODUCT_ACTIVE_CHANGED',
+      entityType: 'Product',
+      entityId: productId,
+      before: { isActive: was },
+      after: { productId, isActive: now, via },
+    });
   }
 
   private async lockProductOrThrow(

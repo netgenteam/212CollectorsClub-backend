@@ -1,5 +1,10 @@
 import type { AuditEventInput } from './audit.service.js';
-import { toAuditPayload } from './audit-payload.js';
+import { Logger } from '@nestjs/common';
+import {
+  AuditPayloadError,
+  auditPayloadMode,
+  toAuditPayload,
+} from './audit-payload.js';
 import type { AuditPayload } from './audit-payload.js';
 
 /**
@@ -21,9 +26,31 @@ export const SYSTEM_ACTOR: Pick<AuditEventInput, 'actorType' | 'actorId'> = {
   actorId: null,
 };
 
+const logger = new Logger('AuditEvents');
+
+/**
+ * `toAuditPayload` that never takes a business action down in PRODUCTION: a value that cannot be
+ * serialized (an invalid Date, a function...) is a bug of the emitter, so in lenient mode it
+ * becomes a marker and an error log line; in strict mode (dev, tests) it is thrown so the test
+ * of the call site fails.
+ */
+function safePayload(v: Record<string, unknown>): AuditPayload {
+  try {
+    return toAuditPayload(v);
+  } catch (err) {
+    if (auditPayloadMode() === 'lenient' && err instanceof AuditPayloadError) {
+      logger.error(
+        `audit payload could not be built; marker used: ${err.message}`,
+      );
+      return { payloadError: 'UNSERIALIZABLE' };
+    }
+    throw err;
+  }
+}
+
 /** Builds a payload from a plain object holding Prisma values (Decimal, Date, bigint). */
 export const payload = (v: Record<string, unknown>): AuditPayload =>
-  toAuditPayload(v);
+  safePayload(v);
 
 /** Keeps only the keys whose value differs (before/after of an update). */
 export function diffPayload(
@@ -41,7 +68,7 @@ export function diffPayload(
     a[k] = after[k] ?? null;
     changed.push(k);
   }
-  return { before: toAuditPayload(b), after: toAuditPayload(a), changed };
+  return { before: safePayload(b), after: safePayload(a), changed };
 }
 
 /** `ORDER_STATUS_CHANGED` for an order moved by `guardedOrderStatusTransition`. */

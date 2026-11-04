@@ -51,8 +51,53 @@ const EMITTED: Partial<
       marker: "'LOGIN_ADMIN_FAILED'",
     },
   ],
+  LOGIN_ADMIN_FAILED_SUMMARY: [
+    {
+      file: 'src/admin-auth/admin-login-failure-summary.ts',
+      marker: "'LOGIN_ADMIN_FAILED_SUMMARY'",
+    },
+  ],
   LOGOUT_ADMIN: [
     { file: 'src/admin-auth/admin-auth.service.ts', marker: "'LOGOUT_ADMIN'" },
+  ],
+  CUSTOMER_PASSWORD_RESET: [
+    {
+      file: 'src/customer-auth/customer-auth.service.ts',
+      marker: "'CUSTOMER_PASSWORD_RESET'",
+    },
+  ],
+  CUSTOMER_EMAIL_VERIFIED_BY_ADMIN: [
+    {
+      file: 'src/admin-customers/admin-customers.service.ts',
+      marker: "'CUSTOMER_EMAIL_VERIFIED_BY_ADMIN'",
+    },
+  ],
+  REFUND_PENDING_RECORDED: [
+    {
+      file: 'src/payments-stripe/stripe-payments.service.ts',
+      marker: "'REFUND_PENDING_RECORDED'",
+    },
+  ],
+  PRODUCT_CREATED: [
+    {
+      file: 'src/admin-catalog/admin-products.service.ts',
+      marker: "'PRODUCT_CREATED'",
+    },
+  ],
+  PRODUCT_DELETED: [
+    {
+      file: 'src/admin-catalog/admin-products.service.ts',
+      marker: "'PRODUCT_DELETED'",
+    },
+  ],
+  PRODUCT_ACTIVE_CHANGED: [
+    {
+      file: 'src/admin-catalog/admin-products.service.ts',
+      marker: "'PRODUCT_ACTIVE_CHANGED'",
+    },
+  ],
+  DATA_IMPORT_RUN: [
+    { file: 'src/tcg/tcg-sync-run.service.ts', marker: "'DATA_IMPORT_RUN'" },
   ],
   PAYMENT_PAGO_MOVIL_CONFIRMED: [
     {
@@ -119,6 +164,8 @@ const EMITTED: Partial<
   ],
   FX_RATE_CHANGED: [
     { file: 'src/fx/admin-fx.service.ts', marker: "'FX_RATE_CHANGED'" },
+    // the provider refresh (cron and the admin's "refresh now"): actor SYSTEM
+    { file: 'src/fx/fx-refresh.service.ts', marker: "'FX_RATE_CHANGED'" },
   ],
   VITRINA_CONFIG_CHANGED: [
     {
@@ -186,6 +233,23 @@ const MUTATORS: { file: string; mutates: RegExp }[] = [
   {
     file: 'src/admin-catalog/admin-products.service.ts',
     mutates: /stock: dto\.stock|data\.priceUsd/,
+  },
+  {
+    file: 'src/admin-catalog/admin-products.service.ts',
+    mutates: /tx\.product\.(create|delete)\(|isActive: false/,
+  },
+  { file: 'src/fx/fx-refresh.service.ts', mutates: /vesPerUsd: rate/ },
+  {
+    file: 'src/tcg/tcg-sync-run.service.ts',
+    mutates: /tcgSyncRun\.update\(/,
+  },
+  {
+    file: 'src/admin-customers/admin-customers.service.ts',
+    mutates: /emailVerified: true/,
+  },
+  {
+    file: 'src/payments-stripe/stripe-payments.service.ts',
+    mutates: /REFUND_PENDING_NO_STOCK|REFUND_PENDING_AFTER_TERMINAL/,
   },
   {
     file: 'src/shipping/shipping-agencies.service.ts',

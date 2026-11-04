@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { PassportModule } from '@nestjs/passport';
 import { AdminAuthController } from './admin-auth.controller.js';
 import { AdminAuthService } from './admin-auth.service.js';
+import { AdminLoginFailureSummary } from './admin-login-failure-summary.js';
 import { AdminLoginLimiter } from './admin-login-limiter.js';
 import { AdminJwtStrategy } from './admin-jwt.strategy.js';
 
@@ -9,6 +10,11 @@ import { AdminJwtStrategy } from './admin-jwt.strategy.js';
 @Module({
   imports: [PassportModule.register({ defaultStrategy: 'admin-jwt' })],
   controllers: [AdminAuthController],
-  providers: [AdminAuthService, AdminJwtStrategy, AdminLoginLimiter],
+  providers: [
+    AdminAuthService,
+    AdminJwtStrategy,
+    AdminLoginLimiter,
+    AdminLoginFailureSummary,
+  ],
 })
 export class AdminAuthModule {}

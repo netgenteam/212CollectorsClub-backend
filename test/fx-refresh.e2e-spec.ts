@@ -6,6 +6,7 @@ import { FakeFxProvider } from './../src/fx/fake-fx.provider.js';
 import { FxRefreshService } from './../src/fx/fx-refresh.service.js';
 import { FX_PROVIDER } from './../src/fx/fx-provider.js';
 import { snapshotFx, restoreFx, type FxState } from './helpers/db-snapshot.js';
+import { blockAuditAction } from './helpers/block-audit-action.js';
 
 const D0 = new Date('2026-10-30T12:00:00.000Z');
 const D1 = new Date('2026-10-31T12:00:00.000Z');
@@ -233,6 +234,104 @@ describe('FX refresh (e2e, Story 18.1)', () => {
       });
       expect(await fx.purgeOldSnapshots()).toBe(1);
       expect(await snaps()).toBe(2);
+    });
+  });
+
+  /**
+   * Story 20.5 follow-up: a refresh that CHANGES the rate (it moves every price in bolivares)
+   * emits FX_RATE_CHANGED, actor SYSTEM, in the transaction of the new rate; nothing else emits.
+   */
+  describe('audit (FX_RATE_CHANGED, actor SYSTEM)', () => {
+    const head = async () =>
+      Number(
+        (
+          await prisma.$queryRawUnsafe<{ s: number }[]>(
+            `SELECT COALESCE(max("seq"),0)::int AS s FROM "Audit_Events"`,
+          )
+        )[0].s,
+      );
+    const rateEvents = (since: number) =>
+      prisma.$queryRawUnsafe<
+        {
+          actorType: string;
+          actorId: string | null;
+          entityId: string;
+          before: Record<string, unknown>;
+          after: Record<string, unknown>;
+        }[]
+      >(
+        `SELECT "actorType","actorId"::text AS "actorId","entityId","before","after" FROM "Audit_Events"
+          WHERE "action" = 'FX_RATE_CHANGED' AND "seq" > $1 ORDER BY "seq"`,
+        since,
+      );
+
+    it('a changed rate emits ONE event (before/after as strings, origin); the same reading again and a same-value new reading emit nothing', async () => {
+      const since = await head();
+      fake.succeed(889.26, D0);
+      expect((await fx.refresh()).status).toBe('UPDATED');
+      expect((await fx.refresh()).status).toBe('NOOP');
+      // a newer reading with the SAME value: the snapshot moves, the rate (what prices use) does not
+      fake.succeed(889.26, D1);
+      expect((await fx.refresh()).status).toBe('UPDATED');
+      const rows = await rateEvents(since);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        actorType: 'SYSTEM',
+        actorId: null,
+        entityId: 'default',
+        before: { rate: '100' },
+        after: { rate: '889.26', source: 'BCV_USD', origin: 'AUTO_REFRESH' },
+      });
+    });
+
+    it('an admin pressing "refresh" is the same event with origin ADMIN_REFRESH and the admin id in triggeredBy', async () => {
+      const since = await head();
+      const adminId = '11111111-1111-4111-8111-111111111111';
+      fake.succeed(900.5, D0);
+      await fx.refresh(undefined, { origin: 'ADMIN_REFRESH', adminId });
+      const rows = await rateEvents(since);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        actorType: 'SYSTEM',
+        after: { origin: 'ADMIN_REFRESH', triggeredBy: adminId },
+      });
+    });
+
+    it('rejected, failed and MANUAL refreshes emit nothing', async () => {
+      fake.succeed(100, D0);
+      await fx.refresh(); // establishes the history (rate 100: same as the row, no event)
+      const since = await head();
+      fake.succeed(1000, D1); // +900%: rejected by the variation limit
+      expect((await fx.refresh()).status).toBe('REJECTED');
+      fake.fail('provider down');
+      expect((await fx.refresh()).status).toBe('FAILED');
+      await prisma.$executeRaw`UPDATE "Fx_Rate_Settings" SET "source" = 'MANUAL'::"FxRateSource" WHERE "id" = 'default'`;
+      expect((await fx.refresh()).status).toBe('MANUAL');
+      expect(await rateEvents(since)).toEqual([]);
+    });
+
+    it('no external I/O inside the transaction: the provider is read BEFORE it opens (one read per refresh, none while the audit lock is taken)', async () => {
+      fake.succeed(950, D0);
+      const calls = fake.calls.length;
+      await fx.refresh();
+      expect(fake.calls.length - calls).toBe(1);
+    });
+
+    it('if the audit write fails the refresh rolls back as a whole (old rate, no snapshot), leaves a TRACE in lastError and the next cycle applies it', async () => {
+      const since = await head();
+      fake.succeed(889.26, D0);
+      const r = await blockAuditAction('FX_RATE_CHANGED', () => fx.refresh());
+      expect(r).toMatchObject({ status: 'FAILED', source: 'BCV_USD' });
+      const s = await setting();
+      expect(s.vesPerUsd.toFixed(4)).toBe('100.0000');
+      expect(await snaps()).toBe(0);
+      expect(s.lastError).toMatch(/audit log is unavailable/);
+      expect(s.lastErrorAt).not.toBeNull();
+      expect(await rateEvents(since)).toEqual([]);
+      // the audit log is back: the next cycle reads the provider again and applies it
+      expect((await fx.refresh()).status).toBe('UPDATED');
+      expect((await setting()).lastError).toBeNull();
+      expect(await rateEvents(since)).toHaveLength(1);
     });
   });
 });

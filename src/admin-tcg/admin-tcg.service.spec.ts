@@ -187,13 +187,23 @@ describe('AdminTcgService', () => {
       ingest.startRun.mockResolvedValue(started);
       ingest.execute.mockResolvedValue({});
       await service.startIngest({ games: ['pokemon'], maxRequests: 5 });
-      expect(ingest.startRun).toHaveBeenCalledWith({
-        games: ['pokemon'],
-        maxRequests: 5,
-        maxCards: 10,
-        dryRun: false,
-      });
+      expect(ingest.startRun).toHaveBeenCalledWith(
+        {
+          games: ['pokemon'],
+          maxRequests: 5,
+          maxCards: 10,
+          dryRun: false,
+        },
+        null,
+      );
       expect(ingest.execute).toHaveBeenCalledWith(started);
+    });
+
+    it('Story 20.5: the admin who starts the run is handed on (actor of DATA_IMPORT_RUN)', async () => {
+      ingest.startRun.mockResolvedValue(started);
+      ingest.execute.mockResolvedValue({});
+      await service.startIngest({}, { id: 'admin-1' });
+      expect(ingest.startRun.mock.calls[0][1]).toEqual({ id: 'admin-1' });
     });
 
     it('409 TCG_SYNC_ALREADY_RUNNING with the active run id', async () => {
@@ -224,6 +234,7 @@ describe('AdminTcgService', () => {
           status: 'FAILED',
           errorSummary: 'Error: boom',
         }),
+        null,
       );
     });
   });

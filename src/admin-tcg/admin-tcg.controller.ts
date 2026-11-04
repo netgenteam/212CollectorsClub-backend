@@ -8,6 +8,7 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -19,6 +20,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { AdminAuthGuard } from '../common/admin-auth.guard.js';
+import type { RequestWithAdminUser } from '../common/admin-auth.guard.js';
 import { AdminTcgService } from './admin-tcg.service.js';
 import { MasterCardSearchResponseDto } from './dto/master-card-search-response.dto.js';
 import { SearchMasterCardsQueryDto } from './dto/search-master-cards-query.dto.js';
@@ -77,8 +79,11 @@ export class AdminTcgController {
     description:
       'errorCode TCG_API_NOT_CONFIGURED — the server has no TCGAPI_KEY (fake client); nothing is created.',
   })
-  startIngest(@Body() body: StartIngestDto): Promise<StartIngestResponseDto> {
-    return this.service.startIngest(body);
+  startIngest(
+    @Body() body: StartIngestDto,
+    @Req() request: RequestWithAdminUser,
+  ): Promise<StartIngestResponseDto> {
+    return this.service.startIngest(body, request.user);
   }
 
   @Get('runs/:id')

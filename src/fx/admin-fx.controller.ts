@@ -116,8 +116,8 @@ export class AdminFxController {
     status: HttpStatus.CONFLICT,
     description: 'FX_REFRESH_IN_PROGRESS',
   })
-  refresh(): Promise<RefreshFxResponseDto> {
-    return this.fx.refresh();
+  refresh(@Req() req: RequestWithAdminUser): Promise<RefreshFxResponseDto> {
+    return this.fx.refresh(req.user.id);
   }
 
   @Post('accept-rejected')

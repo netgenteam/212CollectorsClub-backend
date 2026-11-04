@@ -9,6 +9,9 @@ import { Cron } from '@nestjs/schedule';
 import { Prisma } from '../generated/prisma/client.js';
 import type { FxRateSource } from '../generated/prisma/client.js';
 import { SINGLETON_FX_RATE_ID } from '../checkout/fx-rate.constants.js';
+import { AuditService, AUDIT_ERROR_CODE } from '../audit/audit.service.js';
+import { SYSTEM_ACTOR, payload } from '../audit/audit-events.js';
+import { ApiException } from '../common/api-exception.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { FX_PROVIDER } from './fx-provider.js';
 import type { FxProvider, FxProviderResult } from './fx-provider.js';
@@ -28,6 +31,9 @@ export type FxRefreshResult =
   | { status: 'IN_PROGRESS' }
   | { status: 'MANUAL' }
   | { status: 'SKIPPED' };
+
+/** Who asked for the refresh: the scheduler (cron / boot) or an admin pressing "refresh". */
+export type FxRefreshOrigin = 'AUTO_REFRESH' | 'ADMIN_REFRESH';
 
 interface LockedSetting {
   source: FxRateSource;
@@ -74,6 +80,7 @@ export class FxRefreshService implements OnApplicationBootstrap {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     @Inject(FX_PROVIDER) private readonly provider: FxProvider,
+    private readonly audit: AuditService,
   ) {}
 
   /** `FX_REFRESH_ENABLED=false` disables it; default on (off under NODE_ENV=test). */
@@ -155,8 +162,21 @@ export class FxRefreshService implements OnApplicationBootstrap {
   /**
    * Refreshes the ACTIVE source (a given `source` that is not the active one
    * is skipped). `MANUAL` never touches the network.
+   *
+   * Story 20.5: a refresh that CHANGES the rate (it moves the prices in bolivares) writes
+   * `FX_RATE_CHANGED` (actor SYSTEM; `origin` says whether the scheduler or an admin asked) in the
+   * same transaction as the new rate and snapshot, as the last statement (the flush runs after the
+   * body; no network is involved: the provider was read before the transaction opened). A rejected
+   * reading, a failure and a reading that changes nothing do not emit. If the event cannot be
+   * written the transaction rolls back (fail-closed, nothing is half applied); that must not vanish
+   * silently, so the failure is logged and recorded in `lastError` (own tiny transaction, no audit
+   * event: it is an error note, not a business change) and the result is `FAILED`. The next cycle
+   * (30 min) reads the provider again and retries.
    */
-  async refresh(source?: FxRateSource): Promise<FxRefreshResult> {
+  async refresh(
+    source?: FxRateSource,
+    opts: { origin?: FxRefreshOrigin; adminId?: string } = {},
+  ): Promise<FxRefreshResult> {
     const setting = await this.prisma.fxRateSetting.findUnique({
       where: { id: SINGLETON_FX_RATE_ID },
       select: { source: true },
@@ -171,7 +191,41 @@ export class FxRefreshService implements OnApplicationBootstrap {
     const result = await this.fetchReading(active);
 
     const now = new Date();
-    return this.prisma.$transaction(async (tx) => {
+    try {
+      return await this.applyReading(active, result, now, opts);
+    } catch (err) {
+      if (
+        err instanceof ApiException &&
+        (err.getResponse() as { errorCode?: string }).errorCode ===
+          AUDIT_ERROR_CODE
+      ) {
+        const error = `Refresh not applied: the audit log is unavailable (${active})`;
+        this.logger.error(
+          `${error}; the previous rate stays; retrying next cycle`,
+        );
+        await this.prisma.fxRateSetting
+          .updateMany({
+            where: { id: SINGLETON_FX_RATE_ID, source: active },
+            data: { lastError: error.slice(0, 500), lastErrorAt: new Date() },
+          })
+          .catch((e: unknown) =>
+            this.logger.error(
+              `could not record the refresh failure: ${String(e)}`,
+            ),
+          );
+        return { status: 'FAILED', source: active, error };
+      }
+      throw err;
+    }
+  }
+
+  private applyReading(
+    active: FxRateSource,
+    result: FxProviderResult,
+    now: Date,
+    opts: { origin?: FxRefreshOrigin; adminId?: string },
+  ): Promise<FxRefreshResult> {
+    return this.audit.transaction(async (tx, audit) => {
       const [{ locked }] = await tx.$queryRaw<{ locked: boolean }[]>`
         SELECT pg_try_advisory_xact_lock(hashtextextended('fx:refresh', 0)) AS locked`;
       if (!locked) return { status: 'IN_PROGRESS' } as const;
@@ -276,6 +330,21 @@ export class FxRefreshService implements OnApplicationBootstrap {
         INSERT INTO "Fx_Rate_Snapshots" ("id", "source", "rate", "providerUpdatedAt", "fetchedAt")
         VALUES (gen_random_uuid(), ${active}::"FxRateSource", ${rate}, ${reading.providerUpdatedAt}, ${now})
         ON CONFLICT ("source", "providerUpdatedAt") DO NOTHING`;
+      if (!row.vesPerUsd.equals(rate)) {
+        audit.add({
+          ...SYSTEM_ACTOR,
+          action: 'FX_RATE_CHANGED',
+          entityType: 'FxRateSetting',
+          entityId: SINGLETON_FX_RATE_ID,
+          before: payload({ rate: row.vesPerUsd }),
+          after: payload({
+            rate,
+            source: active,
+            origin: opts.origin ?? 'AUTO_REFRESH',
+            ...(opts.adminId ? { triggeredBy: opts.adminId } : {}),
+          }),
+        });
+      }
       return {
         status: 'UPDATED',
         source: active,

@@ -66,6 +66,8 @@ export interface StartedRun {
   alreadyRunning: boolean;
   /** Id of the RUNNING row that blocked this start, when known. */
   activeRunId?: string | null;
+  /** The admin who started it (admin API); absent for the CLI. Used as the actor of `DATA_IMPORT_RUN`. */
+  startedBy?: { id: string } | null;
 }
 
 export const DEFAULT_INGEST_GAMES = ['pokemon'];
@@ -171,7 +173,10 @@ export class TcgIngestService {
    * Story 15.9: registers the run (synchronously, so a caller can return its
    * id) without executing it. Pair with `execute()`. A dry run writes no row.
    */
-  async startRun(overrides: Partial<IngestOptions> = {}): Promise<StartedRun> {
+  async startRun(
+    overrides: Partial<IngestOptions> = {},
+    startedBy: { id: string } | null = null,
+  ): Promise<StartedRun> {
     const opts = this.resolveOptions(overrides);
     if (opts.dryRun) return { opts, runId: null, alreadyRunning: false };
     const row = await this.syncRuns.tryStart('INGEST');
@@ -185,7 +190,7 @@ export class TcgIngestService {
         activeRunId: active?.id ?? null,
       };
     }
-    return { opts, runId: row.id, alreadyRunning: false };
+    return { opts, runId: row.id, alreadyRunning: false, startedBy };
   }
 
   async run(overrides: Partial<IngestOptions> = {}): Promise<IngestResult> {
@@ -259,20 +264,24 @@ export class TcgIngestService {
           : 'SUCCEEDED';
 
     if (runId) {
-      await this.syncRuns.finish(runId, {
-        status,
-        requestsUsed: state.summary.requests,
-        cardsSynced: state.summary.created + state.summary.updated,
-        errorCount: state.summary.errors,
-        errorSummary,
-        quotaExhausted: state.summary.quotaExhausted,
-        summary: {
-          ...state.summary,
-          ...(state.remaining !== null
-            ? { quotaRemaining: state.remaining }
-            : {}),
+      await this.syncRuns.finish(
+        runId,
+        {
+          status,
+          requestsUsed: state.summary.requests,
+          cardsSynced: state.summary.created + state.summary.updated,
+          errorCount: state.summary.errors,
+          errorSummary,
+          quotaExhausted: state.summary.quotaExhausted,
+          summary: {
+            ...state.summary,
+            ...(state.remaining !== null
+              ? { quotaRemaining: state.remaining }
+              : {}),
+          },
         },
-      });
+        started.startedBy ?? null,
+      );
     }
 
     return {

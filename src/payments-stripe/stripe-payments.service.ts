@@ -85,13 +85,30 @@ export class StripePaymentsService {
       if (err instanceof StockDecrementConflictError) {
         // AD-50: the paid tx rolled back (event row included). Persist the
         // refund-pending trace in a second short transaction; redelivery
-        // then hits ON CONFLICT and is a duplicate no-op.
-        const inserted = await this.prisma.$executeRaw(Prisma.sql`
-          INSERT INTO "Stripe_Webhook_Events" ("eventId", "type", "orderId", "outcome")
-          VALUES (${event.id}, ${event.type}, ${err.orderId}::uuid, ${REFUND_PENDING_NO_STOCK})
-          ON CONFLICT ("eventId") DO NOTHING
-        `);
-        if (inserted === 0) {
+        // then hits ON CONFLICT and is a duplicate no-op. Story 20.5: the same
+        // transaction writes `REFUND_PENDING_RECORDED` (money was charged and must be
+        // returned by hand); an audit outage answers 5xx and Stripe redelivers.
+        const done = await this.audit.transaction(async (tx, audit) => {
+          const inserted = await tx.$executeRaw(Prisma.sql`
+            INSERT INTO "Stripe_Webhook_Events" ("eventId", "type", "orderId", "outcome")
+            VALUES (${event.id}, ${event.type}, ${err.orderId}::uuid, ${REFUND_PENDING_NO_STOCK})
+            ON CONFLICT ("eventId") DO NOTHING
+          `);
+          if (inserted === 0) return false;
+          const order = await tx.order.findUnique({
+            where: { id: err.orderId },
+            select: { totalUsd: true },
+          });
+          this.addRefundPendingEvent(
+            audit,
+            event,
+            err.orderId,
+            'NO_STOCK',
+            order?.totalUsd ?? null,
+          );
+          return true;
+        });
+        if (!done) {
           return 'duplicate';
         }
         this.logger.error(
@@ -163,6 +180,8 @@ export class StripePaymentsService {
         order.status,
         isPaid,
         record,
+        audit,
+        order.totalUsd,
       );
     }
 
@@ -206,6 +225,8 @@ export class StripePaymentsService {
           current?.status ?? OrderStatus.PAYMENT_FAILED,
           isPaid,
           record,
+          audit,
+          order.totalUsd,
         );
       }
       throw err;
@@ -266,6 +287,32 @@ export class StripePaymentsService {
   }
 
   /**
+   * Story 20.5 (R1): `REFUND_PENDING_RECORDED`, one per `refund_pending_*` row written (the
+   * duplicate delivery never reaches here). Ids, reason and the order total as a string.
+   */
+  private addRefundPendingEvent(
+    audit: AuditCollector,
+    event: StripeWebhookEvent,
+    orderId: string,
+    reason: 'NO_STOCK' | 'AFTER_TERMINAL',
+    amountUsd: Prisma.Decimal | null,
+  ): void {
+    audit.add({
+      ...SYSTEM_ACTOR,
+      action: 'REFUND_PENDING_RECORDED',
+      entityType: 'Order',
+      entityId: orderId,
+      after: payload({
+        orderId,
+        eventId: event.id,
+        eventType: event.type,
+        reason,
+        amountUsd,
+      }),
+    });
+  }
+
+  /**
    * Event for an Order no longer PAYMENT_PROCESSING. A `paid` event on a
    * PAYMENT_FAILED Order (expired / async failure / cron timeout) means
    * Stripe charged the buyer: persist refund_pending_after_terminal + ERROR.
@@ -276,12 +323,21 @@ export class StripePaymentsService {
     status: OrderStatus,
     isPaid: boolean,
     record: (outcome: string, orderId: string | null) => Promise<void>,
+    audit: AuditCollector,
+    totalUsd: Prisma.Decimal,
   ): Promise<StripeWebhookOutcome> {
     if (isPaid && status === OrderStatus.PAYMENT_FAILED) {
       this.logger.error(
         `PAID_AFTER_TERMINAL: Stripe event ${event.id} reports payment for Order ${orderId} already PAYMENT_FAILED. MANUAL REFUND REQUIRED from the Stripe dashboard.`,
       );
       await record(REFUND_PENDING_AFTER_TERMINAL, orderId);
+      this.addRefundPendingEvent(
+        audit,
+        event,
+        orderId,
+        'AFTER_TERMINAL',
+        totalUsd,
+      );
       return 'noop';
     }
     await record('noop', orderId);

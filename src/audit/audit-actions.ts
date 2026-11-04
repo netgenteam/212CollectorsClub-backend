@@ -30,6 +30,25 @@ const PAGO_MOVIL_PUBLIC = {
 } as const satisfies PublicFields;
 
 /**
+ * WHAT COUNTS AS A RISK ACTION (the written criterion for adding an action to this catalog;
+ * `docs/deployment.md` 17.6 repeats it). An admin/system action is audited when it does AT LEAST ONE of:
+ *   R1. moves money or a payment state, or records that money must be returned (payments,
+ *       refund-pending webhook rows);
+ *   R2. changes what the shopper pays or can buy: a price, stock, the existence or visibility of
+ *       a product (create, delete, `isActive`), shipping options, the FX rate or its source,
+ *       the vitrina ranking, a batch import that rewrites prices;
+ *   R3. grants, revokes or proves access or identity: admin sessions, a customer password reset,
+ *       an admin vouching for an email (`verify-email`);
+ *   R4. discloses or destroys personal data (cedula reveal, anonymization, retention purge);
+ *   R5. changes legal text, the seller identity or the consent evidence.
+ * NOT audited here (reviewed on purpose): landing blocks and their images, the pack simulator
+ * configuration and category taxonomy (presentation or navigation content with its own
+ * draft/publish or reversible edits, no money, no personal data, no change to what can be
+ * bought), product image uploads and tag edits, cart/wishlist, and the customer's own profile and
+ * change-password (needs the current password). The 7-day admin usage log of Story 20.7 covers
+ * everything else. A new action that meets one of R1-R5 must be added here with an emitter and a
+ * payload sample (`audit-catalog-payloads.spec.ts`), or the coverage test fails.
+ *
  * Story 20.1 (AD-99, FR-139): catalog of audit actions. A TypeScript `const`,
  * NOT a Postgres enum: adding an action in a later epic needs no DDL (the table
  * only checks `action ~ '^[A-Z0-9_]+$'`). `emittedBy` is the story of Epic 20
@@ -43,12 +62,18 @@ export const AUDIT_ACTIONS = {
   // Admin session
   LOGIN_ADMIN_OK: { emittedBy: '20.5' },
   LOGIN_ADMIN_FAILED: { emittedBy: '20.5' },
+  // One event per minute at most: how many failed logins the per-minute budget could not write
+  // (count, window, hashed identifiers). Keeps the attack visible in the chain without a row per try.
+  LOGIN_ADMIN_FAILED_SUMMARY: { emittedBy: '20.5' },
   LOGOUT_ADMIN: { emittedBy: '20.5' },
   // Admin accounts
   ADMIN_CREDENTIALS_CHANGED: { emittedBy: '20.5' },
   ADMIN_ROLE_CHANGED: { emittedBy: '20.5' },
   ADMIN_CREATED: { emittedBy: '20.5' },
   ADMIN_DISABLED: { emittedBy: '20.5' },
+  // Customer accounts (R3)
+  CUSTOMER_PASSWORD_RESET: { emittedBy: '20.5' },
+  CUSTOMER_EMAIL_VERIFIED_BY_ADMIN: { emittedBy: '20.5' },
   // Privacy
   CUSTOMER_ANONYMIZED: { emittedBy: '20.6' },
   ID_DOC_REVEALED: { emittedBy: '20.4' },
@@ -65,11 +90,19 @@ export const AUDIT_ACTIONS = {
   },
   STRIPE_PAYMENT_STATE_CHANGED: { emittedBy: '20.5' },
   REFUND_ISSUED: { emittedBy: '20.5' },
+  // A Stripe webhook that charged the buyer for an order that could not be paid (no stock / already
+  // failed): a refund must be made by hand in the Stripe dashboard.
+  REFUND_PENDING_RECORDED: { emittedBy: '20.5' },
   ORDER_STATUS_CHANGED: { emittedBy: '20.5' },
   ORDER_TRACKING_CHANGED: { emittedBy: '20.5' },
   // Catalog
   PRODUCT_PRICE_CHANGED: { emittedBy: '20.5' },
   PRODUCT_STOCK_ADJUSTED: { emittedBy: '20.5' },
+  PRODUCT_CREATED: { emittedBy: '20.5' },
+  PRODUCT_DELETED: { emittedBy: '20.5' },
+  PRODUCT_ACTIVE_CHANGED: { emittedBy: '20.5' },
+  // ONE summary event per TCG ingest / nightly price sync run (counters), never a row per price.
+  DATA_IMPORT_RUN: { emittedBy: '20.5' },
   // Epic 18
   FX_SOURCE_CHANGED: { emittedBy: '20.5' },
   FX_RATE_CHANGED: { emittedBy: '20.5' },

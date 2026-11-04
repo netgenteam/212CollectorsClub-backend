@@ -351,6 +351,7 @@ describe('AuditService / chain / immutability on sandbox schemas (e2e, Story 20.
         `SELECT pg_advisory_xact_lock(${AUDIT_CHAIN_LOCK_KEY})`,
       );
       const t0 = process.hrtime.bigint();
+      const w0 = Date.now();
       let thrown: unknown;
       await b.audit
         .transaction(async (tx, audit) => {
@@ -364,13 +365,19 @@ describe('AuditService / chain / immutability on sandbox schemas (e2e, Story 20.
         })
         .catch((e: unknown) => (thrown = e));
       const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+      // QA 20.5 (measured 3.5 s against a floor of 4.5 s): the database counts the 5 s of
+      // `lock_timeout` on the WALL clock, which steps ~1.2 s forward every ~32 s on WSL2 relative to
+      // the monotonic clock (see `fx-lock-budget.e2e-spec.ts`). The budget is spent when EITHER
+      // clock says so, so the floor is judged on the larger of the two; the ceiling stays monotonic
+      // (a step only makes the wall clock run FAST).
+      const spent = Math.max(ms, Date.now() - w0);
       expect(thrown).toBeInstanceOf(ApiException);
       expect((thrown as ApiException).getStatus()).toBe(503);
       expect((thrown as ApiException).getResponse()).toMatchObject({
         errorCode: 'AUDIT_UNAVAILABLE',
         details: { reason: 'LOCK_TIMEOUT' },
       });
-      expect(ms).toBeGreaterThan(4_500);
+      expect(spent).toBeGreaterThan(4_500);
       expect(ms).toBeLessThan(8_000);
     } finally {
       await holder.query('ROLLBACK').catch(() => undefined);

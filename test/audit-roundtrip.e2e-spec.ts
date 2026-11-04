@@ -166,7 +166,7 @@ describe('round trip: what is hashed is what Postgres stores (Story 20.1 D1)', (
     expect(row.entityId).toBe('e\ufffd');
   });
 
-  it('extremes: column limits in code points, an astral reason cut at 500, ints at the safe limits, -0, __proto__, empty key, key order that differs between UTF-8 and UTF-16, a 100 kB string', async () => {
+  it('extremes: column limits in code points, an astral reason cut at 500, ints at the safe limits, -0, __proto__, empty key, key order that differs between UTF-8 and UTF-16, 100 kB of payload', async () => {
     const b = await make();
     const extreme: AuditEventInput[] = [
       {
@@ -197,7 +197,10 @@ describe('round trip: what is hashed is what Postgres stores (Story 20.1 D1)', (
           '10': 6,
           '2': 7,
           ａ: 8,
-          big: 'y'.repeat(100_000),
+          // ~100 kB of payload as 100 strings of 1 000 characters. One 100 000-character token
+          // used to take 4.6 s inside the value detectors (quadratic) and hit the 5 s test
+          // timeout; the guard now refuses a single string over 8 000 characters (audit-payload.ts).
+          big: Array.from({ length: 100 }, () => 'y'.repeat(1_000)),
         },
       },
       {

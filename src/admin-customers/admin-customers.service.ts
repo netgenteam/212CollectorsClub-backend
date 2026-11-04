@@ -2,6 +2,8 @@ import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
 import { VERIFICATION_PREFIX } from '../customer-auth/customer-auth.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { AuditService } from '../audit/audit.service.js';
+import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
 import type { VerifyCustomerEmailResponseDto } from './dto/verify-customer-email.dto.js';
 
 type Outcome = 'verified' | 'already_verified' | 'not_found';
@@ -13,7 +15,11 @@ type Outcome = 'verified' | 'already_verified' | 'not_found';
 export class AdminCustomersService {
   private readonly logger = new Logger(AdminCustomersService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+    private readonly crypto: IdDocCryptoService,
+  ) {}
 
   /**
    * Marks the customer's email as verified and drops that customer's pending
@@ -26,8 +32,11 @@ export class AdminCustomersService {
     adminId: string,
     email: string,
   ): Promise<VerifyCustomerEmailResponseDto> {
-    const outcome = await this.prisma.$transaction(
-      async (tx): Promise<Outcome> => {
+    // Story 20.5 (R3): an admin vouching for an email is access material; a REAL change
+    // (`verified`) writes `CUSTOMER_EMAIL_VERIFIED_BY_ADMIN` in the same transaction (flushed last).
+    // The email is only ever hashed.
+    const outcome = await this.audit.transaction(
+      async (tx, audit): Promise<Outcome> => {
         const customer = await tx.customer.findUnique({
           where: { email },
           select: { id: true },
@@ -50,6 +59,18 @@ export class AdminCustomersService {
         await tx.customer.update({
           where: { id: customer.id },
           data: { emailVerified: true },
+        });
+        audit.add({
+          actorType: 'ADMIN',
+          actorId: adminId,
+          action: 'CUSTOMER_EMAIL_VERIFIED_BY_ADMIN',
+          entityType: 'Customer',
+          entityId: customer.id,
+          after: {
+            customerId: customer.id,
+            emailHash: this.crypto.hashEmail(email),
+            adminId,
+          },
         });
         return 'verified';
       },

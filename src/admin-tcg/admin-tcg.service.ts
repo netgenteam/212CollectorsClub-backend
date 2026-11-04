@@ -78,7 +78,10 @@ export class AdminTcgService {
    * Story 15.9: registers the run, answers its id and keeps ingesting in the
    * background (the server's own `TCGAPI_KEY`; nothing secret crosses HTTP).
    */
-  async startIngest(dto: StartIngestDto): Promise<StartIngestResponseDto> {
+  async startIngest(
+    dto: StartIngestDto,
+    admin?: { id: string },
+  ): Promise<StartIngestResponseDto> {
     if (
       this.client.provider === 'FAKE' &&
       this.config.get<string>(TCG_ALLOW_FAKE_REMOTE_INGEST) !== 'true'
@@ -94,19 +97,22 @@ export class AdminTcgService {
       Number.isInteger(envCap) && envCap > 0
         ? envCap
         : DEFAULT_REMOTE_INGEST_MAX_CARDS;
-    const started = await this.ingest.startRun({
-      maxCards: Math.min(dto.maxCards ?? cap, cap),
-      ...(dto.games ? { games: dto.games } : {}),
-      ...(dto.sets ? { sets: dto.sets } : {}),
-      ...(dto.maxRequests !== undefined
-        ? { maxRequests: dto.maxRequests }
-        : {}),
-      ...(dto.setLimit !== undefined ? { setLimit: dto.setLimit } : {}),
-      ...(dto.refreshSets !== undefined
-        ? { refreshSets: dto.refreshSets }
-        : {}),
-      dryRun: false,
-    });
+    const started = await this.ingest.startRun(
+      {
+        maxCards: Math.min(dto.maxCards ?? cap, cap),
+        ...(dto.games ? { games: dto.games } : {}),
+        ...(dto.sets ? { sets: dto.sets } : {}),
+        ...(dto.maxRequests !== undefined
+          ? { maxRequests: dto.maxRequests }
+          : {}),
+        ...(dto.setLimit !== undefined ? { setLimit: dto.setLimit } : {}),
+        ...(dto.refreshSets !== undefined
+          ? { refreshSets: dto.refreshSets }
+          : {}),
+        dryRun: false,
+      },
+      admin ?? null,
+    );
     if (started.alreadyRunning || !started.runId) {
       throw new ApiException(
         HttpStatus.CONFLICT,
@@ -122,14 +128,18 @@ export class AdminTcgService {
       ).slice(0, 500);
       this.logger.error(`Background ingest ${runId} crashed — ${message}`);
       await this.syncRuns
-        .finish(runId, {
-          status: 'FAILED',
-          requestsUsed: 0,
-          cardsSynced: 0,
-          errorCount: 1,
-          errorSummary: message,
-          quotaExhausted: false,
-        })
+        .finish(
+          runId,
+          {
+            status: 'FAILED',
+            requestsUsed: 0,
+            cardsSynced: 0,
+            errorCount: 1,
+            errorSummary: message,
+            quotaExhausted: false,
+          },
+          admin ?? null,
+        )
         .catch(() => undefined);
     });
     return { runId, status: 'RUNNING' };

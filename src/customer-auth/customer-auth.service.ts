@@ -306,8 +306,39 @@ export class CustomerAuthService {
       });
   }
 
-  /** BetterAuth deletes the token, hashes (Argon2id) and revokes all sessions. */
+  /**
+   * The customer a reset token belongs to (BetterAuth stores it as a hash of `reset-password:<token>`
+   * pointing at the user id; its own adapter does the lookup). `null` for an unknown/expired token or
+   * when the lookup fails: the audit then has nobody to name, never a reason to refuse the reset.
+   */
+  private async resetTokenOwner(
+    token: string,
+  ): Promise<{ value: string } | null> {
+    try {
+      const ctx = await this.customerAuth.$context;
+      const v = await ctx.internalAdapter.findVerificationValue(
+        `reset-password:${token}`,
+      );
+      return v && v.expiresAt > new Date() ? { value: v.value } : null;
+    } catch (err) {
+      this.logger.error(`reset token owner lookup failed: ${String(err)}`);
+      return null;
+    }
+  }
+
+  /**
+   * BetterAuth deletes the token, hashes (Argon2id) and revokes all sessions.
+   *
+   * Story 20.5: a reset is account takeover material, so it leaves `CUSTOMER_PASSWORD_RESET`
+   * (actor: the customer who used the emailed token, no email, no token). BetterAuth works on its
+   * own connection, so the event cannot share its transaction: the owner of the token is read
+   * first (`resetTokenOwner`), and the event is written
+   * right after the reset succeeded. If the audit write fails the password HAS already changed and
+   * its sessions are revoked: answering an error would send the person back for a used token, so
+   * the failure is logged as an error (never silent) and the reset answers OK.
+   */
   async resetPassword(token: string, password: string): Promise<void> {
+    const owner = await this.resetTokenOwner(token);
     try {
       await this.customerAuth.api.resetPassword({
         body: { token, newPassword: password },
@@ -317,6 +348,28 @@ export class CustomerAuthService {
         throw invalidResetTokenException();
       }
       throw err;
+    }
+    if (!owner) return;
+    try {
+      await this.audit.transaction((_tx, audit) => {
+        audit.add({
+          actorType: 'CUSTOMER',
+          actorId: owner.value,
+          action: 'CUSTOMER_PASSWORD_RESET',
+          entityType: 'Customer',
+          entityId: owner.value,
+          after: {
+            customerId: owner.value,
+            via: 'EMAIL_TOKEN',
+            sessionsRevoked: true,
+          },
+        });
+        return Promise.resolve();
+      });
+    } catch (err) {
+      this.logger.error(
+        `CUSTOMER_PASSWORD_RESET for customer ${owner.value} could not be audited (the password HAS changed): ${String(err)}`,
+      );
     }
   }
 

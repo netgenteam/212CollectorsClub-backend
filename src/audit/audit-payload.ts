@@ -393,6 +393,8 @@ export function redactReason(s: string): { text: string; hits: string[] } {
 // ─── the walk ─────────────────────────────────────────────────────────────
 
 const MAX_DEPTH = 8;
+/** Longest string a payload may carry (see the note in `sanitizeAuditPayload`). */
+const MAX_STRING_CHARS = 8_000;
 
 /** A key as shown in a path: capped, so a huge key cannot flood a log line. */
 const pathKey = (k: string): string =>
@@ -510,6 +512,13 @@ export function sanitizeAuditPayload(
     path: string,
     exempt: readonly PublicValueClass[] = [],
   ): string => {
+    // The value detectors are quadratic on one long unbroken token (measured: 50 000 characters
+    // take 1.1 s, 150 000 take 11 s of blocked event loop). An audit event is a diff, not a
+    // document: a longer string is a violation (strict: thrown; lenient: cut) BEFORE any scan.
+    if (s.length > MAX_STRING_CHARS) {
+      violation(path, `string longer than ${MAX_STRING_CHARS} characters`);
+      s = s.slice(0, MAX_STRING_CHARS);
+    }
     const clean = pgText(s);
     const { text: out, hits } = redactText(clean, exempt);
     if (hits.length > 0) {
