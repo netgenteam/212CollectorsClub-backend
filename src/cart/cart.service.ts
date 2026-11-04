@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { ApiException } from '../common/api-exception.js';
+import { lockLiveCustomer } from '../common/customer-write-lock.js';
 import { executeGuardedUpdate } from '../common/guarded-update.js';
 import { AddCartItemDto } from './dto/add-cart-item.dto.js';
 import {
@@ -236,6 +237,8 @@ export class CartService {
     const account = !!customerId;
 
     await this.prisma.$transaction(async (tx) => {
+      // Story 20.6: a signed-in caller writes the account's cart: the Customers row lock first.
+      if (customerId) await lockLiveCustomer(tx, customerId, 'SHARE');
       const cartItem = await this.findCartItemOrThrow(
         tx,
         cartId,
@@ -304,6 +307,8 @@ export class CartService {
     const account = !!customerId;
 
     await this.prisma.$transaction(async (tx) => {
+      // Story 20.6: a signed-in caller writes the account's cart: the Customers row lock first.
+      if (customerId) await lockLiveCustomer(tx, customerId, 'SHARE');
       const cartItem = await this.findCartItemOrThrow(
         tx,
         cartId,
@@ -453,6 +458,8 @@ export class CartService {
     dto: AddCartItemDto,
   ): Promise<AddCartItemResult> {
     return this.prisma.$transaction(async (tx) => {
+      // Story 20.6: FIRST statement, before the advisory lock of the cart (order: Customers, then the rest).
+      await lockLiveCustomer(tx, customerId, 'SHARE');
       const product = await tx.product.findUnique({
         where: { id: dto.productId },
         select: { id: true },
@@ -535,6 +542,9 @@ export class CartService {
     anonCartId: string,
   ): Promise<boolean> {
     return this.prisma.$transaction(async (tx) => {
+      // Story 20.6: an anonymized account takes no cart (401; the anonymous cart stays untouched
+      // and still belongs to nobody: the claim below is never reached).
+      await lockLiveCustomer(tx, customerId, 'SHARE');
       await this.lockAccountCart(tx, customerId);
       const expiresAt = new Date(Date.now() + CART_COOKIE_TTL_MS);
 

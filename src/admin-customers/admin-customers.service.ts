@@ -1,5 +1,6 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
+import { tryLockLiveCustomer } from '../common/customer-write-lock.js';
 import { VERIFICATION_PREFIX } from '../customer-auth/customer-auth.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AuditService } from '../audit/audit.service.js';
@@ -42,6 +43,11 @@ export class AdminCustomersService {
           select: { id: true },
         });
         if (!customer) return 'not_found';
+        // Story 20.6: the Customers row lock first (FOR UPDATE: this transaction updates that row).
+        // The placeholder address of an anonymized account is "no account": 404, no effect, no event.
+        if (!(await tryLockLiveCustomer(tx, customer.id, 'UPDATE'))) {
+          return 'not_found';
+        }
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'verify:' + customer.id}, 0))`;
         // Re-read under the lock so a racing call reports consistently.
         const current = await tx.customer.findUnique({

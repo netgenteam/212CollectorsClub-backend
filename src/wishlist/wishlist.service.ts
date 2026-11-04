@@ -1,6 +1,7 @@
 import { HttpStatus, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { ApiException } from '../common/api-exception.js';
+import { lockLiveCustomer } from '../common/customer-write-lock.js';
 import { CatalogService } from '../catalog/catalog.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -68,10 +69,17 @@ export class WishlistService {
     }
 
     const expiresAt = new Date(Date.now() + WISHLIST_COOKIE_TTL_MS);
-    let id: string | null = null;
     if (customerId) {
-      id = await this.ensureAccountWishlist(customerId, expiresAt);
-    } else if (wishlistId && UUID_RE.test(wishlistId)) {
+      // Story 20.6: ONE transaction under the Customers row lock (401 for an anonymized
+      // account): the wishlist and its item can never be written after the anonymization.
+      return this.prisma.$transaction(async (tx) => {
+        await lockLiveCustomer(tx, customerId, 'SHARE');
+        const id = await this.ensureAccountWishlist(tx, customerId, expiresAt);
+        return this.appendItem(tx, id, productId);
+      });
+    }
+    let id: string | null = null;
+    if (wishlistId && UUID_RE.test(wishlistId)) {
       // Sliding expiry; matches nothing when expired/unknown.
       const refreshed = await this.prisma.wishlist.updateMany({
         where: {
@@ -92,14 +100,21 @@ export class WishlistService {
       });
       id = created.id;
     }
+    return this.appendItem(this.prisma, id, productId);
+  }
 
-    // Soft cap (AD-22): a concurrent race may exceed it by a few items.
-    const alreadySaved = await this.prisma.wishlistItem.findUnique({
+  /** Soft cap (AD-22) + idempotent insert + the list of saved ids, on `db` (the client or a transaction). */
+  private async appendItem(
+    db: Prisma.TransactionClient | PrismaService,
+    id: string,
+    productId: string,
+  ): Promise<{ wishlistId: string; productIds: string[] }> {
+    const alreadySaved = await db.wishlistItem.findUnique({
       where: { wishlistId_productId: { wishlistId: id, productId } },
       select: { id: true },
     });
     if (!alreadySaved) {
-      const count = await this.prisma.wishlistItem.count({
+      const count = await db.wishlistItem.count({
         where: { wishlistId: id },
       });
       if (count >= WISHLIST_MAX_ITEMS) {
@@ -110,7 +125,7 @@ export class WishlistService {
           { maxItems: WISHLIST_MAX_ITEMS },
         );
       }
-      await this.prisma.$executeRaw(
+      await db.$executeRaw(
         Prisma.sql`
           INSERT INTO "Wishlist_Items" ("id", "wishlistId", "productId")
           VALUES (${randomUUID()}::uuid, ${id}::uuid, ${productId}::uuid)
@@ -119,7 +134,7 @@ export class WishlistService {
       );
     }
 
-    const rows = await this.prisma.wishlistItem.findMany({
+    const rows = await db.wishlistItem.findMany({
       where: { wishlistId: id, product: { isActive: true } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       select: { productId: true },
@@ -134,8 +149,11 @@ export class WishlistService {
     customerId?: string | null,
   ): Promise<void> {
     if (customerId) {
-      await this.prisma.wishlistItem.deleteMany({
-        where: { productId, wishlist: { customerId } },
+      await this.prisma.$transaction(async (tx) => {
+        await lockLiveCustomer(tx, customerId, 'SHARE');
+        await tx.wishlistItem.deleteMany({
+          where: { productId, wishlist: { customerId } },
+        });
       });
       return;
     }
@@ -160,21 +178,20 @@ export class WishlistService {
     );
   }
 
-  /** Account wishlist, created on demand (under the account lock). */
-  private ensureAccountWishlist(
+  /** Account wishlist, created on demand (under the account lock). Caller holds the Customers row lock (`lockLiveCustomer`). */
+  private async ensureAccountWishlist(
+    tx: Prisma.TransactionClient,
     customerId: string,
     expiresAt: Date,
   ): Promise<string> {
-    return this.prisma.$transaction(async (tx) => {
-      await this.lockAccountWishlist(tx, customerId);
-      const rows = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-        INSERT INTO "Wishlists" ("id", "customerId", "expiresAt", "createdAt", "updatedAt")
-        VALUES (${randomUUID()}::uuid, ${customerId}::uuid, ${expiresAt}, now(), now())
-        ON CONFLICT ("customerId") DO UPDATE SET "expiresAt" = EXCLUDED."expiresAt", "updatedAt" = now()
-        RETURNING id
-      `);
-      return rows[0].id;
-    });
+    await this.lockAccountWishlist(tx, customerId);
+    const rows = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+      INSERT INTO "Wishlists" ("id", "customerId", "expiresAt", "createdAt", "updatedAt")
+      VALUES (${randomUUID()}::uuid, ${customerId}::uuid, ${expiresAt}, now(), now())
+      ON CONFLICT ("customerId") DO UPDATE SET "expiresAt" = EXCLUDED."expiresAt", "updatedAt" = now()
+      RETURNING id
+    `);
+    return rows[0].id;
   }
 
   /**
@@ -193,6 +210,8 @@ export class WishlistService {
       return false;
     }
     return this.prisma.$transaction(async (tx) => {
+      // Story 20.6: an anonymized account takes no wishlist; the anonymous one stays untouched.
+      await lockLiveCustomer(tx, customerId, 'SHARE');
       await this.lockAccountWishlist(tx, customerId);
       const expiresAt = new Date(Date.now() + WISHLIST_COOKIE_TTL_MS);
 

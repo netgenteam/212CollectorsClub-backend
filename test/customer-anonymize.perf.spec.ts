@@ -219,7 +219,7 @@ describe('anonymization and customer search cost (perf, Story 20.6)', () => {
     expect(pct(rep, 95)).toBeLessThan(300);
   }, 120_000);
 
-  it(`search on ${CUSTOMERS} customers: the cedula goes through the blind indexes, email/name is a bounded scan`, async () => {
+  it(`search on ${CUSTOMERS} customers: the cedula can use the blind indexes (asserted without a fragile plan), email/name is a bounded scan`, async () => {
     await prisma.$executeRawUnsafe(
       `INSERT INTO "Customers" ("id","email","name","emailVerified","createdAt","updatedAt")
        SELECT gen_random_uuid(), 'e2e-206p-${TAG}-bulk-' || g || '@212collectorsclub.test', 'Bulk ${TAG} ' || g, false,
@@ -268,21 +268,34 @@ describe('anonymization and customer search cost (perf, Story 20.6)', () => {
     out(
       `[20.6 perf] search over ${CUSTOMERS + 1} customers: idDoc p50=${pct(idDoc, 50).toFixed(1)} p95=${pct(idDoc, 95).toFixed(1)} | q p50=${pct(q, 50).toFixed(1)} p95=${pct(q, 95).toFixed(1)} | first page p50=${pct(page, 50).toFixed(1)} p95=${pct(page, 95).toFixed(1)} ms`,
     );
-    const plan = await prisma.$queryRawUnsafe<{ 'QUERY PLAN': string }[]>(
-      `EXPLAIN (FORMAT TEXT) SELECT "customerId"::text FROM "Orders" WHERE "recipientIdDocBlind" = $1 AND "customerId" IS NOT NULL
-        UNION SELECT "customerId"::text FROM "Orders" WHERE "buyerIdDocBlind" = $1 AND "customerId" IS NOT NULL
-        UNION SELECT "customerId"::text FROM "Customer_Addresses" WHERE "recipientIdDocBlind" = $1 LIMIT 1000`,
-      ced?.blind,
+    // What matters is that the cedula lookup CAN go through its three blind indexes (so it never reads
+    // a table), not which plan the planner picks on a clone with one address row (it chooses a Seq
+    // Scan on a table that small, and rightly). So: (1) the indexes exist, (2) with sequential scans
+    // forbidden the SAME statement is planned on them, (3) the measured times above.
+    const idx = await prisma.$queryRawUnsafe<
+      { tablename: string; indexdef: string }[]
+    >(
+      `SELECT tablename, indexdef FROM pg_indexes
+        WHERE tablename IN ('Orders','Customer_Addresses') AND indexdef ILIKE '%IdDocBlind%'`,
     );
-    out(
-      `[20.6 perf] cedula plan:\n${plan.map((r) => r['QUERY PLAN']).join('\n')}`,
-    );
-    expect(plan.map((r) => r['QUERY PLAN']).join('\n')).toMatch(
-      /Index (Only )?Scan|Bitmap Index Scan/,
-    );
-    expect(plan.map((r) => r['QUERY PLAN']).join('\n')).not.toMatch(
-      /Seq Scan on "(Orders|Customer_Addresses)"/,
-    );
+    const defs = idx.map((r) => `${r.tablename}: ${r.indexdef}`).join('\n');
+    expect(defs).toMatch(/Orders: .*\("recipientIdDocBlind"\)/);
+    expect(defs).toMatch(/Orders: .*\("buyerIdDocBlind"\)/);
+    expect(defs).toMatch(/Customer_Addresses: .*\("recipientIdDocBlind"\)/);
+    const plan = await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL enable_seqscan = off`);
+      return tx.$queryRawUnsafe<{ 'QUERY PLAN': string }[]>(
+        `EXPLAIN (FORMAT TEXT) SELECT "customerId"::text FROM "Orders" WHERE "recipientIdDocBlind" = $1 AND "customerId" IS NOT NULL
+          UNION SELECT "customerId"::text FROM "Orders" WHERE "buyerIdDocBlind" = $1 AND "customerId" IS NOT NULL
+          UNION SELECT "customerId"::text FROM "Customer_Addresses" WHERE "recipientIdDocBlind" = $1 LIMIT 1000`,
+        ced?.blind,
+      );
+    });
+    const planText = plan.map((r) => r['QUERY PLAN']).join('\n');
+    out(`[20.6 perf] cedula plan (seqscan off):\n${planText}`);
+    expect(planText).toMatch(/Orders_recipientIdDocBlind_idx/);
+    expect(planText).toMatch(/Orders_buyerIdDocBlind_idx/);
+    expect(planText).toMatch(/Customer_Addresses_recipientIdDocBlind_idx/);
     expect(pct(idDoc, 95)).toBeLessThan(300);
     expect(pct(q, 95)).toBeLessThan(500);
     expect(pct(page, 95)).toBeLessThan(300);

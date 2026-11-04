@@ -1,6 +1,7 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ApiException } from '../common/api-exception.js';
+import { lockLiveCustomer } from '../common/customer-write-lock.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { ConsentContext, ConsentType } from '../generated/prisma/enums.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -360,6 +361,8 @@ export class ConsentService {
       // Story 20.5: the per-customer advisory lock comes first, the chain lock last.
       return await this.audit.transaction(async (tx, audit) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+        // Story 20.6: the Customers row lock first (401 for an anonymized account: no new evidence).
+        await lockLiveCustomer(tx, customerId, 'SHARE');
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'consent:' + customerId}, 0))`;
         const hasAge = await this.hasAge(tx, customerId);
         const before = await this.statusIn(tx, customerId);

@@ -31,7 +31,7 @@ function build(count: number, createImpl?: () => Promise<unknown>) {
         })),
   );
   const tx = {
-    $queryRaw: vi.fn().mockResolvedValue([]),
+    $queryRaw: vi.fn().mockResolvedValue([{ anonymizedAt: null }]),
     customerAddress: { count: vi.fn().mockResolvedValue(count), create },
   };
   const prisma = { $transaction: (fn: (t: typeof tx) => unknown) => fn(tx) };
@@ -180,7 +180,10 @@ function buildWrite(opts: {
     updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     delete: vi.fn().mockResolvedValue({}),
   };
-  const tx = { $queryRaw: vi.fn().mockResolvedValue([]), customerAddress: ca };
+  const tx = {
+    $queryRaw: vi.fn().mockResolvedValue([{ anonymizedAt: null }]),
+    customerAddress: ca,
+  };
   const prisma = { $transaction: (fn: (t: typeof tx) => unknown) => fn(tx) };
   const assert = vi.fn().mockResolvedValue({});
   const svc = new CustomerAddressesService(

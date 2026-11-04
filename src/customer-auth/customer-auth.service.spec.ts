@@ -30,10 +30,13 @@ describe('CustomerAuthService', () => {
       updateMany?: ReturnType<typeof vi.fn>;
       findUnique: ReturnType<typeof vi.fn>;
       count: ReturnType<typeof vi.fn>;
+      findFirst: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
+      delete: ReturnType<typeof vi.fn>;
     };
     customerSession: { deleteMany: ReturnType<typeof vi.fn> };
     $executeRaw: ReturnType<typeof vi.fn>;
+    $queryRaw: ReturnType<typeof vi.fn>;
   };
   let service: CustomerAuthService;
   /** Story 19.4: ConsentService double (its own rules are in consent.service.spec.ts). */
@@ -53,9 +56,17 @@ describe('CustomerAuthService', () => {
     signUpEmail = vi.fn();
     signInEmail = vi.fn();
     prisma = {
-      customer: { findUnique: vi.fn(), count: vi.fn(), update: vi.fn() },
+      customer: {
+        findUnique: vi.fn(),
+        count: vi.fn(),
+        findFirst: vi.fn(),
+        update: vi.fn(),
+        delete: vi.fn().mockResolvedValue({}),
+      },
       customerSession: { deleteMany: vi.fn() },
       $executeRaw: vi.fn().mockResolvedValue(0),
+      // Story 20.6: the Customers row lock (`lockLiveCustomer`) finds a live account.
+      $queryRaw: vi.fn().mockResolvedValue([{ anonymizedAt: null }]),
     };
     sendMail = vi.fn().mockResolvedValue(undefined);
     verification = {
@@ -65,7 +76,12 @@ describe('CustomerAuthService', () => {
     };
     prisma.customerVerification = verification;
     prisma.$transaction = vi.fn((cb: (tx: unknown) => Promise<unknown>) =>
-      cb({ $executeRaw: vi.fn(), customerVerification: verification }),
+      cb({
+        $executeRaw: vi.fn(),
+        $queryRaw: prisma.$queryRaw,
+        customerVerification: verification,
+        customer: prisma.customer,
+      }),
     );
     prisma.customer.updateMany = vi.fn();
     resetPassword = vi.fn();
@@ -266,8 +282,8 @@ describe('CustomerAuthService', () => {
         status: 401,
         response: { errorCode: 'INVALID_CUSTOMER_CREDENTIALS' },
       });
-      // sessions and credentials of an anonymized account are deleted
-      expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
+      // sessions, verification tokens and credentials of an anonymized account are deleted
+      expect(prisma.$executeRaw).toHaveBeenCalledTimes(3);
     });
 
     it('login: the profile never carries anonymizedAt', async () => {
@@ -295,11 +311,12 @@ describe('CustomerAuthService', () => {
       expect(consent.assertAccepted).not.toHaveBeenCalled();
     });
 
-    it('forgotPassword counts only accounts that are not anonymized', async () => {
-      prisma.customer.count.mockResolvedValue(0);
+    it('forgotPassword looks up only accounts that are not anonymized', async () => {
+      prisma.customer.findFirst.mockResolvedValue(null);
       await service.forgotPassword('a@b.co');
-      expect(prisma.customer.count).toHaveBeenCalledWith({
+      expect(prisma.customer.findFirst).toHaveBeenCalledWith({
         where: { email: 'a@b.co', anonymizedAt: null },
+        select: { id: true },
       });
       expect(requestPasswordReset).not.toHaveBeenCalled();
     });
@@ -406,10 +423,10 @@ describe('CustomerAuthService', () => {
   });
 
   it('forgotPassword: unknown email does nothing, known one requests a reset', async () => {
-    prisma.customer.count.mockResolvedValue(0);
+    prisma.customer.findFirst.mockResolvedValue(null);
     await expect(service.forgotPassword('x@y.co')).resolves.toBeUndefined();
     expect(requestPasswordReset).not.toHaveBeenCalled();
-    prisma.customer.count.mockResolvedValue(1);
+    prisma.customer.findFirst.mockResolvedValue({ id: 'u1' });
     await service.forgotPassword('x@y.co');
     expect(requestPasswordReset).toHaveBeenCalledTimes(1);
   });
@@ -524,9 +541,9 @@ describe('CustomerAuthService', () => {
     it('forgotPassword: existing account returns as fast as the unknown one even if token generation is slow', async () => {
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
       requestPasswordReset.mockImplementation(() => slow());
-      prisma.customer.count.mockResolvedValue(1);
+      prisma.customer.findFirst.mockResolvedValue({ id: 'u1' });
       const existing = await elapsed(() => service.forgotPassword('a@b.co'));
-      prisma.customer.count.mockResolvedValue(0);
+      prisma.customer.findFirst.mockResolvedValue(null);
       const unknown = await elapsed(() => service.forgotPassword('a@b.co'));
       expect(existing).toBeLessThan(SLOW / 2);
       expect(unknown).toBeLessThan(SLOW / 2);

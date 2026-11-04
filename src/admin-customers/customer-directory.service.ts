@@ -25,6 +25,10 @@ export const MAX_IDDOC_MATCHES = 1000;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Escapes the LIKE metacharacters (`\`, `%`, `_`) so the text is matched literally. */
+export const escapeLike = (text: string): string =>
+  text.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+
 const cursorInvalid = (): ApiException =>
   new ApiException(
     HttpStatus.BAD_REQUEST,
@@ -110,7 +114,9 @@ export class CustomerDirectoryService {
       and.push({ id: { in: found.map((r) => r.id) } });
     }
     if (dto.q !== undefined) {
-      const q = dto.q.normalize('NFKC').trim();
+      // `q` is text to FIND, never a LIKE pattern: Prisma does not escape `%` and `_` in `contains`,
+      // so `%%` or `__` would match every customer. `\` is Postgres' default LIKE escape.
+      const q = escapeLike(dto.q.normalize('NFKC').trim());
       and.push({
         OR: [
           { email: { contains: q, mode: 'insensitive' } },
@@ -211,6 +217,7 @@ export class CustomerDirectoryService {
       wishlists,
       consents,
       inquiries,
+      refundPending,
     ] = await Promise.all([
       this.prisma.customerAddress.findMany({
         where: { customerId },
@@ -264,7 +271,16 @@ export class CustomerDirectoryService {
       this.prisma.$queryRaw<
         { n: bigint }[]
       >`SELECT count(*) AS "n" FROM "Contact_Inquiries" WHERE lower("email") = lower(${customer.email})`,
+      // Orders of this account (any status) with a `refund_pending_*` Stripe outcome: the money is
+      // still owed and the orders stay after the anonymization (Story 20.6, QA round 2).
+      this.prisma.$queryRaw<
+        { n: bigint }[]
+      >`SELECT count(DISTINCT e."orderId") AS "n" FROM "Stripe_Webhook_Events" e
+          JOIN "Orders" o ON o."id" = e."orderId"
+         WHERE o."customerId" = ${customerId}::uuid AND starts_with(e."outcome", 'refund_pending_')`,
     ]);
+    const inquiriesKept = Number(inquiries[0]?.n ?? 0);
+    const ordersRefundPending = Number(refundPending[0]?.n ?? 0);
 
     let ordersTotal = 0;
     let activeCount = 0;
@@ -315,13 +331,21 @@ export class CustomerDirectoryService {
           verificationTokens: verifications,
           carts,
           wishlists,
-          contactInquiries: Number(inquiries[0]?.n ?? 0),
         },
-        willKeep: { orders: ordersTotal, consentRecords: consents },
+        willKeep: {
+          orders: ordersTotal,
+          consentRecords: consents,
+          contactInquiries: inquiriesKept,
+          ordersWithRefundPending: ordersRefundPending,
+        },
         notices: [
           'NOT_RECOMMENDED_ONLY_ON_EXPLICIT_REQUEST_OF_THE_OWNER',
           'IRREVERSIBLE',
           'ORDERS_AND_FISCAL_ID_KEPT',
+          ...(ordersRefundPending > 0 ? ['REFUND_PENDING_ON_KEPT_ORDERS'] : []),
+          ...(inquiriesKept > 0
+            ? ['CONTACT_MESSAGES_KEPT_UNTIL_RETENTION']
+            : []),
           ...ANONYMIZE_NOTICES,
         ],
       },

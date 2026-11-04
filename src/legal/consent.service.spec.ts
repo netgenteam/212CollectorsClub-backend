@@ -414,6 +414,9 @@ describe('ConsentService.status / reaccept: the age declaration', () => {
       .mockImplementation(
         (strings: TemplateStringsArray, ...vals: unknown[]) => {
           const text = strings.join('?');
+          // Story 20.6: the Customers row lock of reaccept finds a live account.
+          if (text.includes('"anonymizedAt" FROM "Customers"'))
+            return Promise.resolve([{ anonymizedAt: null }]);
           if (text.includes('INSERT INTO "Consent_Records"')) {
             // Story 20.5: the INSERT now RETURNs the ids (recorded like the old $executeRaw one).
             executeRaw(strings, ...vals);

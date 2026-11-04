@@ -1,6 +1,12 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
-import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import {
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
@@ -23,6 +29,9 @@ export class SearchCustomersDto {
   @IsString()
   @MinLength(2)
   @MaxLength(100)
+  // A NUL byte cannot be stored or compared by PostgreSQL (it was a 500): 400.
+  // eslint-disable-next-line no-control-regex -- matching the NUL control character is the point
+  @Matches(/^[^\u0000]*$/, { message: 'q must not contain a NUL character' })
   q?: string;
 
   @ApiPropertyOptional({

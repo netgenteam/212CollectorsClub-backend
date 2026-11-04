@@ -2,6 +2,7 @@ import { stripIdDocFromName } from '../crypto/id-doc-in-name.js';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client.js';
 import { ApiException } from '../common/api-exception.js';
+import { lockLiveCustomer } from '../common/customer-write-lock.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { shippingInvalidException } from '../shipping/shipping-invalid.js';
 import { ShippingValidationService } from '../shipping/shipping-validation.service.js';
@@ -144,7 +145,7 @@ export class CustomerAddressesService {
 
   /**
    * AD-73: runs `fn` in a transaction holding a row lock on the Customer, so
-   * address-book mutations of one customer are serialised. A P2002 from the
+   * address-book mutations of one customer are serialised (and refused once the account is anonymized). A P2002 from the
    * partial unique index (one default) is retried once, then 409.
    */
   private async runLocked<T>(
@@ -153,7 +154,9 @@ export class CustomerAddressesService {
   ): Promise<T> {
     const attempt = () =>
       this.prisma.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT id FROM "Customers" WHERE id = ${customerId}::uuid FOR UPDATE`;
+        // Story 20.6: the Customers row lock IS the account's serialization point; an anonymized
+        // (or gone) account is 401 and nothing is written to its address book.
+        await lockLiveCustomer(tx, customerId, 'UPDATE');
         return fn(tx);
       });
     const isP2002 = (e: unknown) =>

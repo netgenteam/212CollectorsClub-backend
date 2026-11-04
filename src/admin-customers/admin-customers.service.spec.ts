@@ -7,6 +7,7 @@ import { fakeAudit } from '../../test/helpers/fake-audit.js';
 function setup(customer: { id: string; emailVerified: boolean } | null) {
   const tx = {
     $executeRaw: vi.fn().mockResolvedValue(1),
+    $queryRaw: vi.fn().mockResolvedValue([{ anonymizedAt: null }]),
     customer: {
       findUnique: vi.fn().mockResolvedValue(customer),
       update: vi.fn().mockResolvedValue({}),

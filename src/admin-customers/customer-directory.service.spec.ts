@@ -1,6 +1,7 @@
 import {
   decodeCustomerCursor,
   encodeCustomerCursor,
+  escapeLike,
 } from './customer-directory.service.js';
 
 const ID = '0b9a8a4e-6a5f-4d0d-9e3a-1c2d3e4f5a6b';
@@ -36,5 +37,17 @@ describe('customer cursor', () => {
       expect(err.status).toBe(400);
       expect(err.response.errorCode).toBe('CURSOR_INVALID');
     }
+  });
+});
+
+describe('escapeLike (q is text to find, never a LIKE pattern)', () => {
+  it.each([
+    ['%%', '\\%\\%'],
+    ['__', '\\_\\_'],
+    ['a\\b', 'a\\\\b'],
+    ['100%_x\\', '100\\%\\_x\\\\'],
+    ['plain-text@x.co', 'plain-text@x.co'],
+  ])('%j -> %j', (raw, escaped) => {
+    expect(escapeLike(raw)).toBe(escaped);
   });
 });

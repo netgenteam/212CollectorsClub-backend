@@ -2,6 +2,8 @@ import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import { redactReason } from '../audit/audit-payload.js';
 import { ApiException } from '../common/api-exception.js';
+import { looksLikeIdDocInText } from '../common/id-doc-not-in-url.js';
+import { newIdDocInTextRegex } from '../common/id-doc-pattern.js';
 import { anonymizedEmailFor, emailsMatch } from '../common/anonymized-email.js';
 import { LockBudget, isLockWaitExpired } from '../common/lock-timeout.js';
 import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
@@ -37,8 +39,38 @@ export const ANONYMIZE_NOTICES = [
   'BACKUPS_KEEP_DATA_UNTIL_ROTATION',
 ] as const;
 
-/** A story's own `\b[VEJPG]-?\d{6,9}\b`, applied to the reason (the PII detector is wider). */
-const REASON_ID_DOC = /(?<![A-Za-z0-9])[VEJPG][\s.-]?\d{6,9}(?![A-Za-z0-9])/i;
+/** A story's own `\b[VEJPG]-?\d{6,9}\b`, widened to the separators a person really types. */
+const REASON_ID_DOC =
+  /(?<![A-Za-z0-9])[VEJPG][\s.-]{0,3}\d{6,9}(?![A-Za-z0-9])/i;
+/** Venezuelan mobile numbers with or without the leading 0 / +58 and with separators. */
+const REASON_PHONE =
+  /(?<![\d])(?:\+?58[\s.-]?)?0?4(?:12|14|16|24|26)[\s.-]?\d{3}[\s.-]?\d{4}(?![\d])/;
+/** A run of 7+ digits standing alone: a number, not a date (`2026-11-04`) nor a word-glued reference (`t1234567`). */
+const REASON_LONG_DIGITS = /(?<![A-Za-z0-9])\d{7,}/;
+const UNICODE_DASHES = /[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D\u00AD]/g;
+
+/**
+ * The text a person typed, folded to what it LOOKS like: NFKC (full-width `Ｖ`), every Unicode dash as
+ * `-`, no zero-width or other format characters, whitespace runs as one space. Every check below runs on
+ * this, so `V  12345678`, `Ｖ‐ 12345678` or `V\u200B12345678` are caught like `V-12345678`.
+ */
+export function foldReasonText(raw: string): string {
+  return raw
+    .normalize('NFKC')
+    .replace(UNICODE_DASHES, '-')
+    .replace(/\p{Cf}/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** True when the reason holds something shaped like an ID document (type letter, `CI`/`cedula`/`RIF` + number). */
+export function reasonLooksLikeIdDoc(folded: string): boolean {
+  return (
+    REASON_ID_DOC.test(folded) ||
+    looksLikeIdDocInText(folded) ||
+    newIdDocInTextRegex().test(folded)
+  );
+}
 
 /** Postgres deadlock_detected (40P01) / serialization_failure (40001), however Prisma wraps it. */
 const isDeadlock = (err: unknown): boolean => {
@@ -71,20 +103,39 @@ function reasonOrThrow(raw: unknown): string {
       { min: ANONYMIZE_REASON_MIN, max: ANONYMIZE_REASON_MAX },
     );
   }
-  if (REASON_ID_DOC.test(reason)) {
+  if (reason.includes('\u0000')) {
+    throw new ApiException(
+      HttpStatus.BAD_REQUEST,
+      'ANONYMIZE_REASON_REQUIRED',
+      'The reason must be plain text (no NUL character).',
+      { min: ANONYMIZE_REASON_MIN, max: ANONYMIZE_REASON_MAX },
+    );
+  }
+  const folded = foldReasonText(reason);
+  if (reasonLooksLikeIdDoc(folded)) {
     throw new ApiException(
       HttpStatus.BAD_REQUEST,
       'REASON_CONTAINS_ID_DOC',
       'The reason must not contain an ID document number. Describe the request (channel, date, reference) without personal data.',
     );
   }
-  // The reason is written to the immutable audit log. The log's own guard would mask an email,
-  // phone, cedula or secret in it, but a masked log line is a worse record than a refused request.
-  const { hits } = redactReason(reason);
-  if (hits.length > 0) {
+  if (REASON_PHONE.test(folded) || REASON_LONG_DIGITS.test(folded)) {
     throw new ApiException(
       HttpStatus.BAD_REQUEST,
-      hits.includes('CEDULA')
+      'REASON_CONTAINS_PERSONAL_DATA',
+      'The reason must not contain a phone number or a long number. Write dates as 2026-11-04 and give a short reference.',
+    );
+  }
+  // The reason is written to the immutable audit log. The log's own guard would mask an email,
+  // phone, cedula or secret in it, but a masked log line is a worse record than a refused request.
+  // (Checked on the text as typed AND on the folded one.)
+  const { hits } = redactReason(reason);
+  const { hits: foldedHits } = redactReason(folded);
+  const all = [...hits, ...foldedHits];
+  if (all.length > 0) {
+    throw new ApiException(
+      HttpStatus.BAD_REQUEST,
+      all.includes('CEDULA')
         ? 'REASON_CONTAINS_ID_DOC'
         : 'REASON_CONTAINS_PERSONAL_DATA',
       'The reason must not contain an email, a phone number, an ID document or a secret. Describe the request (channel, date, reference) without personal data.',
@@ -96,7 +147,7 @@ function reasonOrThrow(raw: unknown): string {
 /**
  * Story 20.6 (AD-98, FR-119..122, A82..A86, A99): "delete account" is an ANONYMIZATION of the
  * `Customers` row plus the physical deletion of everything that is only the person's (credentials,
- * sessions, address book, cart, wishlist, tokens, contact messages). Orders and every fiscal or
+ * sessions, address book, cart, wishlist, tokens). Orders and every fiscal or
  * evidential record are untouched. Table by table: `docs/deployment.md` 18.2.
  *
  * ONE transaction (`AuditService.transaction`, so the `CUSTOMER_ANONYMIZED` event is flushed as the
@@ -223,9 +274,9 @@ export class CustomerAnonymizationService {
           });
           // Story 20.7 (Usage_Logs, 7 days, customer id and IP): when that table exists, add HERE its
           // `DELETE ... WHERE "actorType" = 'CUSTOMER' AND "actorId" = customerId` (docs/deployment.md 18.2).
-          // Contact-form messages written with this email: not fiscal records, personal data.
-          const inquiries =
-            await tx.$executeRaw`DELETE FROM "Contact_Inquiries" WHERE lower("email") = lower(${oldEmail})`;
+          // `Contact_Inquiries` are NOT deleted (QA 20.6 round 2, decision of Angel: do not delete
+          // records): the 12-month retention of Story 20.8 covers them. A formal claim may be
+          // among them and there is no verified link between the form and the account.
 
           const updated = await tx.$queryRaw<{ anonymizedAt: Date }[]>`
             UPDATE "Customers"
@@ -257,7 +308,6 @@ export class CustomerAnonymizationService {
               verificationTokensDeleted: verifications.count,
               cartsDeleted: carts.count,
               wishlistsDeleted: wishlists.count,
-              contactInquiriesDeleted: inquiries,
               ordersRetained,
               consentRecordsRetained: consentsRetained,
             },

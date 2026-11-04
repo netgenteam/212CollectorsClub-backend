@@ -172,7 +172,12 @@ describe('legal seed templates (Story 19.3)', () => {
   const R =
     '[[CONFIRMAR_CHECKOUT_REQUIRE_SHIPPING_ACTIVO_PARA_CEDULA_OBLIGATORIA]]';
   const G = '[[CONFIRMAR_SEGUIMIENTO_VISIBLE_AL_CLIENTE]]';
+  // Story 20.6 (QA round 2): the immutable audit log keeps the IP of customer actions for good.
+  const IPA = '[[CONFIRMAR_CONSERVACION_IP_EN_AUDITORIA_PARA_SIEMPRE]]';
   const claims: [string, RegExp, string][] = [
+    ['privacidad', /\*\*Registro de auditoría \(inmutable\):\*\*/, IPA],
+    ['privacidad', /Registro de auditoría \(incluida la dirección IP/, IPA],
+    ['privacidad', /que no se borra ni se anonimiza/, IPA],
     ['terminos', /se guarda cifrado, se muestra enmascarado/, C],
     ['envios', /se guarda cifrada y se muestra enmascarada/, C],
     ['privacidad', /\(obligatorio para facturar y despachar/, C],

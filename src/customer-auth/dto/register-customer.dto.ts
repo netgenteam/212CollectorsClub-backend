@@ -4,6 +4,7 @@ import {
   IsEmail,
   IsInt,
   IsOptional,
+  Matches,
   Min,
   IsNotEmpty,
   IsString,
@@ -23,6 +24,11 @@ export class RegisterCustomerDto {
   @Transform(normalizeEmail)
   @IsEmail()
   @MaxLength(254)
+  // Story 20.6 (QA round 2): no zero-width, control or whitespace character anywhere (validator.js
+  // accepts a U+200B in the local part, BetterAuth does not: it was a 500).
+  @Matches(/^[^\p{Cf}\p{Cc}\p{Z}]*$/u, {
+    message: 'email must not contain invisible, control or space characters',
+  })
   // Story 20.6: `anonymized.invalid` is the reserved domain of deleted accounts.
   @IsNotAnonymizedEmailDomain()
   email: string;

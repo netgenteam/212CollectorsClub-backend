@@ -9,6 +9,10 @@ import { ApiException } from '../common/api-exception.js';
 import { isAnonymizedEmail } from '../common/anonymized-email.js';
 import { invalidCustomerTokenException } from '../common/customer-auth.guard.js';
 import {
+  lockLiveCustomer,
+  tryLockLiveCustomer,
+} from '../common/customer-write-lock.js';
+import {
   alreadyRegisteredEmail,
   DEFAULT_FRONTEND_URL,
   verificationEmail,
@@ -148,6 +152,18 @@ export class CustomerAuthService {
       });
     } catch (err) {
       if (!(await this.isDuplicateRegistration(err, dto.email))) {
+        // BetterAuth's own validation of the address (it depends on the input only, never on
+        // whether an account exists): a 400, not a 500.
+        if (
+          err instanceof APIError &&
+          String(err.body?.code ?? '').startsWith('INVALID_EMAIL')
+        ) {
+          throw new ApiException(
+            HttpStatus.BAD_REQUEST,
+            'INVALID_EMAIL',
+            'That email address is not valid.',
+          );
+        }
         throw err;
       }
       await argon2.hash(dto.password, { type: argon2.argon2id });
@@ -173,16 +189,18 @@ export class CustomerAuthService {
     try {
       // Story 20.5: the `CONSENT_RECORDED` event commits (or fails) with the evidence rows.
       // An audit failure is handled like any other failure here: the account is removed.
-      await this.audit.transaction((tx, audit) =>
-        this.consent.recordConsents(tx, {
+      await this.audit.transaction(async (tx, audit) => {
+        // Story 20.6: the same account write lock as every other write of the account.
+        await lockLiveCustomer(tx, created.user.id, 'SHARE');
+        return this.consent.recordConsents(tx, {
           context: ConsentContext.REGISTER,
           customerId: created.user.id,
           accepted,
           keys: ['terms', 'privacy'],
           age: true,
           audit,
-        }),
-      );
+        });
+      });
     } catch (err) {
       this.logger.error(
         `Consent evidence for new customer ${created.user.id} could not be written; removing the account: ${err instanceof Error ? err.message : String(err)}`,
@@ -207,9 +225,11 @@ export class CustomerAuthService {
     // a failure here never alters the 201 (AC1).
     void this.issueVerificationToken(created.user.id)
       .then((token) =>
-        this.sendBestEffort(
-          verificationEmail(dto.email, dto.name, this.frontendUrl, token),
-        ),
+        token === null
+          ? undefined
+          : this.sendBestEffort(
+              verificationEmail(dto.email, dto.name, this.frontendUrl, token),
+            ),
       )
       .catch((err: unknown) => {
         this.logger.error(
@@ -225,9 +245,14 @@ export class CustomerAuthService {
    * verification tokens (same transaction; an advisory lock serializes
    * concurrent issuers so exactly one live token remains).
    */
-  private async issueVerificationToken(customerId: string): Promise<string> {
+  private async issueVerificationToken(
+    customerId: string,
+  ): Promise<string | null> {
     const token = randomBytes(32).toString('base64url');
-    await this.prisma.$transaction(async (tx) => {
+    const issued = await this.prisma.$transaction(async (tx) => {
+      // Story 20.6: the account's row lock first; an anonymized account never gets a token (the
+      // anonymization deleted them all and a new one would outlive it).
+      if (!(await tryLockLiveCustomer(tx, customerId, 'SHARE'))) return false;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'verify:' + customerId}, 0))`;
       await tx.customerVerification.deleteMany({
         where: {
@@ -242,8 +267,9 @@ export class CustomerAuthService {
           expiresAt: new Date(Date.now() + VERIFICATION_TTL_MS),
         },
       });
+      return true;
     });
-    return token;
+    return issued ? token : null;
   }
 
   /**
@@ -270,9 +296,11 @@ export class CustomerAuthService {
     }
     void this.issueVerificationToken(customer.id)
       .then((token) =>
-        this.sendBestEffort(
-          verificationEmail(email, customer.name, this.frontendUrl, token),
-        ),
+        token === null
+          ? undefined
+          : this.sendBestEffort(
+              verificationEmail(email, customer.name, this.frontendUrl, token),
+            ),
       )
       .catch((err: unknown) => {
         this.logger.error(
@@ -310,10 +338,11 @@ export class CustomerAuthService {
    */
   async forgotPassword(email: string): Promise<void> {
     // Story 20.6: an anonymized account counts as "no account" (one lookup either way).
-    const exists = await this.prisma.customer.count({
+    const found = await this.prisma.customer.findFirst({
       where: { email, anonymizedAt: null },
+      select: { id: true },
     });
-    if (exists === 0) {
+    if (!found) {
       return;
     }
     // Background (not awaited): both branches return after the same single
@@ -324,7 +353,10 @@ export class CustomerAuthService {
         this.logger.error(
           `Password reset request failed: ${err instanceof Error ? err.message : String(err)}`,
         );
-      });
+      })
+      // BetterAuth writes the token on its own connection: if the anonymization committed in
+      // between, the token it just stored (hash + id, no PII) is removed.
+      .finally(() => this.scrubIfAnonymized(found.id));
   }
 
   /**
@@ -487,6 +519,9 @@ export class CustomerAuthService {
         .$executeRaw`DELETE FROM "Customer_Sessions" WHERE "userId" = ${customerId}::uuid
         AND EXISTS (SELECT 1 FROM "Customers" WHERE "id" = ${customerId}::uuid AND "anonymizedAt" IS NOT NULL)`;
       await this.prisma
+        .$executeRaw`DELETE FROM "Customer_Verifications" WHERE "value" = ${customerId}
+        AND EXISTS (SELECT 1 FROM "Customers" WHERE "id" = ${customerId}::uuid AND "anonymizedAt" IS NOT NULL)`;
+      await this.prisma
         .$executeRaw`DELETE FROM "Customer_Accounts" WHERE "userId" = ${customerId}::uuid
         AND EXISTS (SELECT 1 FROM "Customers" WHERE "id" = ${customerId}::uuid AND "anonymizedAt" IS NOT NULL)`;
     } catch (err) {
@@ -501,13 +536,18 @@ export class CustomerAuthService {
     dto: UpdateCustomerProfileDto,
   ): Promise<CustomerResponseDto> {
     try {
-      return await this.prisma.customer.update({
-        where: { id: customerId },
-        data: {
-          ...(dto.name !== undefined ? { name: dto.name } : {}),
-          ...(dto.phone !== undefined ? { phone: dto.phone } : {}),
-        },
-        select: PROFILE_SELECT,
+      // Story 20.6: FIRST statement = the Customers row lock; an anonymized account is 401 and
+      // keeps its placeholder name and no phone (FOR UPDATE: this transaction updates that row).
+      return await this.prisma.$transaction(async (tx) => {
+        await lockLiveCustomer(tx, customerId, 'UPDATE');
+        return tx.customer.update({
+          where: { id: customerId },
+          data: {
+            ...(dto.name !== undefined ? { name: dto.name } : {}),
+            ...(dto.phone !== undefined ? { phone: dto.phone } : {}),
+          },
+          select: PROFILE_SELECT,
+        });
       });
     } catch (err) {
       if (

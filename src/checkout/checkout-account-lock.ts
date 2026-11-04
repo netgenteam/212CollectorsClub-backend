@@ -1,6 +1,6 @@
 import { HttpStatus } from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
-import { invalidCustomerTokenException } from '../common/customer-auth.guard.js';
+import { lockLiveCustomer } from '../common/customer-write-lock.js';
 import type { Prisma } from '../generated/prisma/client.js';
 
 /**
@@ -22,17 +22,15 @@ import type { Prisma } from '../generated/prisma/client.js';
  * session (the statement errors: closed, never open) until the migration is applied; guests are
  * not affected. (`docs/deployment.md` 18.1.)
  */
-/** Runs `SELECT "anonymizedAt" ... FOR SHARE` as the first statement; 401 for a gone or anonymized account. */
+/**
+ * Runs `SELECT "anonymizedAt" ... FOR SHARE` as the first statement; 401 for a gone or anonymized
+ * account. It is the shared writer lock of every account write (`common/customer-write-lock.ts`).
+ */
 export async function lockCustomerForCheckout(
   tx: Prisma.TransactionClient,
   customerId: string,
 ): Promise<void> {
-  const rows = await tx.$queryRaw<
-    { anonymizedAt: Date | null }[]
-  >`SELECT "anonymizedAt" FROM "Customers" WHERE "id" = ${customerId}::uuid FOR SHARE`;
-  if (rows.length === 0 || rows[0].anonymizedAt !== null) {
-    throw invalidCustomerTokenException();
-  }
+  await lockLiveCustomer(tx, customerId, 'SHARE');
 }
 
 /** Story 20.4: 409 when the session of this request is not the account the storefront believes it is. */

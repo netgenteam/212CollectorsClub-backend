@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call -- supertest bodies and pg rows are untyped JSON */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return -- supertest bodies and pg rows are untyped JSON */
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, unlink, writeFile, access } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -74,6 +74,7 @@ describe(
     const emails: string[] = [];
     const productIds: string[] = [];
     const proofFiles: string[] = [];
+    const stripeEventIds: string[] = [];
     const server = () => request(base);
     const auth = () => ({ Authorization: `Bearer ${token}` });
     const ADMIN_USER = `e2e-206-${TAG}`;
@@ -450,6 +451,9 @@ describe(
       await prisma.customer
         .deleteMany({ where: { id: { in: ids } } })
         .catch(() => undefined);
+      await prisma.stripeWebhookEvent
+        .deleteMany({ where: { eventId: { in: stripeEventIds } } })
+        .catch(() => undefined);
       await prisma.contactInquiry
         .deleteMany({ where: { message: { contains: TAG } } })
         .catch(() => undefined);
@@ -522,6 +526,28 @@ describe(
             [c.id],
           ),
         ).rejects.toThrow(/final/);
+        // QA round 2: the personal columns of an anonymized row are final too (trigger), even for the
+        // owner/app role; the SAME value, "updatedAt" and the FK's SET NULL are not blocked
+        for (const set of [
+          `"email" = 'real@example.com'`,
+          `"name" = 'Nombre Real'`,
+          `"phone" = '04121234567'`,
+          `"image" = 'https://example.com/a.png'`,
+          `"emailVerified" = true`,
+        ]) {
+          await expect(
+            sql(`UPDATE "Customers" SET ${set} WHERE "id" = $1::uuid`, [c.id]),
+            set,
+          ).rejects.toThrow(/anonymized/);
+        }
+        await sql(
+          `UPDATE "Customers" SET "name" = "name", "email" = "email", "updatedAt" = now() WHERE "id" = $1::uuid`,
+          [c.id],
+        );
+        expect(
+          (await prisma.customer.findUniqueOrThrow({ where: { id: c.id } }))
+            .name,
+        ).toBe('Cuenta eliminada');
         // deleting the admin only clears the pointer (SET NULL), the date stays
         const a2 = await prisma.adminUser.create({
           data: {
@@ -619,6 +645,29 @@ describe(
           ['x'.repeat(501), 'ANONYMIZE_REASON_REQUIRED'],
           [`pidio la cedula ${CED_A} por correo`, 'REASON_CONTAINS_ID_DOC'],
           ['pidio v91234567 por correo electronico', 'REASON_CONTAINS_ID_DOC'],
+          // QA round 2: separators, prefixes, full-width letters and Unicode dashes
+          ['pidio V  91234567 por telefono ok', 'REASON_CONTAINS_ID_DOC'],
+          ['pidio CI 91234567 por telefono ok', 'REASON_CONTAINS_ID_DOC'],
+          ['pidio C.I. 91234567 por correo ok', 'REASON_CONTAINS_ID_DOC'],
+          ['pidio \uFF36 91234567 por correo ok', 'REASON_CONTAINS_ID_DOC'],
+          ['pidio V\u2010 91234567 por correo ok', 'REASON_CONTAINS_ID_DOC'],
+          ['pidio V\u200B91234567 por correo ok', 'REASON_CONTAINS_ID_DOC'],
+          ['pidio V\u2212 91234567 por correo ok', 'REASON_CONTAINS_ID_DOC'],
+          ['pidio J-312345678-5 por correo ok', 'REASON_CONTAINS_ID_DOC'],
+          [
+            'llamo al 4121234567 pidiendo borrar',
+            'REASON_CONTAINS_PERSONAL_DATA',
+          ],
+          [
+            'llamo al 412-123-4567 pidiendo borrar',
+            'REASON_CONTAINS_PERSONAL_DATA',
+          ],
+          ['llamo al 0412 123 4567 pidiendo', 'REASON_CONTAINS_PERSONAL_DATA'],
+          [
+            'solicitud numero 91234567 por correo',
+            'REASON_CONTAINS_PERSONAL_DATA',
+          ],
+          ['solicitud con NUL \u0000 en el texto', 'ANONYMIZE_REASON_REQUIRED'],
           [
             `escribio ${c.email} pidiendo borrar`,
             'REASON_CONTAINS_PERSONAL_DATA',
@@ -879,12 +928,13 @@ describe(
             where: { id: s.unrelatedVerification.id },
           }),
         ).toBe(1);
-        // contact messages written with this email (any case) are gone; someone else's stay
+        // contact messages are NOT deleted (QA round 2: a formal claim may be among them; the 12-month
+        // retention of Story 20.8 covers them): both of this email (any case) and the other one stay
         expect(
           await prisma.contactInquiry.count({
             where: { email: { equals: s.email, mode: 'insensitive' } },
           }),
-        ).toBe(0);
+        ).toBe(2);
         expect(
           await prisma.contactInquiry.count({
             where: { id: s.otherInquiry.id },
@@ -955,7 +1005,6 @@ describe(
           verificationTokensDeleted: tokensBefore,
           cartsDeleted: 1,
           wishlistsDeleted: 1,
-          contactInquiriesDeleted: 2,
           ordersRetained: 5,
           consentRecordsRetained: expect.any(Number),
         });
@@ -1587,6 +1636,16 @@ describe(
         await search({ q: 'a' }).expect(400); // shorter than 2
         await search({ surprise: 1 }).expect(400); // strict body
         await search({ q: 7 }).expect(400);
+        // a NUL byte cannot be stored or compared: 400, never 500 (QA round 2)
+        for (const body of [
+          { q: 'ab\u0000cd' },
+          { q: '\u0000\u0000' },
+          { idDoc: 'V-9123\u00004567' },
+          { cursor: 'ab\u0000' },
+        ]) {
+          const r = await search(body);
+          expect(r.status, JSON.stringify(body)).toBe(400);
+        }
       });
 
       it('GET /admin/customers: only `cursor` is accepted; any cedula key or cedula-shaped value is 400 ID_DOC_IN_URL_NOT_ALLOWED without being echoed; the same on POST ...?idDoc=', async () => {
@@ -1695,6 +1754,13 @@ describe(
           [a.id, b.id, cNone.id].sort(),
         );
         expect(ids(await search({ q: 'cliente findme-bet' }))).toEqual([b.id]);
+        // `q` is text, not a LIKE pattern (QA round 2): % and _ and \ match themselves only
+        expect(ids(await search({ q: '%%' }))).toEqual([]);
+        expect(ids(await search({ q: '__' }))).toEqual([]);
+        expect(ids(await search({ q: `${TAG}%findme` }))).toEqual([]);
+        expect(ids(await search({ q: `${TAG}-findme%` }))).toEqual([]);
+        expect(ids(await search({ q: `${TAG}-findm_-alpha` }))).toEqual([]);
+        expect(ids(await search({ q: `${TAG}\\` }))).toEqual([]);
         // exact cedula: recipient of an order, buyer of an order, saved address (several spellings)
         expect(ids(await search({ idDoc: `V-${NUM_A}` }))).toEqual([a.id]);
         expect(ids(await search({ idDoc: `v${NUM_A}` }))).toEqual([a.id]);
@@ -1794,6 +1860,63 @@ describe(
         }
       });
 
+      it('the preview warns of a pending refund even when the order is PAYMENT_FAILED (refund_pending_after_terminal); it stays after the anonymization', async () => {
+        const c = await mkCustomer('refund');
+        const oid = await mkOrder(c.id, 'PAYMENT_FAILED');
+        const clean = await mkCustomer('norefund');
+        await mkOrder(clean.id, 'PAYMENT_FAILED');
+        const evId = `evt_e2e206_${TAG}`;
+        stripeEventIds.push(evId);
+        await prisma.stripeWebhookEvent.create({
+          data: {
+            eventId: evId,
+            type: 'checkout.session.completed',
+            orderId: oid,
+            outcome: 'refund_pending_after_terminal',
+          },
+        });
+        const detail = async (id: string): Promise<Record<string, any>> =>
+          (
+            await server()
+              .get(`${BASE}/admin/customers/${id}`)
+              .set(auth())
+              .expect(200)
+          ).body.anonymization;
+        const d = await detail(c.id);
+        expect(d.willKeep.ordersWithRefundPending).toBe(1);
+        expect(d.notices).toContain('REFUND_PENDING_ON_KEPT_ORDERS');
+        expect(d.canAnonymize).toBe(true); // PAYMENT_FAILED is final: it does not block
+        const n = await detail(clean.id);
+        expect(n.willKeep.ordersWithRefundPending).toBe(0);
+        expect(n.notices).not.toContain('REFUND_PENDING_ON_KEPT_ORDERS');
+        await anonymize(c.id, {
+          confirmEmail: c.email,
+          reason: GOOD_REASON,
+        }).expect(200);
+        const after = await detail(c.id);
+        expect(after.willKeep.ordersWithRefundPending).toBe(1);
+        expect(after.notices).toContain('REFUND_PENDING_ON_KEPT_ORDERS');
+      });
+
+      it('register with an invisible character in the email is 400, never 500', async () => {
+        for (const email of [
+          `zw\u200B-${TAG}@212collectorsclub.test`,
+          `zw-${TAG}\u2060@212collectorsclub.test`,
+          `zw-${TAG}\uFEFF@212collectorsclub.test`,
+          `zw-${TAG}@212collectorsclub\u200D.test`,
+        ]) {
+          const r = await server()
+            .post(`${BASE}/auth/register`)
+            .send({
+              ...registerConsent(),
+              email,
+              password: CPASS,
+              name: 'Invisible',
+            });
+          expect(r.status, JSON.stringify(email)).toBe(400);
+        }
+      });
+
       it('detail: data, addresses with the cedula MASKED (never in clear anywhere), last orders, anonymizedAt and the preview numbers; 404 / 400 / 401', async () => {
         const c = await mkCustomer('detail');
         const s = await seed(c, { active: true });
@@ -1844,13 +1967,18 @@ describe(
             verificationTokens: tokens,
             carts: 1,
             wishlists: 1,
-            contactInquiries: 2,
           },
-          willKeep: { orders: 6, consentRecords: expect.any(Number) },
+          willKeep: {
+            orders: 6,
+            consentRecords: expect.any(Number),
+            contactInquiries: 2,
+            ordersWithRefundPending: 0,
+          },
           notices: expect.arrayContaining([
             'NOT_RECOMMENDED_ONLY_ON_EXPLICIT_REQUEST_OF_THE_OWNER',
             'IRREVERSIBLE',
             'ORDERS_AND_FISCAL_ID_KEPT',
+            'CONTACT_MESSAGES_KEPT_UNTIL_RETENTION',
             'BROWSER_LOCAL_STORAGE_NOT_ERASED',
             'BACKUPS_KEEP_DATA_UNTIL_ROTATION',
           ]),
@@ -1894,7 +2022,6 @@ describe(
           verificationTokens: 0,
           carts: 0,
           wishlists: 0,
-          contactInquiries: 0,
         });
         await server()
           .get(`${BASE}/admin/customers/${randomUUID()}`)

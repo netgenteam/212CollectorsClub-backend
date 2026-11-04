@@ -108,7 +108,6 @@ const SAMPLES: Record<AuditAction, AuditPayload[]> = {
       verificationTokensDeleted: 0,
       cartsDeleted: 1,
       wishlistsDeleted: 1,
-      contactInquiriesDeleted: 2,
       ordersRetained: 500,
       consentRecordsRetained: 3,
     },

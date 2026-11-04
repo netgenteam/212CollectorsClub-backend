@@ -58,11 +58,6 @@ export class AnonymizationWillDeleteDto {
   verificationTokens: number;
   @ApiProperty() carts: number;
   @ApiProperty() wishlists: number;
-  @ApiProperty({
-    description:
-      'Contact-form messages written with the same email (deleted too: they are not fiscal records).',
-  })
-  contactInquiries: number;
 }
 
 export class AnonymizationWillKeepDto {
@@ -73,6 +68,16 @@ export class AnonymizationWillKeepDto {
   orders: number;
   @ApiProperty({ description: 'Consent evidence (append-only).' })
   consentRecords: number;
+  @ApiProperty({
+    description:
+      'Contact-form messages written with the same email. NOT deleted by the anonymization (a formal claim may be among them): the 12-month retention of Story 20.8 covers them.',
+  })
+  contactInquiries: number;
+  @ApiProperty({
+    description:
+      'Orders of this account (any status, kept) with a pending refund (Stripe `refund_pending_*`): the money is still owed after the anonymization.',
+  })
+  ordersWithRefundPending: number;
 }
 
 export class AnonymizationPreviewDto {
@@ -93,7 +98,7 @@ export class AnonymizationPreviewDto {
   @ApiProperty({
     type: [String],
     description:
-      'Codes of the permanent warnings the modal shows BEFORE any field: NOT_RECOMMENDED_ONLY_ON_EXPLICIT_REQUEST_OF_THE_OWNER, IRREVERSIBLE, ORDERS_AND_FISCAL_ID_KEPT, BROWSER_LOCAL_STORAGE_NOT_ERASED, BACKUPS_KEEP_DATA_UNTIL_ROTATION.',
+      'Codes of the permanent warnings the modal shows BEFORE any field: NOT_RECOMMENDED_ONLY_ON_EXPLICIT_REQUEST_OF_THE_OWNER, IRREVERSIBLE, ORDERS_AND_FISCAL_ID_KEPT, REFUND_PENDING_ON_KEPT_ORDERS (only when an order of the account has a pending refund), CONTACT_MESSAGES_KEPT_UNTIL_RETENTION (only when contact messages exist for the email), BROWSER_LOCAL_STORAGE_NOT_ERASED, BACKUPS_KEEP_DATA_UNTIL_ROTATION.',
   })
   notices: string[];
 }

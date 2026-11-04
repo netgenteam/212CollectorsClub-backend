@@ -159,6 +159,24 @@ describe('CustomerAnonymizationService (unit; the real locks are in test/custome
     ['pidió el titular, j123456789 por correo', 'REASON_CONTAINS_ID_DOC'],
     ['lo pidió ana@example.com por correo', 'REASON_CONTAINS_PERSONAL_DATA'],
     ['llamó desde +58 412 555 1234 pidiendo', 'REASON_CONTAINS_PERSONAL_DATA'],
+    // QA round 2: separators, prefixes, full-width letters, Unicode dashes, zero-width characters
+    ['pidió el titular, V  12345678 ok', 'REASON_CONTAINS_ID_DOC'],
+    ['pidió el titular, CI 12345678 ok', 'REASON_CONTAINS_ID_DOC'],
+    ['pidió el titular, C.I. 12345678 ok', 'REASON_CONTAINS_ID_DOC'],
+    ['pidió el titular, \uFF36 12345678 ok', 'REASON_CONTAINS_ID_DOC'],
+    ['pidió el titular, \uFF36\uFF11\uFF12345678 ok', 'REASON_CONTAINS_ID_DOC'],
+    ['pidió el titular, V\u2010 12345678 ok', 'REASON_CONTAINS_ID_DOC'],
+    ['pidió el titular, V\u2011\u2011 12345678', 'REASON_CONTAINS_ID_DOC'],
+    ['pidió el titular, V\u200B12345678 ok', 'REASON_CONTAINS_ID_DOC'],
+    ['pidió el titular, V\u00A0\u00A012345678', 'REASON_CONTAINS_ID_DOC'],
+    ['pidió el titular, J-312345678-5 ok', 'REASON_CONTAINS_ID_DOC'],
+    ['pidió el titular, 12.345.678 ok', 'REASON_CONTAINS_ID_DOC'],
+    ['llamó al 4121234567 pidiendo borrar', 'REASON_CONTAINS_PERSONAL_DATA'],
+    ['llamó al 412-123-4567 pidiendo', 'REASON_CONTAINS_PERSONAL_DATA'],
+    ['llamó al 0412 123 4567 pidiendo', 'REASON_CONTAINS_PERSONAL_DATA'],
+    ['llamó al ０４１２１２３４５６７ ok', 'REASON_CONTAINS_PERSONAL_DATA'],
+    ['solicitud número 12345678 por correo', 'REASON_CONTAINS_PERSONAL_DATA'],
+    ['texto con NUL \u0000 dentro', 'ANONYMIZE_REASON_REQUIRED'],
   ])('reason %j -> 400 %s', async (reason, errorCode) => {
     expect(await code(run({ confirmEmail: EMAIL, reason }))).toMatchObject({
       status: 400,
@@ -166,6 +184,22 @@ describe('CustomerAnonymizationService (unit; the real locks are in test/custome
     });
     expect(calls).toEqual(['lock']);
     expect(audit.events).toHaveLength(0);
+  });
+
+  it.each([
+    'Solicitud del titular por WhatsApp, ref t1234567, 2026-11-04',
+    'Pedido por correo el 2026-11-04, ticket T-45, atendido por soporte',
+    'El titular lo pidió en la tienda; ref interna 4521',
+    'Solicitud ref ORD-2026-11-04 recibida por el formulario de contacto',
+  ])('a plain description is accepted: %j', async (reason) => {
+    await run({ confirmEmail: EMAIL, reason });
+    expect(audit.events).toHaveLength(1);
+  });
+
+  it('never deletes contact messages (Story 20.8 retention covers them) nor counts them in the event', async () => {
+    await run({ confirmEmail: EMAIL, reason: GOOD });
+    expect(calls).not.toContain('inquiries');
+    expect(audit.events[0].after).not.toHaveProperty('contactInquiriesDeleted');
   });
 
   it('exactly 10 and exactly 500 characters are accepted (counted in code points)', async () => {
