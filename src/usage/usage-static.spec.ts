@@ -110,7 +110,12 @@ describe('Usage_Logs stays where it belongs (Story 20.7)', () => {
       const all = readdirSync(join(ROOT, 'prisma', 'migrations'))
         .filter((d) => /^\d{14}_/.test(d))
         .sort();
-      expect(all[all.length - 1]).toBe(dir);
+      // later than the last migration that existed when this story was written (Story 20.8's
+      // `20261111100000_retention_job` comes after it, on purpose)
+      expect(dir > '20261109100000_customer_anonymized_pii_is_final').toBe(
+        true,
+      );
+      expect(all[all.length - 1] >= dir).toBe(true);
       expect(sql.split('\n')[0]).toBe('BEGIN;');
       expect(sql.trimEnd().endsWith('COMMIT;')).toBe(true);
     });

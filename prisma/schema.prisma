@@ -351,6 +351,8 @@ model Cart {
 
   items CartItem[]
 
+  /// Story 20.8: the purge of expired anonymous carts (`customerId IS NULL AND expiresAt < ...`) reads it.
+  @@index([expiresAt])
   @@map("Carts")
 }
 
@@ -412,6 +414,8 @@ model ContactInquiry {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// Story 20.8: the 12-month purge reads it.
+  @@index([createdAt])
   @@map("Contact_Inquiries")
 }
 
@@ -836,6 +840,8 @@ model AdminSession {
   user AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  /// Story 20.8: the purge of expired sessions reads it.
+  @@index([expiresAt])
   @@map("Admin_Sessions")
 }
 
@@ -887,6 +893,8 @@ model RevokedToken {
   expiresAt DateTime
   revokedAt DateTime @default(now())
 
+  /// Story 20.8: the purge of expired rows reads it.
+  @@index([expiresAt])
   @@map("Revoked_Tokens")
 }
 
@@ -1038,6 +1046,8 @@ model Wishlist {
 
   items WishlistItem[]
 
+  /// Story 20.8: the purge of expired anonymous wishlists reads it.
+  @@index([expiresAt])
   @@map("Wishlists")
 }
 
@@ -1109,6 +1119,8 @@ model CustomerSession {
   user Customer @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  /// Story 20.8: the purge of expired sessions reads it.
+  @@index([expiresAt])
   @@map("Customer_Sessions")
 }
 
@@ -1147,6 +1159,8 @@ model CustomerVerification {
   updatedAt  DateTime @updatedAt
 
   @@index([identifier])
+  /// Story 20.8: the purge of expired verification / reset links reads it.
+  @@index([expiresAt])
   @@map("Customer_Verifications")
 }
 
@@ -1626,7 +1640,17 @@ model RetentionRun {
   status        String     @db.VarChar(16)
   /// [{ name, rows, durationMs, truncated, error? }]
   tasks         Json       @default("[]")
+  /// Story 20.8: the clock the run used for every cut-off: the database clock, never further than
+  /// `RETENTION_MAX_CLOCK_ADVANCE_HOURS` past the previous run's (a clock that jumps forward does not
+  /// bring the purge forward). Null for a run that never got that far.
+  effectiveNow  DateTime?  @db.Timestamptz(3)
+  /// Story 20.8: when `RETENTION_PURGE_RUN` was written (null: not written yet, the next run writes it).
+  auditedAt     DateTime?  @db.Timestamptz(3)
+  /// Story 20.8: a short code of what went wrong at run level (never a message that could carry data).
+  errorSummary  String?    @db.VarChar(200)
 
+  /// NOT MODELED BY PRISMA: partial unique index "Retention_Runs_one_running_key" ON ("status") WHERE
+  /// "status" = 'RUNNING' (hand-written in migration 20261111100000: a second RUNNING row cannot exist).
   @@index([startedAt])
   @@map("Retention_Runs")
 }

@@ -197,6 +197,30 @@ const WRITERS: Record<string, Entry> = {
     mustContain:
       /FROM "Customers" WHERE "id" = \$\{customerId\}::uuid FOR UPDATE/,
   },
+  // Story 20.8: the retention job. None of these takes the Customers row lock, and each one is justified
+  // here (every statement picks its rows with FOR UPDATE SKIP LOCKED, so it never waits for a row an account's
+  // own transaction holds, and none of them writes anything that belongs to a LIVE account):
+  //  - anonymous carts and wishlists: only `"customerId" IS NULL` rows past `expiresAt` (a row an account
+  //    claimed no longer matches and is left alone);
+  //  - expired sessions / their IP and user agent: only sessions whose `expiresAt` already passed (nothing
+  //    can use them; the anonymization deletes all of an account's sessions anyway);
+  //  - expired verification / reset links: only rows whose `expiresAt` passed.
+  'retention/tasks/anonymous-baskets.tasks.ts': {
+    exempt: 'only anonymous (customerId IS NULL) baskets past expiresAt',
+    mustContain: /"customerId" IS NULL AND "expiresAt" </,
+  },
+  'retention/tasks/sessions-expired.task.ts': {
+    exempt: 'only sessions whose expiresAt passed more than 7 days ago',
+    mustContain: /"expiresAt" </,
+  },
+  'retention/tasks/session-pii.task.ts': {
+    exempt: 'only EXPIRED sessions (a live one is never touched)',
+    mustContain: /"expiresAt" < /,
+  },
+  'retention/tasks/expired-tokens.tasks.ts': {
+    exempt: 'only links whose expiresAt already passed',
+    mustContain: /"expiresAt" </,
+  },
   // Helper that only deletes what it can prove belongs to an ANONYMIZED account (EXISTS ...) is in
   // customer-auth.service.ts (counted above).
 };

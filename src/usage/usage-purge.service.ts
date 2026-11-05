@@ -1,9 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { Inject } from '@nestjs/common';
 import { isLockWaitExpired } from '../common/lock-timeout.js';
 import { RequestContext } from '../common/request-context.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { isRetentionEnabled } from '../retention/retention-config.js';
 import type { UsageLogConfig } from './usage-config.js';
 import { USAGE_LOG_CONFIG } from './usage-log.types.js';
 
@@ -26,6 +28,12 @@ const CRON_ENV = (process.env.USAGE_LOG_PURGE_CRON ?? '').trim();
 /** `off` disables it; the placeholder expression only keeps the decorator valid. */
 const CRON_OFF = CRON_ENV.toLowerCase() === 'off';
 const CRON_EXPRESSION = CRON_ENV === '' || CRON_OFF ? '0 15 4 * * *' : CRON_ENV;
+/**
+ * Story 20.8: this service no longer purges on its own unless `USAGE_LOG_PURGE_CRON` is set to a cron
+ * expression: the retention job (`RetentionService`) runs `purgeExpired()` as its `usage_logs` task, and a
+ * development server must not delete anything by default.
+ */
+const OWN_SCHEDULE = CRON_ENV !== '' && !CRON_OFF;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -42,8 +50,10 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  *   - a transaction-level advisory lock per batch, so two instances never purge at the same time;
  *   - idempotent: running it twice leaves the same table.
  *
- * Story 20.8's `RetentionService` calls `purgeExpired()` as its `usage_logs` task and the cron here is
- * switched off with `USAGE_LOG_PURGE_CRON=off`.
+ * Story 20.8: `RetentionService` calls `purgeExpired()` as its `usage_logs` task (with the run's clock and
+ * stop condition). The cron below is therefore OFF unless `USAGE_LOG_PURGE_CRON` holds a cron expression,
+ * and even then it does not run while the retention job is enabled (`RETENTION_PURGE_ENABLED`, default only
+ * in production): the job owns the purge, and two schedulers would only fight over the same rows.
  */
 @Injectable()
 export class UsageLogPurgeService {
@@ -53,15 +63,19 @@ export class UsageLogPurgeService {
   constructor(
     private readonly prisma: PrismaService,
     @Inject(USAGE_LOG_CONFIG) private readonly cfg: UsageLogConfig,
+    private readonly config: ConfigService,
   ) {}
 
-  /** 04:15 UTC (after the TCG and FX jobs, before Story 20.8's 04:30 run). `USAGE_LOG_PURGE_CRON=off` disables it. */
+  /** Only when `USAGE_LOG_PURGE_CRON` is a cron expression (e.g. `0 15 4 * * *`, UTC) and the retention job is not enabled. */
   @Cron(CRON_EXPRESSION, {
     name: 'usage-log-purge',
     timeZone: 'UTC',
-    disabled: CRON_OFF || process.env.NODE_ENV === 'test',
+    disabled: !OWN_SCHEDULE || process.env.NODE_ENV === 'test',
   })
   async scheduled(): Promise<void> {
+    // Story 20.8: the retention job runs this purge as its `usage_logs` task.
+    if (!OWN_SCHEDULE || isRetentionEnabled((k) => this.config.get<string>(k)))
+      return;
     await RequestContext.detached(async () => {
       try {
         const r = await this.purgeExpired();
@@ -82,12 +96,18 @@ export class UsageLogPurgeService {
       batch?: number;
       pauseMs?: number;
       maxRunMs?: number;
+      /** Story 20.8: the instant the period is counted back from (default: the database's `now()`). */
+      asOf?: Date;
+      /** Story 20.8: asked before every batch; true ends the purge `truncated`. */
+      shouldStop?: () => boolean;
     } = {},
   ): Promise<UsagePurgeResult> {
     const days = opts.days ?? this.cfg.purgeDays;
     const batch = opts.batch ?? PURGE_BATCH;
     const pause = opts.pauseMs ?? PURGE_PAUSE_MS;
     const maxRun = opts.maxRunMs ?? PURGE_MAX_RUN_MS;
+    // A parameter, never string-built; null = the database clock (the 20.7 behaviour).
+    const asOfIso = opts.asOf ? opts.asOf.toISOString() : null;
     if (this.running)
       return { rows: 0, batches: 0, durationMs: 0, truncated: false };
     this.running = true;
@@ -96,7 +116,7 @@ export class UsageLogPurgeService {
     let batches = 0;
     try {
       for (;;) {
-        if (Date.now() - t0 > maxRun) {
+        if (Date.now() - t0 > maxRun || opts.shouldStop?.()) {
           return {
             rows,
             batches,
@@ -118,7 +138,7 @@ export class UsageLogPurgeService {
               return tx.$executeRaw`
                 DELETE FROM "Usage_Logs"
                  WHERE "id" IN (SELECT "id" FROM "Usage_Logs"
-                                 WHERE "ts" < now() - make_interval(days => ${days}::int)
+                                 WHERE "ts" < coalesce(${asOfIso}::timestamptz, now()) - make_interval(days => ${days}::int)
                                  ORDER BY "ts" LIMIT ${batch}::int)`;
             },
             { maxWait: 2_000, timeout: 30_000 },

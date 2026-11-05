@@ -134,11 +134,25 @@ export class ProductSignalsService {
     now: Date = new Date(),
     batchSize: number = PURGE_BATCH,
   ): Promise<number> {
+    return (await this.purgeOldStatsBounded(now, batchSize)).rows;
+  }
+
+  /**
+   * Story 20.8: the SAME purge (this is the only place that deletes `Product_Daily_Stats`), with the
+   * limits the retention job needs: `shouldStop` is asked before every batch (time budget, lost lock)
+   * and `pauseMs` is waited between batches. `truncated` is true when it stopped with rows left.
+   */
+  async purgeOldStatsBounded(
+    now: Date = new Date(),
+    batchSize: number = PURGE_BATCH,
+    limits: { shouldStop?: () => boolean; pauseMs?: number } = {},
+  ): Promise<{ rows: number; truncated: boolean }> {
     const cutoff = new Date(`${utcDay(now)}T00:00:00.000Z`);
     cutoff.setUTCDate(cutoff.getUTCDate() - STATS_RETENTION_DAYS);
     const cutoffDay = utcDay(cutoff);
     let total = 0;
     for (;;) {
+      if (limits.shouldStop?.()) return { rows: total, truncated: true };
       const n = await this.prisma.$executeRaw(Prisma.sql`
         DELETE FROM "Product_Daily_Stats"
         WHERE ctid IN (
@@ -148,7 +162,9 @@ export class ProductSignalsService {
         )
       `);
       total += n;
-      if (n < batchSize) return total;
+      if (n < batchSize) return { rows: total, truncated: false };
+      if (limits.pauseMs)
+        await new Promise((r) => setTimeout(r, limits.pauseMs));
     }
   }
 
