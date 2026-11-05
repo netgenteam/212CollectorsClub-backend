@@ -280,11 +280,17 @@ describe('Legal admin API (e2e, Story 19.2)', () => {
         '## A\n\n[[RAZON_SOCIAL]] y [[RIF]]',
       );
       try {
+        // The revision a new draft gets depends on the database's state (`draftRevisionFloor` rises with every
+        // draft ever deleted, and the seed creates the six drafts): read it, never assume it is 1.
+        const [{ revision }] = await sql(
+          `SELECT "revision" FROM "Legal_Drafts" WHERE "documentId" = $1::uuid`,
+          [real.id],
+        );
         const after = (await get('').expect(200)).body as typeof list;
         const aviso = after.find((d) => d.slug === 'aviso-legal');
         expect(aviso).toMatchObject({
           hasDraft: true,
-          draftRevision: 1,
+          draftRevision: revision as number,
           pendingPlaceholders: 2,
         });
         expect(after.filter((d) => d.slug !== 'aviso-legal')).toEqual(

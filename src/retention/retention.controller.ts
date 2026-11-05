@@ -182,7 +182,6 @@ export class RetentionController {
       maxRunMs: c.maxRunMs,
       safetyMarginMinutes: SAFETY_MARGIN_MS / 60_000,
       maxClockAdvanceHours: c.maxClockAdvanceHours,
-      clockResync: c.clockResync,
       periods: {
         sessionPiiDays: c.sessionPiiDays,
         expiredSessionDays: EXPIRED_SESSION_GRACE_DAYS,

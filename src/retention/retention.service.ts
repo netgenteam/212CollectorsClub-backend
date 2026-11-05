@@ -16,6 +16,7 @@ import {
   RETENTION_MONOTONIC,
 } from './retention-clock.js';
 import type { ClockAnchor, MonotonicSource } from './retention-clock.js';
+import { LEGACY_RESYNC_MESSAGE, legacyResyncSet } from './retention-config.js';
 import type { RetentionConfig } from './retention-config.js';
 import { RetentionSessionLock } from './retention-lock.js';
 import { RETENTION_ADVISORY_KEY, RETENTION_CONFIG } from './retention.types.js';
@@ -130,8 +131,6 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
   private readonly tasks: RetentionTask[];
   private inflight: Promise<RunSummary> | null = null;
   private stopping = false;
-  /** `RETENTION_CLOCK_RESYNC` is honoured once per process (see `retention-clock.ts`). */
-  private resyncUsed = false;
   private readonly monotonic: MonotonicSource;
 
   constructor(
@@ -193,7 +192,16 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
    */
   onModuleInit(): void {
     const production = process.env.NODE_ENV === 'production';
+    if (legacyResyncSet((k) => this.config.get<string>(k))) {
+      this.logger.warn(LEGACY_RESYNC_MESSAGE);
+    }
     if (!this.cfg.enabled) {
+      if (production) {
+        this.logger.warn(
+          'RETENTION_PURGE_ENABLED=false in production: the retention job is OFF, nothing is purged and the usage log (IP and user agent of every visitor, promised to be deleted after 7 days) is kept without limit until it is enabled',
+        );
+        return;
+      }
       this.logger.log(
         'retention job is DISABLED (RETENTION_PURGE_ENABLED, or NODE_ENV is not production): nothing is purged, the usage log included',
       );
@@ -264,6 +272,7 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
 
     let runId: string;
     let asOf: Date;
+    let now: Date;
     let clamped: boolean;
     let skewMs: number;
     try {
@@ -279,9 +288,9 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
         previous,
         current: anchor,
         maxAdvanceHours: this.cfg.maxClockAdvanceHours,
-        resync: this.cfg.clockResync && !this.resyncUsed,
       });
       asOf = clock.asOf;
+      now = dbNow;
       clamped = clock.clamped;
       this.reportClock(clock, dbNow);
       const row = await this.prisma.retentionRun.create({
@@ -309,6 +318,7 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
       trigger,
       adminId,
       asOf,
+      dbNow: now,
       clamped,
       skewMs,
       lock,
@@ -357,24 +367,19 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
     };
   }
 
-  /** WARN every time the clock was capped or resynchronised, with the lag, so it is never silent. */
+  /** WARN every time the clock was capped, with the lag and how long it takes to close, so it is never silent. */
   private reportClock(
     clock: ReturnType<typeof effectiveClock>,
     dbNow: Date,
   ): void {
+    if (!clock.clamped) return;
     const lagH = (clock.lagMs / 3_600_000).toFixed(1);
-    if (clock.basis === 'resync') {
-      this.resyncUsed = true;
-      this.logger.warn(
-        `retention clock RESYNCHRONISED to the database clock (${dbNow.toISOString()}) because RETENTION_CLOCK_RESYNC=true; remove that variable now`,
-      );
-    } else if (clock.clamped) {
-      this.logger.warn(
-        `retention clock capped (clockClamped=true): the database clock is ${lagH} h ahead of what the time elapsed since the previous run allows ` +
-          `(${clock.basis === 'verified' ? 'elapsed time measured with the host uptime counter' : 'elapsed time not verifiable: other boot, other machine or no anchor, advance limited to RETENTION_MAX_CLOCK_ADVANCE_HOURS'}); ` +
-          `purging as of ${clock.asOf.toISOString()}. If the machine really was down that long, set RETENTION_CLOCK_RESYNC=true and restart once (docs/deployment.md 20.5)`,
-      );
-    }
+    this.logger.warn(
+      `retention clock capped (clockClamped=true): the database clock (${dbNow.toISOString()}) is ${lagH} h ahead of what the time elapsed since the previous run allows ` +
+        `(${clock.basis === 'verified' ? 'elapsed time measured with the host uptime counter' : 'elapsed time not verifiable: other boot, other machine or no anchor, only the current uptime is credited'}); ` +
+        `purging as of ${clock.asOf.toISOString()}. The lag closes by itself at the pace of the real time (about ${lagH} h from now); ` +
+        `the usage log is purged by the database clock regardless (docs/deployment.md 20.5)`,
+    );
   }
 
   /** `RUNNING` rows left by a dead run -> `FAILED` (AC6 asks for 30 minutes; holding the lock proves death sooner). */
@@ -396,6 +401,7 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
     trigger: RetentionTrigger;
     adminId: string | null;
     asOf: Date;
+    dbNow: Date;
     clamped: boolean;
     skewMs: number;
     lock: RetentionSessionLock;
@@ -420,6 +426,7 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
           runId: p.runId,
           cfg: this.cfg,
           asOf: p.asOf,
+          dbNow: p.dbNow,
           shouldStop: () =>
             Date.now() >= deadline || p.lock.lost() || this.stopping,
           pause: () => sleep(this.cfg.batchPauseMs),

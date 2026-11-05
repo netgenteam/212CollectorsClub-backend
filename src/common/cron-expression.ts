@@ -1,4 +1,5 @@
 import { CronTime } from 'cron';
+import { safeSample } from './safe-sample.js';
 
 /** A cron setting that cannot be used. The message always names the variable. */
 export class CronConfigError extends Error {}
@@ -19,7 +20,7 @@ export function assertCronExpression(name: string, value: string): string {
     return expr;
   } catch {
     throw new CronConfigError(
-      `${name} is not a valid cron expression (5 or 6 fields, e.g. "30 4 * * *"; got ${JSON.stringify(expr.slice(0, 60))}).`,
+      `${name} is not a valid cron expression (5 or 6 fields, e.g. "30 4 * * *"; got ${safeSample(name, expr)}).`,
     );
   }
 }

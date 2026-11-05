@@ -1,3 +1,4 @@
+import { safeSample } from '../common/safe-sample.js';
 import {
   assertCronExpression,
   CronConfigError,
@@ -13,8 +14,10 @@ import {
  * The bounds that are NOT in the story's text and why:
  *  - `PURGE_SESSION_PII_DAYS` also has a MAXIMUM of 90: the published Privacy Policy says 90 days, so a
  *    longer period would make the text untrue.
- *  - `RETENTION_MAX_CLOCK_ADVANCE_HOURS` (see `retention-clock.ts`): the most a run may advance its
- *    notion of "now" past the previous run's.
+ *  - `RETENTION_MAX_CLOCK_ADVANCE_HOURS` (see `retention-clock.ts`): the most a run may add on top of the
+ *    real elapsed time, both to recover a lag and as credit for an elapsed time that cannot be verified.
+ *  - `RETENTION_CLOCK_RESYNC` no longer exists (the lag recovers by itself); a leftover value is only warned about
+ *    (`LEGACY_RESYNC_MESSAGE`).
  */
 export interface RetentionConfig {
   /** Whether the daily cron AND the manual run are allowed to purge (see `isRetentionEnabled`). */
@@ -37,13 +40,20 @@ export interface RetentionConfig {
   expiredTokenDays: number;
   /** `PURGE_RETENTION_RUNS_DAYS`: finished rows of `Retention_Runs` itself are deleted after this (90..3650). */
   retentionRunsDays: number;
-  /** `RETENTION_MAX_CLOCK_ADVANCE_HOURS`: the advance allowed when the elapsed time cannot be verified, see `retention-clock.ts` (24..720). */
+  /** `RETENTION_MAX_CLOCK_ADVANCE_HOURS`: the most a run adds on top of the real time (recovery and unverified credit), see `retention-clock.ts` (24..720). */
   maxClockAdvanceHours: number;
-  /** `RETENTION_CLOCK_RESYNC=true`: the first clamped run of the process adopts the database clock (the operator says the outage was real). */
-  clockResync: boolean;
 }
 
 export class RetentionConfigError extends Error {}
+
+/** `RETENTION_CLOCK_RESYNC` was removed: the lag of the clock now recovers by itself (see `retention-clock.ts`). */
+export const LEGACY_RESYNC_MESSAGE =
+  'RETENTION_CLOCK_RESYNC is no longer used and is ignored (the retention clock recovers its lag by itself, at twice the real time); delete it from the environment';
+
+/** Is the removed variable still set? (any non-empty value) */
+export function legacyResyncSet(get: (key: string) => unknown): boolean {
+  return text(get('RETENTION_CLOCK_RESYNC')) !== '';
+}
 
 export const RETENTION_DEFAULTS = {
   cron: '30 4 * * *',
@@ -88,18 +98,10 @@ function int(
   if (s === '') return def;
   if (!/^\d{1,9}$/.test(s) || Number(s) < min || Number(s) > max) {
     throw new RetentionConfigError(
-      `${name} must be an integer between ${min} and ${max} (got ${JSON.stringify(s.slice(0, 40))}).`,
+      `${name} must be an integer between ${min} and ${max} (got ${safeSample(name, s)}).`,
     );
   }
   return Number(s);
-}
-
-function bool(get: (key: string) => unknown, name: string): boolean {
-  const v = text(get(name)).toLowerCase();
-  if (v !== '' && v !== 'true' && v !== 'false') {
-    throw new RetentionConfigError(`${name} must be "true" or "false".`);
-  }
-  return v === 'true';
 }
 
 /**
@@ -189,6 +191,5 @@ export function readRetentionConfig(
       24,
       720,
     ),
-    clockResync: bool(get, 'RETENTION_CLOCK_RESYNC'),
   };
 }

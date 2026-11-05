@@ -1159,15 +1159,137 @@ describe('Retention job (e2e, Story 20.8)', { timeout: 120_000 }, () => {
 
   // =================================================================================================
   describe('time: margin, clock jumps, budget (AC2, "Reloj")', () => {
-    it('a clock that jumped forward does not bring the purge forward: with an unverifiable previous run asOf is capped at previous + 72 h, then it follows the real time', async () => {
-      await x(`DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING'`);
-      const prev = randomUUID();
-      // the previous run "was" 10 days ago: today's database clock is 7 days past what the cap allows
-      await x(
-        `INSERT INTO "Retention_Runs" ("id","trigger","startedAt","finishedAt","status","tasks","effectiveNow","auditedAt")
-         VALUES ($1::uuid,'SCHEDULED', now() - interval '10 days', now() - interval '10 days', 'OK','[]', now() - interval '10 days', now() - interval '10 days')`,
-        prev,
+    /**
+     * The model of two clocks, injected into the running service: the database/application WALL clock (`offsetMs`
+     * moves both, like a real jump or the passing of days) and the host's UPTIME counter + boot id. Rows are seeded
+     * from the real database clock; the service sees `real + offsetMs`.
+     */
+    function twoClocks(init: { boot?: string; uptimeMs?: number } = {}) {
+      const svc = t.svc as unknown as {
+        monotonic: { anchor: () => { bootId: string; uptimeMs: number } };
+        databaseNow: () => Promise<Date>;
+      };
+      const realDbNow = svc.databaseNow.bind(svc);
+      const realMono = svc.monotonic;
+      const realNow = Date.now.bind(Date);
+      const nowSpy = vi.spyOn(Date, 'now');
+      const st = {
+        offsetMs: 0,
+        boot: init.boot ?? 'e2e-boot',
+        uptimeMs: init.uptimeMs ?? 1_800_000,
+      };
+      svc.monotonic = {
+        anchor: () => ({ bootId: st.boot, uptimeMs: st.uptimeMs }),
+      };
+      svc.databaseNow = async () =>
+        new Date((await realDbNow()).getTime() + st.offsetMs);
+      /** Started directly (the admin token is a real-clock session and would be "expired" by the moved Date.now). */
+      const run = async () => {
+        nowSpy.mockImplementation(() => realNow() + st.offsetMs);
+        try {
+          const out = await t.svc.start('MANUAL', admin.id);
+          if (out.kind !== 'started')
+            throw new Error(`not started: ${out.kind}`);
+          await out.done;
+          return { runId: out.runId, ...(await waitRun(out.runId)) };
+        } finally {
+          nowSpy.mockImplementation(realNow);
+        }
+      };
+      return {
+        st,
+        run,
+        restore: async () => {
+          nowSpy.mockRestore();
+          svc.databaseNow = realDbNow;
+          svc.monotonic = realMono;
+          // a run with the clock moved days ahead also expires (and deletes) the admin session: take a fresh one
+          admin = { ...admin, token: await mintAdminToken(t.app, admin.id) };
+        },
+      };
+    }
+    const effMs = (id: string) =>
+      q<{ ms: string }>(
+        `SELECT (extract(epoch FROM "effectiveNow") * 1000)::bigint::text AS ms FROM "Retention_Runs" WHERE "id" = $1::uuid`,
+        id,
+      ).then((r) => Number(r[0].ms));
+    const realMs = async () =>
+      Number(
+        (
+          await q<{ ms: string }>(
+            `SELECT (extract(epoch FROM now()) * 1000)::bigint::text AS ms`,
+          )
+        )[0].ms,
       );
+    const HOUR = 3_600_000;
+    const DAY = 24 * HOUR;
+    /** A previous run row `daysAgo` days old, written by ANOTHER boot (its uptime anchor is not this boot's). */
+    async function insertPrevious(daysAgo: number, boot = 'e2e-old-boot') {
+      const id = randomUUID();
+      await x(
+        `INSERT INTO "Retention_Runs" ("id","trigger","startedAt","finishedAt","status","tasks","effectiveNow","auditedAt","bootId","uptimeMs")
+         VALUES ($1::uuid,'SCHEDULED', now() - make_interval(secs => $2::float8), now() - make_interval(secs => $2::float8), 'OK','[]',
+                 now() - make_interval(secs => $2::float8), now() - make_interval(secs => $2::float8), $3, 999999999)`,
+        id,
+        daysAgo * 86_400,
+        boot,
+      );
+      return id;
+    }
+
+    /** Daily runs after an outage of `outageDays` until the lag closes; reports how long it took. */
+    async function catchUp(outageDays: number) {
+      await x(`DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING'`);
+      const prev = await insertPrevious(outageDays);
+      const prevEff = await effMs(prev);
+      const clocks = twoClocks({ boot: 'e2e-new-boot', uptimeMs: 30 * 60_000 });
+      try {
+        const first = await clocks.run();
+        const lags: number[] = [];
+        const lagOf = async (runId: string) =>
+          (await realMs()) + clocks.st.offsetMs - (await effMs(runId));
+        lags.push(await lagOf(first.runId));
+        let last = first;
+        let days = 0;
+        while (last.run.clockClamped === true && days < 40) {
+          clocks.st.offsetMs += DAY;
+          clocks.st.uptimeMs += DAY;
+          last = await clocks.run();
+          lags.push(await lagOf(last.runId));
+          days++;
+        }
+        return {
+          first,
+          firstEff: await effMs(first.runId),
+          prevEff,
+          lags,
+          days,
+          last,
+        };
+      } finally {
+        await clocks.restore();
+        await x(
+          `DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING' AND "triggeredById" = $1::uuid`,
+          admin.id,
+        );
+        await x(`DELETE FROM "Retention_Runs" WHERE "id" = $1::uuid`, prev);
+      }
+    }
+
+    it('round-3 reproduction: previous run 6 days ago from another boot, logs of 6, 7.2, 8, 9 and 10.5 days: the usage log is purged by the database clock at once, the capped clock keeps the rest (clockClamped, fixed lag no more)', async () => {
+      await x(`DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING'`);
+      const prev = await insertPrevious(6);
+      const ids: Record<string, string> = {};
+      for (const d of [6, 7.2, 8, 9, 10.5]) {
+        ids[String(d)] = randomUUID();
+        await x(
+          `INSERT INTO "Usage_Logs" ("ts","method","route","status","durationMs","actorType","requestId")
+           VALUES (now() - make_interval(secs => $2::float8), 'GET', $3, 200, 1, 'ANON', $1::uuid)`,
+          ids[String(d)],
+          d * 86_400,
+          `/${MARK}-r3`,
+        );
+      }
       const s = await seed(`${MARK}-j`);
       // a contact message 12 months + 5 days old: past its period by the REAL clock, but not by the capped one
       const old = randomUUID();
@@ -1177,22 +1299,27 @@ describe('Retention job (e2e, Story 20.8)', { timeout: 120_000 }, () => {
         old,
         `${MARK}-j-contact-jump`,
       );
+      const clocks = twoClocks({ boot: 'e2e-new-boot', uptimeMs: 1_800_000 });
       try {
-        const r = await runAndWait();
-        const eff = (
-          await q<{ lag: string }>(
-            `SELECT extract(epoch FROM (now() - "effectiveNow"))::text AS lag FROM "Retention_Runs" WHERE "id" = $1::uuid`,
-            r.runId,
-          )
-        )[0];
-        // effectiveNow = previous (10 d ago) + 72 h = about 7 days ago
-        expect(Number(eff.lag) / 86_400).toBeGreaterThan(6.9);
-        expect(Number(eff.lag) / 86_400).toBeLessThan(7.1);
-        expect(await rowCount('Contact_Inquiries', `"id" = '${old}'`)).toBe(1); // NOT purged early
+        const r = await clocks.run();
+        expect(r.run.clockClamped).toBe(true); // other boot: only the 30 min of uptime are credited, twice
+        const eff = await effMs(r.runId);
+        expect(eff - (await effMs(prev))).toBe(HOUR);
+        // usage_logs cut by the database clock: everything past 7 days is gone on THIS run, the 6-day log stays
+        for (const d of ['7.2', '8', '9', '10.5']) {
+          expect(
+            await rowCount('Usage_Logs', `"requestId" = '${ids[d]}'`),
+          ).toBe(0);
+        }
+        expect(
+          await rowCount('Usage_Logs', `"requestId" = '${ids['6']}'`),
+        ).toBe(1);
+        // every other task keeps the capped clock: not purged early
+        expect(await rowCount('Contact_Inquiries', `"id" = '${old}'`)).toBe(1);
         expect(
           await rowCount('Contact_Inquiries', `"id" = '${s.contacts.old13m}'`),
         ).toBe(0); // 13 months: still gone
-        // the audit event says the clock was capped
+        // the audit event, the row and GET /admin/retention/runs say the clock was capped
         const ev = (
           await q<{ after: Record<string, any> }>(
             `SELECT "after" FROM "Audit_Events" WHERE "action" = 'RETENTION_PURGE_RUN' AND "entityId" = $1`,
@@ -1200,33 +1327,184 @@ describe('Retention job (e2e, Story 20.8)', { timeout: 120_000 }, () => {
           )
         )[0];
         expect(ev.after.clockClamped).toBe(true);
-        // saved on the row and shown by GET /admin/retention/runs
-        expect(r.run.clockClamped).toBe(true);
-        expect(r.run.bootId).toBeTruthy();
+        expect(r.run.bootId).toBe('e2e-new-boot');
         const listed = await get('/admin/retention/runs?limit=5').expect(200);
         const mine = (
           listed.body.items as { id: string; clockClamped: boolean }[]
         ).find((i) => i.id === r.runId);
         expect(mine?.clockClamped).toBe(true);
-        // the next run seconds later: the real time elapsed is seconds, so the clock stays where it was (round 1 moved
-        // it another 72 h per run)
-        const r2 = await runAndWait();
-        const eff2 = (
-          await q<{ lag: string }>(
-            `SELECT extract(epoch FROM (now() - "effectiveNow"))::text AS lag FROM "Retention_Runs" WHERE "id" = $1::uuid`,
-            r2.runId,
-          )
-        )[0];
-        expect(Number(eff2.lag) / 86_400).toBeGreaterThan(6.9);
-        expect(Number(eff2.lag) / 86_400).toBeLessThan(7.1);
+        // a second run seconds later (uptime +10 s): asOf moves 2x the real seconds, the lag does not freeze and does not jump
+        clocks.st.uptimeMs += 10_000;
+        const r2 = await clocks.run();
+        expect((await effMs(r2.runId)) - eff).toBe(20_000);
+        expect(await rowCount('Contact_Inquiries', `"id" = '${old}'`)).toBe(1);
       } finally {
+        await clocks.restore();
         await x(`DELETE FROM "Contact_Inquiries" WHERE "id" = $1::uuid`, old);
+        await x(`DELETE FROM "Usage_Logs" WHERE "route" = $1`, `/${MARK}-r3`);
         await cleanup(`${MARK}-j`, s);
         await x(`DELETE FROM "Retention_Runs" WHERE "id" = $1::uuid`, prev);
+        await x(
+          `DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING' AND "triggeredById" = $1::uuid`,
+          admin.id,
+        );
       }
     });
 
-    it('QA reproduction: a +48 h clock jump and three POSTs in a row move asOf by the real seconds, and nothing is purged early (a cart/log/contact still within its period)', async () => {
+    it('outage of 5 days: the first run after the restart credits only the uptime; the lag shrinks a day per day and closes in about 5 days (not never)', async () => {
+      const r = await catchUp(5);
+      expect(r.firstEff - r.prevEff).toBe(HOUR);
+      expect(r.first.run.clockClamped).toBe(true);
+      expect(r.lags[0] / DAY).toBeGreaterThan(4.9);
+      expect(r.lags[1]).toBeLessThan(r.lags[0] - 23 * HOUR);
+      expect(r.days).toBeGreaterThanOrEqual(4);
+      expect(r.days).toBeLessThanOrEqual(5);
+      expect(r.last.run.clockClamped).toBe(false);
+      process.stderr.write(
+        `[time-to-catch-up] outage 5 d: ${r.days} daily runs; lag(h) per run: ${r.lags.map((l) => (l / HOUR).toFixed(1)).join(', ')}` +
+          '\n',
+      );
+    });
+
+    it('outage of 30 days: it closes in about 30 days (long, but visible and finite)', async () => {
+      const r = await catchUp(30);
+      expect(r.first.run.clockClamped).toBe(true);
+      expect(r.days).toBeGreaterThanOrEqual(29);
+      expect(r.days).toBeLessThanOrEqual(30);
+      expect(r.last.run.clockClamped).toBe(false);
+      process.stderr.write(
+        `[time-to-catch-up] outage 30 d: ${r.days} daily runs; first lag ${(r.lags[0] / HOUR).toFixed(1)} h` +
+          '\n',
+      );
+    }, 240_000);
+
+    it('a previous effectiveNow in the FUTURE (the clock was wrong and has been set right) does not get the purge stuck', async () => {
+      await x(`DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING'`);
+      const id = randomUUID();
+      await x(
+        `INSERT INTO "Retention_Runs" ("id","trigger","startedAt","finishedAt","status","tasks","effectiveNow","auditedAt","bootId","uptimeMs")
+         VALUES ($1::uuid,'SCHEDULED', now() - interval '1 day', now() - interval '1 day','OK','[]', now() + interval '10 days', now() - interval '1 day', 'e2e-boot', 1000000)`,
+        id,
+      );
+      const s = await seed(`${MARK}-f`);
+      const clocks = twoClocks({ boot: 'e2e-boot', uptimeMs: 1_000_000 + DAY });
+      try {
+        const r = await clocks.run();
+        expect(r.run.clockClamped).toBe(false);
+        const eff = await effMs(r.runId);
+        expect(Math.abs(eff - (await realMs()))).toBeLessThan(60_000); // adopted the database clock
+        expect(
+          await rowCount('Contact_Inquiries', `"id" = '${s.contacts.old13m}'`),
+        ).toBe(0); // and the purge works
+        clocks.st.uptimeMs += 5_000;
+        const r2 = await clocks.run();
+        expect(r2.run.clockClamped).toBe(false);
+        expect((await effMs(r2.runId)) - eff).toBeGreaterThanOrEqual(0);
+      } finally {
+        await clocks.restore();
+        await cleanup(`${MARK}-f`, s);
+        await x(`DELETE FROM "Retention_Runs" WHERE "id" = $1::uuid`, id);
+        await x(
+          `DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING' AND "triggeredById" = $1::uuid`,
+          admin.id,
+        );
+      }
+    });
+
+    it('a clock set BACK 3 days: asOf follows it down (more cautious), and when it returns the lag closes at the pace of real time', async () => {
+      await x(`DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING'`);
+      const clocks = twoClocks({ boot: 'e2e-boot', uptimeMs: 1_000_000 });
+      try {
+        const r0 = await clocks.run();
+        const e0 = await effMs(r0.runId);
+        clocks.st.offsetMs = -3 * DAY;
+        clocks.st.uptimeMs += 60_000;
+        const r1 = await clocks.run();
+        expect(r1.run.clockClamped).toBe(false);
+        expect(e0 - (await effMs(r1.runId))).toBeGreaterThan(2.9 * DAY);
+        // the clock is right again one real hour later: the 3 days of lag come back at 2x real time, not at once
+        clocks.st.offsetMs = 0;
+        clocks.st.uptimeMs += HOUR;
+        const e1 = await effMs(r1.runId);
+        const r2 = await clocks.run();
+        expect(r2.run.clockClamped).toBe(true);
+        expect((await effMs(r2.runId)) - e1).toBe(2 * HOUR);
+      } finally {
+        await clocks.restore();
+        await x(
+          `DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING' AND "triggeredById" = $1::uuid`,
+          admin.id,
+        );
+      }
+    });
+
+    it('a container restart (new application on the same host boot, REAL anchors) keeps the measurement: with the clock +48 h, asOf advances 2x the uptime that passed', async () => {
+      await x(`DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING'`);
+      const r0 = await runAndWait();
+      expect(r0.run.bootId).toBeTruthy();
+      const e0 = await effMs(r0.runId);
+      const u0 = Number(r0.run.uptimeMs);
+      await t.close();
+      t = await boot(); // "docker restart": a new process, the same host boot
+      const svc = t.svc as unknown as { databaseNow: () => Promise<Date> };
+      const realDbNow = svc.databaseNow.bind(svc);
+      const realNow = Date.now.bind(Date);
+      const nowSpy = vi.spyOn(Date, 'now');
+      svc.databaseNow = async () =>
+        new Date((await realDbNow()).getTime() + 48 * HOUR);
+      try {
+        // the admin session of the NEW process was minted for the old one: take a fresh token
+        admin = { ...admin, token: await mintAdminToken(t.app, admin.id) };
+        nowSpy.mockImplementation(() => realNow() + 48 * HOUR);
+        const out = await t.svc.start('MANUAL', admin.id);
+        if (out.kind !== 'started') throw new Error('not started');
+        await out.done;
+        nowSpy.mockImplementation(realNow);
+        const r1 = await waitRun(out.runId);
+        expect(r1.run.bootId).toBe(r0.run.bootId);
+        const u1 = Number(r1.run.uptimeMs);
+        expect(u1).toBeGreaterThan(u0);
+        expect(r1.run.clockClamped).toBe(true);
+        expect((await effMs(out.runId)) - e0).toBe(2 * (u1 - u0));
+      } finally {
+        nowSpy.mockRestore();
+        svc.databaseNow = realDbNow;
+        await x(
+          `DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING' AND "triggeredById" = $1::uuid`,
+          admin.id,
+        );
+      }
+    });
+
+    it('a REAL skew between the database and the application clocks is the one thing that stops the usage log too: nothing is purged', async () => {
+      await x(`DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING'`);
+      const old = randomUUID();
+      await x(
+        `INSERT INTO "Usage_Logs" ("ts","method","route","status","durationMs","actorType","requestId")
+         VALUES (now() - interval '9 days', 'GET', $2, 200, 1, 'ANON', $1::uuid)`,
+        old,
+        `/${MARK}-skew`,
+      );
+      const svc = t.svc as unknown as { databaseNow: () => Promise<Date> };
+      const realDbNow = svc.databaseNow.bind(svc);
+      svc.databaseNow = async () =>
+        new Date((await realDbNow()).getTime() + HOUR);
+      try {
+        const r = await runAndWait();
+        expect(r.run.status).toBe('FAILED');
+        expect(String(r.run.errorSummary)).toMatch(/CLOCK_SKEW/);
+        expect(await rowCount('Usage_Logs', `"requestId" = '${old}'`)).toBe(1);
+      } finally {
+        svc.databaseNow = realDbNow;
+        await x(`DELETE FROM "Usage_Logs" WHERE "route" = $1`, `/${MARK}-skew`);
+        await x(
+          `DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING' AND "triggeredById" = $1::uuid`,
+          admin.id,
+        );
+      }
+    });
+
+    it('QA reproduction: a +48 h clock jump and three POSTs in a row move asOf by 2x the real seconds; the contact message is not purged early (the usage log IS, an accepted risk)', async () => {
       await x(`DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING'`);
       const JUMP_MS = 48 * 3_600_000;
       const svc = t.svc as unknown as {
@@ -1301,20 +1579,23 @@ describe('Retention job (e2e, Story 20.8)', { timeout: 120_000 }, () => {
           await eff(runs[1].runId),
           await eff(runs[2].runId),
         ];
-        // +10 s, +15 s, +20 s of real time, NOT +48 h, +96 h, +144 h and not +3/+6/+9 days
-        expect(e[0] - e0).toBe(10_000);
-        expect(e[1] - e[0]).toBe(5_000);
-        expect(e[2] - e[1]).toBe(5_000);
+        // 2x the 10 s, 5 s and 5 s of real time, NOT +48 h, +96 h, +144 h and not +3/+6/+9 days
+        expect(e[0] - e0).toBe(20_000);
+        expect(e[1] - e[0]).toBe(10_000);
+        expect(e[2] - e[1]).toBe(10_000);
         for (const r of runs) {
           expect(r.run.status).toBe('OK');
           expect(r.run.clockClamped).toBe(true);
         }
-        // nothing within its period was deleted
+        // the contact message within its period was not deleted: that task keeps the capped clock
         expect(await rowCount('Contact_Inquiries', `"id" = '${contact}'`)).toBe(
           1,
         );
+        // ACCEPTED RISK (round 3, Angel: deleting the usage log on time comes first): the usage log is cut by the
+        // database clock, which after a REAL jump of 48 h is 48 h ahead, so logs of 5.1, 6.0 and 6.9 days are
+        // deleted early. Deleting a diagnostic log early is a far smaller harm than keeping IP/user agent past 7 days.
         for (const id of logIds) {
-          expect(await rowCount('Usage_Logs', `"requestId" = '${id}'`)).toBe(1);
+          expect(await rowCount('Usage_Logs', `"requestId" = '${id}'`)).toBe(0);
         }
         // the run list says so
         const listed = await get('/admin/retention/runs?limit=3').expect(200);

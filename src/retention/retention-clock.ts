@@ -1,5 +1,6 @@
 import os from 'node:os';
 import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { SAFETY_MARGIN_MS } from './retention-config.js';
 
 /**
@@ -8,31 +9,50 @@ import { SAFETY_MARGIN_MS } from './retention-config.js';
  * A purge deletes by "older than X". If the machine's clock jumps FORWARD (WSL2 after the Windows host
  * sleeps, a wrong NTP step, a virtual machine restored from a snapshot) the database's `now()` jumps
  * with it and a purge that trusts it would erase everything that is "old" by the wrong clock in one go.
- * So a run does not use `now()` directly. It uses `asOf`, which may run ahead of the previous run's `asOf` by
- * **the real time that elapsed between the two runs, measured with a clock that a wall-clock jump cannot move**:
+ * And if the machine was REALLY down for days, a purge that never trusts it again keeps data past its
+ * promised period for good. A jump and an outage look the same from inside, so the run does neither extreme:
+ * it adopts the database clock SLOWLY, at a rate bounded by the real time that passes.
  *
- *     asOf = dbNow                                   when dbNow <= previous.asOf + realElapsed + 5 min
- *          = previous.asOf + realElapsed             otherwise (clamped)
+ * A run does not use `now()` directly. It uses `asOf`:
  *
- * `realElapsed` is the difference of the host's uptime counter (`CLOCK_BOOTTIME`: it only counts, a
+ *     real     = host uptime elapsed between the previous run and this one (see below)
+ *     recover  = min(real, RETENTION_MAX_CLOCK_ADVANCE_HOURS)
+ *     limit    = previous.asOf + real + recover
+ *     asOf     = dbNow     when dbNow <= limit + 5 min        (no lag, or a lag that this run closes)
+ *              = limit     otherwise                          (clamped: the lag shrinks by `recover`)
+ *
+ * So `asOf` follows real time (`real`) and ALSO closes the lag at the same rate again, i.e. it runs at 2x real
+ * time until it reaches the database clock. The speed depends on the real time that passed, never on the number
+ * of runs: three POSTs in a row advance it by 2x the seconds between them. Time to catch up = the lag itself
+ * (a lag of 72 h closes in about 3 days, one of 30 days in about 30 days). A jump that was FALSE is adopted the
+ * same way, gradually: the purge never erases a whole jump's worth at once, and it never stays behind for good.
+ *
+ * `real` is the difference of the host's uptime counter (`CLOCK_BOOTTIME`: it only counts, a
  * `settimeofday`/NTP step does not touch it) between the two runs, valid while both runs saw the same
- * `boot_id` (the same boot of the same machine, whatever the number of application restarts in between).
- * Three POSTs in a row therefore advance `asOf` by the seconds that passed, not by a fixed amount per run
- * (the first version capped the advance per RUN: 3 POSTs moved it 9 days).
+ * `boot_id` (the same boot of the same machine, whatever the number of application restarts or container
+ * restarts in between). When it CANNOT be verified (another boot, another machine, a row from before the anchor
+ * existed) the only thing proven is a LOWER bound: the previous run happened before this boot, so at least the
+ * current uptime has passed. `real` is then `min(current uptime, RETENTION_MAX_CLOCK_ADVANCE_HOURS)`: the first
+ * run after a reboot advances by minutes, not by the clock's word (the first version trusted up to 72 h there,
+ * and a restart 12 h after a run with the clock 60 h ahead purged 60 h early). The cap exists because the previous
+ * run may come from ANOTHER machine with a long uptime (a restored database): the credit never exceeds 72 h.
+ * A platform without `boot_id` uses the uptime of the process itself (a per-process anchor): a restart is
+ * "unverified", the run in a long-lived process is verified.
  *
- * When the elapsed time CANNOT be verified (the previous run is from another boot or another machine, the
- * machine was rebooted, it is the first run after this release, or the platform has no `boot_id`) the run
- * may advance by `RETENTION_MAX_CLOCK_ADVANCE_HOURS` (72 h) at most. That is the answer to "the machine was
- * off for 30 days: may the purge advance?": a reboot after a long outage and a clock that jumped 30 days look
- * the same from inside, so it advances 72 h and stops there (over-retention, never early deletion). The lag
- * (database clock minus `asOf`) is logged as a WARN in every run and `clockClamped` is saved on the run row
- * (`GET /admin/retention/runs`) and in `RETENTION_PURGE_RUN`. If the outage was REAL, the operator says so once:
- * `RETENTION_CLOCK_RESYNC=true` makes the first clamped run of that process adopt the database clock (and the
- * WARN says to remove the variable). Without it the lag is permanent: that is the price of never trusting a
- * clock that may have jumped, and it is documented in docs/deployment.md 20.5.
+ * Cost: a machine that is rebooted before EVERY daily run (so every run is "unverified" with a short uptime)
+ * advances only minutes per run and the lag grows; it is logged as a WARN in every run. Over-retention, visible.
+ *
+ * The lag (database clock minus `asOf`) is logged as a WARN in every clamped run and `clockClamped` is saved on the
+ * run row (`GET /admin/retention/runs`) and in `RETENTION_PURGE_RUN`. There is no switch to skip the recovery
+ * (`RETENTION_CLOCK_RESYNC` was removed: with the automatic recovery it only offered a way to purge early).
  *
  * The first run ever has no previous run: it uses the database clock (nothing to compare with).
- * A clock that goes BACKWARD only makes the purge more cautious (`asOf` is the smaller one).
+ * A clock that goes BACKWARD (or a previous `effectiveNow` that is in the FUTURE of the database clock) makes
+ * `dbNow <= limit`: `asOf` is the database clock, which only makes the purge more cautious, and the next run
+ * starts from there (it cannot get stuck behind a future value).
+ *
+ * The `usage_logs` task is the exception (`tasks/delegated.tasks.ts`): its cut-off uses the database clock, not
+ * `asOf`, because Angel's priority there is deleting the log on time.
  *
  * Then every cut-off is `asOf - period - SAFETY_MARGIN_MS` (see `marginalClock`): nothing is deleted before
  * its period has surely elapsed even if the application clock and the database clock disagree.
@@ -63,14 +83,23 @@ function readBootId(): string | null {
   return cachedBootId;
 }
 
-/** The real thing: `boot_id` of the kernel and `os.uptime()` (CLOCK_BOOTTIME; unaffected by clock steps). */
+/** Identity of THIS process, the anchor on a platform with no `boot_id` (the uptime is then the process's own). */
+const PROCESS_ANCHOR = `proc-${randomUUID()}`;
+
+/**
+ * The real thing: `boot_id` of the kernel and `os.uptime()` (CLOCK_BOOTTIME; unaffected by clock steps).
+ * Without a `boot_id` (not Linux): a per-process id and `process.uptime()` (monotonic), so runs of the same
+ * process are still measured and a restart is "unverified".
+ */
 export const hostMonotonicSource: MonotonicSource = {
   anchor() {
     const bootId = readBootId();
-    return {
-      bootId,
-      uptimeMs: bootId ? Math.round(os.uptime() * 1000) : null,
-    };
+    return bootId
+      ? { bootId, uptimeMs: Math.round(os.uptime() * 1000) }
+      : {
+          bootId: PROCESS_ANCHOR,
+          uptimeMs: Math.round(process.uptime() * 1000),
+        };
   },
 };
 
@@ -79,7 +108,7 @@ export interface PreviousClock extends ClockAnchor {
   effectiveNow: Date;
 }
 
-export type ClockBasis = 'first' | 'verified' | 'unverified' | 'resync';
+export type ClockBasis = 'first' | 'verified' | 'unverified';
 
 export interface EffectiveClock {
   asOf: Date;
@@ -98,10 +127,11 @@ export interface EffectiveClockInput {
   previous: PreviousClock | null;
   /** The reading taken at this run's start. */
   current: ClockAnchor;
-  /** `RETENTION_MAX_CLOCK_ADVANCE_HOURS`: the advance allowed when the elapsed time cannot be verified. */
+  /**
+   * `RETENTION_MAX_CLOCK_ADVANCE_HOURS`: the most a run may add on top of the real time, both as lag recovery and
+   * as credit for elapsed time that cannot be verified.
+   */
   maxAdvanceHours: number;
-  /** `RETENTION_CLOCK_RESYNC` and not yet used by this process: adopt the database clock instead of capping. */
-  resync?: boolean;
 }
 
 export function effectiveClock(i: EffectiveClockInput): EffectiveClock {
@@ -118,6 +148,7 @@ export function effectiveClock(i: EffectiveClockInput): EffectiveClock {
   });
   if (!previous) return result(dbNow, false, 'first');
 
+  const maxMs = i.maxAdvanceHours * 3_600_000;
   const verified =
     previous.bootId !== null &&
     previous.bootId === current.bootId &&
@@ -125,24 +156,18 @@ export function effectiveClock(i: EffectiveClockInput): EffectiveClock {
     current.uptimeMs !== null &&
     current.uptimeMs >= previous.uptimeMs;
 
-  let limit: Date;
-  let tolerance: number;
+  let realMs: number;
   if (verified) {
-    limit = new Date(
-      previous.effectiveNow.getTime() +
-        ((current.uptimeMs as number) - (previous.uptimeMs as number)),
-    );
-    tolerance = CLOCK_DRIFT_TOLERANCE_MS;
+    realMs = (current.uptimeMs as number) - (previous.uptimeMs as number);
   } else {
-    limit = new Date(
-      previous.effectiveNow.getTime() + i.maxAdvanceHours * 3_600_000,
-    );
-    tolerance = 0;
+    // Lower bound only: the previous run was before this boot (or this process), so at least the uptime has passed.
+    realMs = current.uptimeMs === null ? 0 : Math.min(current.uptimeMs, maxMs);
   }
+  const recoverMs = Math.min(realMs, maxMs);
+  const limit = new Date(previous.effectiveNow.getTime() + realMs + recoverMs);
   const basis: ClockBasis = verified ? 'verified' : 'unverified';
-  if (dbNow.getTime() <= limit.getTime() + tolerance)
+  if (dbNow.getTime() <= limit.getTime() + CLOCK_DRIFT_TOLERANCE_MS)
     return result(dbNow, false, basis);
-  if (i.resync) return result(dbNow, false, 'resync');
   return result(limit, true, basis);
 }
 

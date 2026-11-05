@@ -42,7 +42,18 @@ const url = new URL(raw);
 url.searchParams.delete('schema'); // pg does not know Prisma's ?schema=
 const sql = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'db-roles.sql'), 'utf8');
 
-const client = new pg.Client({ connectionString: url.toString() });
+// Story 20.8 round 3: every connection opens with the session time zone fixed to UTC (src/prisma/db-session.ts, which a
+// plain .mjs cannot import: the same rule, written here; src/prisma/db-session-static.spec.ts checks the call site).
+function withUtcSession(connectionString) {
+  const u = new URL(connectionString);
+  const existing = (u.searchParams.get('options') ?? '').trim();
+  if (/(^|\s)-c\s+timezone\s*=/i.test(existing)) return connectionString;
+  u.searchParams.delete('options');
+  const rest = u.searchParams.toString();
+  u.search = '';
+  return `${u.toString()}?${rest ? `${rest}&` : ''}options=${encodeURIComponent(`${existing} -c TimeZone=UTC`.trim())}`;
+}
+const client = new pg.Client({ connectionString: withUtcSession(url.toString()) });
 client.on('notice', (n) => console.log(`[db:roles] ${n.message}`));
 try {
   await client.connect();

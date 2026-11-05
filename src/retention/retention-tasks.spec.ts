@@ -1,5 +1,9 @@
 import { Prisma } from '../generated/prisma/client.js';
-import { RETENTION_DEFAULTS, readRetentionConfig } from './retention-config.js';
+import {
+  RETENTION_DEFAULTS,
+  SAFETY_MARGIN_MS,
+  readRetentionConfig,
+} from './retention-config.js';
 import { runBatches } from './retention-batch.js';
 import type { RetentionContext, RetentionTask } from './retention.types.js';
 import {
@@ -55,6 +59,7 @@ function fakeCtx(counts: number[], overrides: Partial<RetentionContext> = {}) {
     runId: '11111111-1111-4111-8111-111111111111',
     cfg: readRetentionConfig(() => undefined, 'production'),
     asOf: AS_OF,
+    dbNow: AS_OF,
     shouldStop: () => false,
     pause: () => Promise.resolve(),
     addRows: (n) => {
@@ -257,6 +262,30 @@ describe('the tasks that INVOKE other purges do not reimplement them', () => {
       asOf: new Date(MARGINAL_ISO),
       shouldStop: ctx.shouldStop,
     });
+  });
+
+  it('usage_logs cuts with the DATABASE clock (dbNow), the capped asOf is for the other tasks; the 1 h margin still applies', async () => {
+    const purgeExpired = vi.fn(() =>
+      Promise.resolve({ rows: 0, batches: 1, durationMs: 1, truncated: false }),
+    );
+    // the run clock lags the database clock by 3 days (an outage being recovered)
+    const dbNow = new Date(AS_OF.getTime() + 3 * 24 * 3_600_000);
+    const { ctx } = fakeCtx([], { dbNow });
+    await usageLogsTask({ purgeExpired } as never).run(ctx);
+    const used = (purgeExpired.mock.calls[0] as unknown as [{ asOf: Date }])[0]
+      .asOf;
+    expect(used).toEqual(new Date(dbNow.getTime() - SAFETY_MARGIN_MS));
+    expect(used.getTime()).toBeGreaterThan(new Date(MARGINAL_ISO).getTime());
+  });
+
+  it('every other task still uses the capped asOf, never dbNow (the exception is usage_logs alone)', async () => {
+    const dbNow = new Date(AS_OF.getTime() + 3 * 24 * 3_600_000);
+    const { ctx, stmts } = fakeCtx([0, 0], { dbNow });
+    await sessionsExpiredTask.run(ctx);
+    expect(JSON.stringify(stmts)).toContain(MARGINAL_ISO);
+    expect(JSON.stringify(stmts)).not.toContain(
+      dbNow.toISOString().slice(0, 10) + 'T04',
+    );
   });
 
   it('product_daily_stats calls the Epic 18 purge (the only code that deletes that table)', async () => {

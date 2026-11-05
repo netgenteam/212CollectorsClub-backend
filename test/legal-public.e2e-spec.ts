@@ -471,7 +471,11 @@ describe('Legal public API (e2e, Story 19.1)', () => {
 
   describe('drafts are never public (NFR-19.4)', () => {
     it('no endpoint returns the draft text of a real or sandbox document', async () => {
-      // also a draft on a REAL document (snapshot/restored in afterAll)
+      // also a draft on a REAL document (snapshot/restored in afterAll). A document has at most one draft and the seed
+      // creates all six, so the existing one is replaced first: the test must not assume the database has none.
+      await sql(
+        `DELETE FROM "Legal_Drafts" WHERE "documentId" IN (SELECT "id" FROM "Legal_Documents" WHERE "slug" = 'terminos' AND NOT "isSandbox")`,
+      );
       await sql(
         `INSERT INTO "Legal_Drafts" ("id","documentId","bodyMd")
          SELECT gen_random_uuid(), "id", $1 FROM "Legal_Documents" WHERE "slug" = 'terminos'`,

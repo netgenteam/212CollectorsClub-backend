@@ -12,6 +12,7 @@ import 'dotenv/config';
 import { fileURLToPath } from 'node:url';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../src/generated/prisma/client.js';
+import { withUtcSession } from '../src/prisma/db-session.js';
 import {
   LegalSeedService,
   loadLegalSeedTemplates,
@@ -23,7 +24,7 @@ if (!databaseUrl) {
 }
 
 const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString: databaseUrl }),
+  adapter: new PrismaPg({ connectionString: withUtcSession(databaseUrl) }),
 });
 
 async function main(): Promise<void> {

@@ -1,3 +1,5 @@
+import { safeSample } from '../common/safe-sample.js';
+
 /**
  * Story 20.7 (AD-100): the settings of the usage log. Read once at boot; an invalid value stops the start
  * with a message that names the variable (the same discipline as `TRUST_PROXY`), never a silent default.
@@ -39,7 +41,7 @@ function int(
   if (s === '') return def;
   if (!/^\d{1,9}$/.test(s) || Number(s) < min || Number(s) > max) {
     throw new UsageLogConfigError(
-      `${name} must be an integer between ${min} and ${max} (got ${JSON.stringify(s.slice(0, 40))}).`,
+      `${name} must be an integer between ${min} and ${max} (got ${safeSample(name, s)}).`,
     );
   }
   return Number(s);

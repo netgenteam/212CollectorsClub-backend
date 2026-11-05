@@ -131,14 +131,9 @@ export class RetentionConfigDto {
   safetyMarginMinutes!: number;
   @ApiProperty({
     description:
-      'Advance allowed when the time since the previous run cannot be verified (other boot or machine).',
+      'The most a run adds on top of the real elapsed time (lag recovery, and credit when the elapsed time cannot be verified).',
   })
   maxClockAdvanceHours!: number;
-  @ApiProperty({
-    description:
-      'RETENTION_CLOCK_RESYNC=true: the next capped run of the process adopts the database clock.',
-  })
-  clockResync!: boolean;
   @ApiProperty({ type: RetentionPeriodsDto }) periods!: RetentionPeriodsDto;
   @ApiProperty({ type: [String] }) tasks!: string[];
   @ApiProperty({ type: [String], description: 'What the job never deletes.' })

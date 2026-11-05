@@ -2,6 +2,7 @@ import {
   RETENTION_DEFAULTS,
   RetentionConfigError,
   isRetentionEnabled,
+  legacyResyncSet,
   readRetentionConfig,
 } from './retention-config.js';
 
@@ -22,7 +23,6 @@ describe('retention config (Story 20.8 AC5)', () => {
       expiredTokenDays: 1,
       retentionRunsDays: 400,
       maxClockAdvanceHours: 72,
-      clockResync: false,
     });
     expect(RETENTION_DEFAULTS.sessionPiiDays).toBe(90);
   });
@@ -46,7 +46,6 @@ describe('retention config (Story 20.8 AC5)', () => {
     ['RETENTION_PURGE_CRON', 'not a cron'],
     ['RETENTION_PURGE_CRON', '61 99 * * *'], // well-formed but impossible: used to stop the start with a bare CronError
     ['RETENTION_PURGE_CRON', '* * * *'],
-    ['RETENTION_CLOCK_RESYNC', 'yes'],
     ['RETENTION_PURGE_ENABLED', 'yes'],
   ])('%s=%s stops the start, naming the variable', (name, value) => {
     expect(() => readRetentionConfig(env({ [name]: value }))).toThrow(
@@ -79,6 +78,25 @@ describe('retention config (Story 20.8 AC5)', () => {
     expect(readRetentionConfig(env({ RETENTION_PURGE_CRON: 'OFF' })).cron).toBe(
       'off',
     );
+  });
+
+  it('RETENTION_CLOCK_RESYNC was removed: any value is ignored by the reader and only detected to be warned about', () => {
+    const c = readRetentionConfig(env({ RETENTION_CLOCK_RESYNC: 'true' }));
+    expect(c).not.toHaveProperty('clockResync');
+    expect(
+      readRetentionConfig(env({ RETENTION_CLOCK_RESYNC: 'garbage' })),
+    ).toEqual(readRetentionConfig(env({})));
+    expect(legacyResyncSet(env({ RETENTION_CLOCK_RESYNC: 'true' }))).toBe(true);
+    expect(legacyResyncSet(env({ RETENTION_CLOCK_RESYNC: 'false' }))).toBe(
+      true,
+    );
+    expect(legacyResyncSet(env({}))).toBe(false);
+  });
+
+  it('the message about an invalid value quotes it, except for a variable whose name looks sensitive', () => {
+    expect(() =>
+      readRetentionConfig(env({ RETENTION_BATCH_SIZE: '5000' })),
+    ).toThrow(/got "5000"/);
   });
 
   describe('where the job is allowed to run', () => {

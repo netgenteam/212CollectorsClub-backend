@@ -53,7 +53,9 @@ export class RetentionSessionLock {
     key: number,
   ): Promise<RetentionSessionLock | null> {
     const client = new pg.Client({
-      connectionString: RetentionSessionLock.connectionString(databaseUrl),
+      connectionString: withUtcSession(
+        RetentionSessionLock.connectionString(databaseUrl),
+      ),
       application_name: 'retention-lock',
       connectionTimeoutMillis: 5_000,
       query_timeout: 10_000,

@@ -109,7 +109,10 @@ function rig(
   const svc = new RetentionService(
     prisma as never,
     audit as never,
-    { getOrThrow: () => 'postgresql://x/y' } as never,
+    {
+      getOrThrow: () => 'postgresql://x/y',
+      get: (k: string) => process.env[k],
+    } as never,
     opts.cfg ?? cfgOf({ RETENTION_BATCH_PAUSE_MS: '0' }),
     { purgeExpired: vi.fn() } as never,
     { purgeOldStatsBounded: vi.fn() } as never,
@@ -283,10 +286,12 @@ describe('RetentionService', () => {
 
   it('QA reproduction: the unverifiable clock is capped, saved as clockClamped with its anchor, and the run says so in the WARN', async () => {
     const seen: Date[] = [];
+    const dbNows: Date[] = [];
     const task: RetentionTask = {
       name: 'a',
       run: (ctx) => {
         seen.push(ctx.asOf);
+        dbNows.push(ctx.dbNow);
         return Promise.resolve({ rows: 0, truncated: false });
       },
     };
@@ -304,24 +309,28 @@ describe('RetentionService', () => {
         'warn',
       )
       .mockImplementation(() => undefined);
-    // previous run 48 h ago with NO anchor (unverifiable): allowed up to 72 h, so the database clock is used
+    // previous run 48 h ago with NO anchor (unverifiable): only the 123 ms of uptime are credited, twice. The
+    // purge no longer takes the database clock's word (the round-2 branch adopted up to 72 h: purga anticipada).
     const out = await r.svc.start('SCHEDULED');
     if (out.kind !== 'started') throw new Error('x');
     await out.done;
-    expect(seen[0].getTime()).toBe(now);
+    expect(seen[0].getTime()).toBe(prev.getTime() + 246);
+    // ...but the task that cuts by the database clock (usage_logs) can see it, uncapped
+    expect(dbNows[0].getTime()).toBe(now);
     expect(
       (r.prisma.retentionRun.create.mock.calls[0][0] as { data: unknown }).data,
     ).toMatchObject({
-      clockClamped: false,
+      clockClamped: true,
       bootId: 'boot-B',
       uptimeMs: 123n,
     });
     warn.mockClear();
-    // now the previous run was 10 days ago and unverifiable: capped at +72 h, flagged, and WARN-ed
+    // the previous run was 10 days ago and unverifiable, 30 min of uptime: asOf moves 1 h, flagged, and WARN-ed
     const r2 = rig({
       tasks: [task],
       previous: new Date(now - 10 * 86_400_000),
       dbNow: new Date(now),
+      monotonic: { anchor: () => ({ bootId: 'boot-B', uptimeMs: 1_800_000 }) },
     });
     const warn2 = vi
       .spyOn(
@@ -332,7 +341,7 @@ describe('RetentionService', () => {
     const o2 = await r2.svc.start('SCHEDULED');
     if (o2.kind !== 'started') throw new Error('x');
     await o2.done;
-    expect(seen[1].getTime()).toBe(now - 7 * 86_400_000);
+    expect(seen[1].getTime()).toBe(now - 10 * 86_400_000 + 3_600_000);
     expect(
       (
         r2.prisma.retentionRun.create.mock.calls[0][0] as {
@@ -343,6 +352,47 @@ describe('RetentionService', () => {
     const messages = warn2.mock.calls.map((c) => String(c[0]));
     expect(messages.some((m) => /clockClamped=true/.test(m))).toBe(true);
     expect(messages.filter((m) => /clockClamped=true/.test(m)).length).toBe(2); // the clock WARN and the run summary
+  });
+
+  describe('start-up warnings (onModuleInit)', () => {
+    afterEach(() => vi.unstubAllEnvs());
+    const warnings = (r: Rig) => {
+      const warn = vi
+        .spyOn(
+          (r.svc as unknown as { logger: { warn: (m: string) => void } })
+            .logger,
+          'warn',
+        )
+        .mockImplementation(() => undefined);
+      r.svc.onModuleInit();
+      return warn.mock.calls.map((c) => String(c[0]));
+    };
+
+    it('RETENTION_PURGE_ENABLED=false in production is a WARN (the usage log is then never purged), not just a LOG', () => {
+      vi.stubEnv('NODE_ENV', 'production');
+      const r = rig({
+        cfg: cfgOf({ RETENTION_PURGE_ENABLED: 'false' }, 'production'),
+      });
+      const w = warnings(r);
+      expect(w.join('\n')).toMatch(
+        /RETENTION_PURGE_ENABLED=false in production.*usage log/,
+      );
+    });
+
+    it('a disabled job outside production stays a plain LOG (no WARN)', () => {
+      vi.stubEnv('NODE_ENV', 'development');
+      const r = rig({ cfg: cfgOf({}, 'development') });
+      expect(warnings(r)).toEqual([]);
+    });
+
+    it('a leftover RETENTION_CLOCK_RESYNC is warned about at start and has no effect', () => {
+      vi.stubEnv('NODE_ENV', 'production');
+      vi.stubEnv('RETENTION_CLOCK_RESYNC', 'true');
+      const r = rig({ cfg: cfgOf({ RETENTION_PURGE_CRON: 'off' }) });
+      expect(warnings(r).join('\n')).toMatch(
+        /RETENTION_CLOCK_RESYNC is no longer used/,
+      );
+    });
   });
 
   it('the clock is read as an epoch (a timestamptz parser can not shift it)', async () => {

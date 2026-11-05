@@ -2,7 +2,11 @@ import { readFileSync } from 'node:fs';
 import { parse } from 'dotenv';
 import { assertCronExpression } from '../../common/cron-expression.js';
 import { readUsageLogConfig } from '../../usage/usage-config.js';
-import { readRetentionConfig } from '../retention-config.js';
+import {
+  LEGACY_RESYNC_MESSAGE,
+  legacyResyncSet,
+  readRetentionConfig,
+} from '../retention-config.js';
 
 /**
  * Story 20.8 round 2: `node dist/retention/cli/check-config.js --env-file <path>`, run by `deploy/deploy.sh` BEFORE the
@@ -42,6 +46,12 @@ export function checkRetentionConfig(
     out.summary.push(
       `retention: enabled=${c.enabled} cron=${c.cron} sessionPiiDays=${c.sessionPiiDays} contactMonths=${c.contactMonths} usageLogDays=${c.usageLogDays}`,
     );
+    if (!c.enabled && nodeEnv === 'production') {
+      out.warnings.push(
+        'RETENTION_PURGE_ENABLED=false in production: the retention job is OFF; nothing is purged and the usage log (IP and user agent, promised to be deleted after 7 days) is kept without limit',
+      );
+    }
+    if (legacyResyncSet(get)) out.warnings.push(LEGACY_RESYNC_MESSAGE);
     if (c.enabled && c.cron === 'off' && nodeEnv === 'production') {
       out.warnings.push(
         'RETENTION_PURGE_CRON=off in production: nothing purges on a schedule (the usage log included); only POST /admin/retention/run does',
@@ -64,6 +74,9 @@ export function checkRetentionConfig(
       'USAGE_LOG_PURGE_CRON is ignored (removed): the usage log is purged by the retention job; delete the variable',
     );
   }
+  // The same variable can fail in two readers (PURGE_USAGE_LOG_DAYS is read by the retention and the usage log
+  // config): one message each, not two.
+  out.errors = [...new Set(out.errors)];
   return out;
 }
 

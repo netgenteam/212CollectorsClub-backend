@@ -32,11 +32,16 @@ export interface RetentionContext {
   runId: string;
   cfg: RetentionConfig;
   /**
-   * The clock of the run (`retention-clock.ts`): the database clock, never ahead of the previous run's
-   * by more than `RETENTION_MAX_CLOCK_ADVANCE_HOURS`. EVERY cut-off is computed from this and
+   * The clock of the run (`retention-clock.ts`): the database clock, adopted gradually (never ahead of the
+   * previous run's by more than twice the real elapsed time). EVERY cut-off is computed from this and
    * `SAFETY_MARGIN_MS`; no task reads `now()` or `Date.now()` for a cut-off.
    */
   asOf: Date;
+  /**
+   * The database clock as read at the start of the run, NOT capped. Only `usage_logs` uses it for its cut-off
+   * (Angel: the 7-day log is deleted on time; see `tasks/delegated.tasks.ts`). Every other task uses `asOf`.
+   */
+  dbNow: Date;
   /** True when the run must stop at the next batch boundary: deadline, lost lock or shutdown. */
   shouldStop: () => boolean;
   /** Pause between two batches (`RETENTION_BATCH_PAUSE_MS`). */

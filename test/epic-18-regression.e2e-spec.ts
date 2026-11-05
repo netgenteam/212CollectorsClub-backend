@@ -468,6 +468,13 @@ describe('Epic 18 regression (e2e, Story 18.12)', { timeout: 120_000 }, () => {
       .expect(200);
     token = (login.body as { accessToken: string }).accessToken;
 
+    // A database with no real FX row (freshly migrated, never seeded): the suite brings its own working row, and
+    // `restoreFx` deletes it again in afterAll (`savedFx.setting` is null), so the table ends as it started.
+    if (!savedFx.setting) {
+      await prisma.fxRateSetting.create({
+        data: { id: 'default', vesPerUsd: '1.0000' },
+      });
+    }
     // The suite owns the FX snapshots while it runs (restored in afterAll).
     await prisma.fxRateSnapshot.deleteMany();
     await mkProduct('FX', { franchise: 'NARUTO', stock: 5000, price: '12.34' });
@@ -724,7 +731,10 @@ describe('Epic 18 regression (e2e, Story 18.12)', { timeout: 120_000 }, () => {
         expect((await checkout('stripe')).status).toBe(201);
       } finally {
         await prisma.fxRateSetting.create({
-          data: { id: 'default', vesPerUsd: savedFx.setting!.vesPerUsd },
+          data: {
+            id: 'default',
+            vesPerUsd: savedFx.setting?.vesPerUsd ?? '1.0000',
+          },
         });
         await setRow('BCV_USD', '889.2600');
       }
