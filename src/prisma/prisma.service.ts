@@ -7,6 +7,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client.js';
+import { checkDatabaseClock } from './db-clock-check.js';
+import { withUtcSession } from './db-session.js';
 
 /** Closing the pool never waits longer than this for a database that does not answer. */
 export const DISCONNECT_TIMEOUT_MS = 3_000;
@@ -28,7 +30,10 @@ export class PrismaService
 
   constructor(configService: ConfigService) {
     const adapter = new PrismaPg({
-      connectionString: configService.getOrThrow<string>('DATABASE_URL'),
+      // Story 20.8 round 2: session time zone UTC (see db-session.ts).
+      connectionString: withUtcSession(
+        configService.getOrThrow<string>('DATABASE_URL'),
+      ),
     });
     super({ adapter });
   }
@@ -36,6 +41,7 @@ export class PrismaService
   async onModuleInit(): Promise<void> {
     await this.$connect();
     this.logger.log('Connected to PostgreSQL via Prisma');
+    await checkDatabaseClock(this, this.logger);
   }
 
   /**

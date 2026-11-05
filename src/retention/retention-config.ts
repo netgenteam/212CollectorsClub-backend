@@ -1,3 +1,8 @@
+import {
+  assertCronExpression,
+  CronConfigError,
+} from '../common/cron-expression.js';
+
 /**
  * Story 20.8 (AD-101, FR-130, FR-131): the settings of the retention job. Read once at boot; a value
  * outside its range stops the start with a message that names the variable (the same discipline as
@@ -26,14 +31,16 @@ export interface RetentionConfig {
   sessionPiiDays: number;
   /** `PURGE_CONTACT_MONTHS`: contact messages are deleted after this many months (3..60). */
   contactMonths: number;
-  /** `PURGE_USAGE_LOG_DAYS`: owned by Story 20.7's `UsageLogConfig` (1..30); shown here for the admin view. */
+  /** `PURGE_USAGE_LOG_DAYS`: owned by Story 20.7's `UsageLogConfig` (1..7: the Privacy Policy says 7); shown here for the admin view. */
   usageLogDays: number;
   /** `PURGE_EXPIRED_TOKENS_DAYS`: an expired verification / reset link is deleted this long after expiring (1..30). */
   expiredTokenDays: number;
   /** `PURGE_RETENTION_RUNS_DAYS`: finished rows of `Retention_Runs` itself are deleted after this (90..3650). */
   retentionRunsDays: number;
-  /** `RETENTION_MAX_CLOCK_ADVANCE_HOURS`: see `retention-clock.ts` (24..720). */
+  /** `RETENTION_MAX_CLOCK_ADVANCE_HOURS`: the advance allowed when the elapsed time cannot be verified, see `retention-clock.ts` (24..720). */
   maxClockAdvanceHours: number;
+  /** `RETENTION_CLOCK_RESYNC=true`: the first clamped run of the process adopts the database clock (the operator says the outage was real). */
+  clockResync: boolean;
 }
 
 export class RetentionConfigError extends Error {}
@@ -87,19 +94,29 @@ function int(
   return Number(s);
 }
 
-/** A cron expression of 5 or 6 fields (the validation of its content is `@nestjs/schedule`'s). */
+function bool(get: (key: string) => unknown, name: string): boolean {
+  const v = text(get(name)).toLowerCase();
+  if (v !== '' && v !== 'true' && v !== 'false') {
+    throw new RetentionConfigError(`${name} must be "true" or "false".`);
+  }
+  return v === 'true';
+}
+
+/**
+ * `RETENTION_PURGE_CRON`: empty = the default, `off` = no schedule, otherwise a valid expression of 5 or 6
+ * fields (validated with the scheduler's own parser; the error names the variable).
+ */
 function cronOf(raw: string): string {
   if (raw === '') return RETENTION_DEFAULTS.cron;
   if (raw.toLowerCase() === 'off') return 'off';
-  if (
-    !/^[0-9*/,\-?LW#A-Za-z ]{5,80}$/.test(raw) ||
-    raw.split(/\s+/).length < 5
-  ) {
-    throw new RetentionConfigError(
-      `RETENTION_PURGE_CRON must be a cron expression of 5 or 6 fields or "off" (got ${JSON.stringify(raw.slice(0, 40))}).`,
-    );
+  try {
+    return assertCronExpression('RETENTION_PURGE_CRON', raw);
+  } catch (err) {
+    if (err instanceof CronConfigError) {
+      throw new RetentionConfigError(err.message);
+    }
+    throw err;
   }
-  return raw;
 }
 
 /**
@@ -150,7 +167,7 @@ export function readRetentionConfig(
       90,
     ),
     contactMonths: int(get, 'PURGE_CONTACT_MONTHS', d.contactMonths, 3, 60),
-    usageLogDays: int(get, 'PURGE_USAGE_LOG_DAYS', d.usageLogDays, 1, 30),
+    usageLogDays: int(get, 'PURGE_USAGE_LOG_DAYS', d.usageLogDays, 1, 7),
     expiredTokenDays: int(
       get,
       'PURGE_EXPIRED_TOKENS_DAYS',
@@ -172,5 +189,6 @@ export function readRetentionConfig(
       24,
       720,
     ),
+    clockResync: bool(get, 'RETENTION_CLOCK_RESYNC'),
   };
 }

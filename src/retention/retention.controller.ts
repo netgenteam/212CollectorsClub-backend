@@ -32,7 +32,7 @@ import {
   RetentionRunsQueryDto,
   RunRetentionDto,
 } from './retention.dto.js';
-import { RetentionService } from './retention.service.js';
+import { RetentionGuardError, RetentionService } from './retention.service.js';
 
 const UNAUTH = {
   status: HttpStatus.UNAUTHORIZED,
@@ -70,7 +70,7 @@ export class RetentionController {
   @ApiOperation({
     summary: 'Run the retention job now (in the background)',
     description:
-      'Same tasks, lock and limits as the daily cron; takes NO parameters (a body with any property is 400). Answers 202 with the id of the run once it holds the lock; follow it with GET /admin/retention/runs. 409 RETENTION_ALREADY_RUNNING when another run (this or another instance) holds the lock; 409 RETENTION_DISABLED when the job is off in this environment (RETENTION_PURGE_ENABLED).',
+      'Same tasks, lock and limits as the daily cron; takes NO parameters (a body with any property is 400). Answers 202 with the id of the run once it holds the lock; follow it with GET /admin/retention/runs. 409 RETENTION_ALREADY_RUNNING when another run (this or another instance) holds the lock; 409 RETENTION_DISABLED when the job is off in this environment (RETENTION_PURGE_ENABLED); 409 RETENTION_REFUSED_TEST_ENV under NODE_ENV=test against a database that is not a throw-away e2e clone.',
   })
   @ApiResponse({ status: HttpStatus.ACCEPTED, type: RetentionRunAcceptedDto })
   @ApiResponse({
@@ -80,14 +80,28 @@ export class RetentionController {
   @ApiResponse(UNAUTH)
   @ApiResponse({
     status: HttpStatus.CONFLICT,
-    description: 'RETENTION_ALREADY_RUNNING | RETENTION_DISABLED',
+    description:
+      'RETENTION_ALREADY_RUNNING | RETENTION_DISABLED | RETENTION_REFUSED_TEST_ENV',
   })
   async run(
     @Req() req: RequestWithAdminUser,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- validated (and required to be empty) by the pipe, never read
     @Body(strictBody(RunRetentionDto)) _body: Readonly<RunRetentionDto>,
   ): Promise<RetentionRunAcceptedDto> {
-    const out = await this.service.start('MANUAL', req.user.id);
+    let out: Awaited<ReturnType<RetentionService['start']>>;
+    try {
+      out = await this.service.start('MANUAL', req.user.id);
+    } catch (err) {
+      // Under NODE_ENV=test the job refuses any database that is not a throw-away e2e clone: say so, not a bare 500.
+      if (err instanceof RetentionGuardError) {
+        throw new ApiException(
+          HttpStatus.CONFLICT,
+          'RETENTION_REFUSED_TEST_ENV',
+          'NODE_ENV=test: the retention job only runs against a throw-away e2e database clone (<name>_e2e_<epoch>_<hex>), and this database is not one. Run the server with NODE_ENV=development or production, or use the e2e suite, which clones the database for you.',
+        );
+      }
+      throw err;
+    }
     if (out.kind === 'busy') {
       throw new ApiException(
         HttpStatus.CONFLICT,
@@ -142,6 +156,7 @@ export class RetentionController {
           ? (r.tasks as unknown as RetentionRunsDto['items'][number]['tasks'])
           : [],
         effectiveNow: r.effectiveNow?.toISOString() ?? null,
+        clockClamped: r.clockClamped,
         auditedAt: r.auditedAt?.toISOString() ?? null,
         errorSummary: r.errorSummary,
       })),
@@ -167,6 +182,7 @@ export class RetentionController {
       maxRunMs: c.maxRunMs,
       safetyMarginMinutes: SAFETY_MARGIN_MS / 60_000,
       maxClockAdvanceHours: c.maxClockAdvanceHours,
+      clockResync: c.clockResync,
       periods: {
         sessionPiiDays: c.sessionPiiDays,
         expiredSessionDays: EXPIRED_SESSION_GRACE_DAYS,

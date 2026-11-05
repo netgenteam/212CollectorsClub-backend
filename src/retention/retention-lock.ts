@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { Logger } from '@nestjs/common';
+import { withUtcSession } from '../prisma/db-session.js';
 
 /**
  * Story 20.8 (AD-101): the SESSION advisory lock of the retention run, held on a `pg.Client` of its own.
@@ -39,7 +40,8 @@ export class RetentionSessionLock {
   static connectionString(databaseUrl: string): string {
     const url = new URL(databaseUrl);
     url.searchParams.delete('schema');
-    return url.toString();
+    // Story 20.8 round 2: same session time zone as the rest of the application (prisma/db-session.ts).
+    return withUtcSession(url.toString());
   }
 
   /**

@@ -62,6 +62,11 @@ export class RetentionRunDto {
   })
   effectiveNow!: string | null;
   @ApiProperty({
+    description:
+      'The run clock was capped: the database clock was ahead of the previous run plus the real time elapsed (a clock jump, or an outage whose length cannot be verified). The purge ran as of effectiveNow, not as of startedAt.',
+  })
+  clockClamped!: boolean;
+  @ApiProperty({
     format: 'date-time',
     nullable: true,
     description:
@@ -99,7 +104,7 @@ export class RetentionPeriodsDto {
       'Anonymous carts and wishlists go when they expire (their own 30-day sliding expiry).',
   })
   anonymousBasketsAtExpiry!: boolean;
-  @ApiProperty({ description: 'PURGE_USAGE_LOG_DAYS (1..30).' })
+  @ApiProperty({ description: 'PURGE_USAGE_LOG_DAYS (1..7).' })
   usageLogDays!: number;
   @ApiProperty({ description: 'Fixed by Epic 18.' })
   productDailyStatsDays!: number;
@@ -124,7 +129,16 @@ export class RetentionConfigDto {
   @ApiProperty() maxRunMs!: number;
   @ApiProperty({ description: 'Added to every period (fixed).' })
   safetyMarginMinutes!: number;
-  @ApiProperty() maxClockAdvanceHours!: number;
+  @ApiProperty({
+    description:
+      'Advance allowed when the time since the previous run cannot be verified (other boot or machine).',
+  })
+  maxClockAdvanceHours!: number;
+  @ApiProperty({
+    description:
+      'RETENTION_CLOCK_RESYNC=true: the next capped run of the process adopts the database clock.',
+  })
+  clockResync!: boolean;
   @ApiProperty({ type: RetentionPeriodsDto }) periods!: RetentionPeriodsDto;
   @ApiProperty({ type: [String] }) tasks!: string[];
   @ApiProperty({ type: [String], description: 'What the job never deletes.' })

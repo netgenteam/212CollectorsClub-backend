@@ -1,8 +1,8 @@
-import '../common/env-at-import.js';
-import { Inject, Injectable, Logger } from '@nestjs/common';
-import type { OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import type { OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Cron, SchedulerRegistry } from '@nestjs/schedule';
+import { SchedulerRegistry } from '@nestjs/schedule';
+import { CronJob } from 'cron';
 import { adminActor, payload, SYSTEM_ACTOR } from '../audit/audit-events.js';
 import { AuditService } from '../audit/audit.service.js';
 import { RequestContext } from '../common/request-context.js';
@@ -10,7 +10,12 @@ import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { UsageLogPurgeService } from '../usage/usage-purge.service.js';
 import { ProductSignalsService } from '../vitrina/product-signals.service.js';
-import { effectiveClock } from './retention-clock.js';
+import {
+  effectiveClock,
+  hostMonotonicSource,
+  RETENTION_MONOTONIC,
+} from './retention-clock.js';
+import type { ClockAnchor, MonotonicSource } from './retention-clock.js';
 import type { RetentionConfig } from './retention-config.js';
 import { RetentionSessionLock } from './retention-lock.js';
 import { RETENTION_ADVISORY_KEY, RETENTION_CONFIG } from './retention.types.js';
@@ -48,11 +53,6 @@ const CATCH_UP_DAYS = 30;
 const CATCH_UP_MAX_PER_RUN = 5;
 /** A running purge is given this long to stop at its next batch when the application shuts down. */
 const SHUTDOWN_WAIT_MS = 20_000;
-
-const CRON_ENV = (process.env.RETENTION_PURGE_CRON ?? '').trim();
-/** `off` disables the cron; the placeholder only keeps the decorator valid (the runtime check is `cfg.cron`). */
-const CRON_EXPRESSION =
-  CRON_ENV === '' || CRON_ENV.toLowerCase() === 'off' ? '30 4 * * *' : CRON_ENV;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -95,6 +95,13 @@ interface PreviousRun {
   effectiveNow: Date | null;
 }
 
+/** The clock of the previous run, with the anchor that lets the next one measure the real time between them. */
+interface PreviousClockRow {
+  effectiveNow: Date;
+  bootId: string | null;
+  uptimeMs: bigint | number | null;
+}
+
 /**
  * Story 20.8 (AD-101, FR-130..132): the daily retention job.
  *
@@ -118,11 +125,14 @@ interface PreviousRun {
  *  - Disabled by default outside production (`RETENTION_PURGE_ENABLED`): see `retention-config.ts`.
  */
 @Injectable()
-export class RetentionService implements OnApplicationShutdown {
+export class RetentionService implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(RetentionService.name);
   private readonly tasks: RetentionTask[];
   private inflight: Promise<RunSummary> | null = null;
   private stopping = false;
+  /** `RETENTION_CLOCK_RESYNC` is honoured once per process (see `retention-clock.ts`). */
+  private resyncUsed = false;
+  private readonly monotonic: MonotonicSource;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -132,7 +142,9 @@ export class RetentionService implements OnApplicationShutdown {
     usagePurge: UsageLogPurgeService,
     signals: ProductSignalsService,
     private readonly scheduler: SchedulerRegistry,
+    @Optional() @Inject(RETENTION_MONOTONIC) monotonic?: MonotonicSource,
   ) {
+    this.monotonic = monotonic ?? hostMonotonicSource;
     // The order is the budget: the small tables first, the big one (usage log) last, so a backlog in
     // it cannot starve the others of the run's time.
     this.tasks = [
@@ -172,12 +184,45 @@ export class RetentionService implements OnApplicationShutdown {
     return this.inflight !== null;
   }
 
-  /** `RETENTION_PURGE_CRON` (default `30 4 * * *`, UTC), after the TCG (03:00) and FX (03:30) jobs. */
-  @Cron(CRON_EXPRESSION, {
-    name: RETENTION_CRON_NAME,
-    timeZone: 'UTC',
-    disabled: process.env.NODE_ENV === 'test',
-  })
+  /**
+   * The ONE schedule of the purge, `RETENTION_PURGE_CRON` (default `30 4 * * *`, UTC, after the TCG (03:00) and
+   * FX (03:30) jobs). It is registered here, from the validated configuration, and not with a `@Cron(...)`
+   * decorator: a decorator is evaluated when the class is imported, before the configuration is read, and
+   * `GET /admin/retention/config` could then show a cron that was not the one running. The usage log has no
+   * schedule of its own any more (`UsageLogPurgeService`): this job purges it.
+   */
+  onModuleInit(): void {
+    const production = process.env.NODE_ENV === 'production';
+    if (!this.cfg.enabled) {
+      this.logger.log(
+        'retention job is DISABLED (RETENTION_PURGE_ENABLED, or NODE_ENV is not production): nothing is purged, the usage log included',
+      );
+      return;
+    }
+    if (this.cfg.cron === 'off') {
+      const msg =
+        'RETENTION_PURGE_CRON=off: the retention job has NO schedule; the usage log (IP and user agent of every visitor, promised to be deleted after 7 days) and every other expiry are only purged by POST /admin/retention/run';
+      if (production) this.logger.warn(msg);
+      else this.logger.log(msg);
+      return;
+    }
+    const job = CronJob.from({
+      cronTime: this.cfg.cron,
+      onTick: () => {
+        void this.scheduled();
+      },
+      start: false,
+      timeZone: 'UTC',
+    });
+    this.scheduler.addCronJob(RETENTION_CRON_NAME, job);
+    // A test process never schedules anything by itself (the e2e calls `scheduled()` directly).
+    if (process.env.NODE_ENV !== 'test') {
+      job.start();
+      this.logger.log(`retention job scheduled: "${this.cfg.cron}" (UTC)`);
+    }
+  }
+
+  /** One tick of the schedule (also what the e2e calls). */
   async scheduled(): Promise<void> {
     if (!this.cfg.enabled || this.cfg.cron === 'off') return;
     // A background job must not carry a request's id or address into the audit chain.
@@ -192,7 +237,11 @@ export class RetentionService implements OnApplicationShutdown {
           await out.done;
         }
       } catch (err) {
-        this.logger.error(`retention run could not start: ${errorCode(err)}`);
+        this.logger.error(
+          err instanceof RetentionGuardError
+            ? `retention run could not start: ${err.message}`
+            : `retention run could not start: ${errorCode(err)}`,
+        );
       }
     });
   }
@@ -223,20 +272,27 @@ export class RetentionService implements OnApplicationShutdown {
       await this.failOrphanedRuns();
       const dbNow = await this.databaseNow();
       skewMs = Math.abs(dbNow.getTime() - Date.now());
-      const previous = await this.previousEffectiveNow();
-      const clock = effectiveClock(
+      const previous = await this.previousClock();
+      const anchor = this.monotonic.anchor();
+      const clock = effectiveClock({
         dbNow,
         previous,
-        this.cfg.maxClockAdvanceHours,
-      );
+        current: anchor,
+        maxAdvanceHours: this.cfg.maxClockAdvanceHours,
+        resync: this.cfg.clockResync && !this.resyncUsed,
+      });
       asOf = clock.asOf;
       clamped = clock.clamped;
+      this.reportClock(clock, dbNow);
       const row = await this.prisma.retentionRun.create({
         data: {
           trigger,
           triggeredById: adminId,
           status: 'RUNNING',
           effectiveNow: asOf,
+          clockClamped: clamped,
+          bootId: anchor.bootId,
+          uptimeMs: anchor.uptimeMs === null ? null : BigInt(anchor.uptimeMs),
         },
         select: { id: true },
       });
@@ -274,16 +330,51 @@ export class RetentionService implements OnApplicationShutdown {
     }
   }
 
+  /**
+   * The database clock as an epoch (`extract(epoch ...)`): an integer no session time zone and no driver parser
+   * can shift. (Reading `now()` as a `timestamptz` through Prisma came back offset by the zone of the session:
+   * every run aborted with CLOCK_SKEW. The connections now run in UTC as well, `prisma/db-session.ts`.)
+   */
   private async databaseNow(): Promise<Date> {
-    const r = await this.prisma.$queryRaw<{ now: Date }[]>`SELECT now() AS now`;
-    return r[0].now;
+    const r = await this.prisma.$queryRaw<
+      { ms: bigint }[]
+    >`SELECT (floor(extract(epoch FROM now()) * 1000))::bigint AS ms`;
+    return new Date(Number(r[0].ms));
   }
 
-  private async previousEffectiveNow(): Promise<Date | null> {
-    const r = await this.prisma.$queryRaw<{ effectiveNow: Date }[]>`
-      SELECT "effectiveNow" FROM "Retention_Runs"
+  private async previousClock(): Promise<
+    (ClockAnchor & { effectiveNow: Date }) | null
+  > {
+    const r = await this.prisma.$queryRaw<PreviousClockRow[]>`
+      SELECT "effectiveNow", "bootId", "uptimeMs" FROM "Retention_Runs"
        WHERE "effectiveNow" IS NOT NULL ORDER BY "startedAt" DESC LIMIT 1`;
-    return r[0]?.effectiveNow ?? null;
+    const p = r[0];
+    if (!p) return null;
+    return {
+      effectiveNow: p.effectiveNow,
+      bootId: p.bootId,
+      uptimeMs: p.uptimeMs === null ? null : Number(p.uptimeMs),
+    };
+  }
+
+  /** WARN every time the clock was capped or resynchronised, with the lag, so it is never silent. */
+  private reportClock(
+    clock: ReturnType<typeof effectiveClock>,
+    dbNow: Date,
+  ): void {
+    const lagH = (clock.lagMs / 3_600_000).toFixed(1);
+    if (clock.basis === 'resync') {
+      this.resyncUsed = true;
+      this.logger.warn(
+        `retention clock RESYNCHRONISED to the database clock (${dbNow.toISOString()}) because RETENTION_CLOCK_RESYNC=true; remove that variable now`,
+      );
+    } else if (clock.clamped) {
+      this.logger.warn(
+        `retention clock capped (clockClamped=true): the database clock is ${lagH} h ahead of what the time elapsed since the previous run allows ` +
+          `(${clock.basis === 'verified' ? 'elapsed time measured with the host uptime counter' : 'elapsed time not verifiable: other boot, other machine or no anchor, advance limited to RETENTION_MAX_CLOCK_ADVANCE_HOURS'}); ` +
+          `purging as of ${clock.asOf.toISOString()}. If the machine really was down that long, set RETENTION_CLOCK_RESYNC=true and restart once (docs/deployment.md 20.5)`,
+      );
+    }
   }
 
   /** `RUNNING` rows left by a dead run -> `FAILED` (AC6 asks for 30 minutes; holding the lock proves death sooner). */
@@ -398,16 +489,18 @@ export class RetentionService implements OnApplicationShutdown {
       await p.lock.release(RETENTION_ADVISORY_KEY);
     }
     const total = results.reduce((n, r) => n + r.rows, 0);
-    this.logger.log(
+    // WARN when the clock was capped: it must stand out in the log (and is on the run row and in the audit event).
+    const summary =
       `retention run ${p.runId} (${p.trigger}) ${status}: ${total} rows in ${Date.now() - t0} ms; ` +
-        results
-          .map(
-            (r) =>
-              `${r.name}=${r.rows}${r.truncated ? '+' : ''}${r.error ? '!' : ''}`,
-          )
-          .join(' ') +
-        (p.clamped ? ' [clock capped]' : ''),
-    );
+      results
+        .map(
+          (r) =>
+            `${r.name}=${r.rows}${r.truncated ? '+' : ''}${r.error ? '!' : ''}`,
+        )
+        .join(' ') +
+      (p.clamped ? ' [clockClamped=true]' : '');
+    if (p.clamped) this.logger.warn(summary);
+    else this.logger.log(summary);
     return { runId: p.runId, status, tasks: results, audited };
   }
 
@@ -567,6 +660,12 @@ export class RetentionService implements OnApplicationShutdown {
   /** Shutdown: the run stops at its next batch; wait a little so its row is closed. */
   async onApplicationShutdown(): Promise<void> {
     this.stopping = true;
+    try {
+      void this.scheduler.getCronJob(RETENTION_CRON_NAME).stop();
+      this.scheduler.deleteCronJob(RETENTION_CRON_NAME);
+    } catch {
+      /* never registered (disabled, off, or already removed by the scheduler) */
+    }
     const running = this.inflight;
     if (running) {
       await Promise.race([

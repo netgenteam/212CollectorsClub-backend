@@ -22,6 +22,7 @@ describe('retention config (Story 20.8 AC5)', () => {
       expiredTokenDays: 1,
       retentionRunsDays: 400,
       maxClockAdvanceHours: 72,
+      clockResync: false,
     });
     expect(RETENTION_DEFAULTS.sessionPiiDays).toBe(90);
   });
@@ -33,7 +34,8 @@ describe('retention config (Story 20.8 AC5)', () => {
     ['PURGE_CONTACT_MONTHS', '2'],
     ['PURGE_CONTACT_MONTHS', '0'],
     ['PURGE_USAGE_LOG_DAYS', '0'],
-    ['PURGE_USAGE_LOG_DAYS', '31'],
+    ['PURGE_USAGE_LOG_DAYS', '8'], // the Privacy Policy promises 7 days
+    ['PURGE_USAGE_LOG_DAYS', '30'],
     ['PURGE_EXPIRED_TOKENS_DAYS', '0'],
     ['PURGE_RETENTION_RUNS_DAYS', '89'],
     ['RETENTION_BATCH_SIZE', '1001'],
@@ -42,6 +44,9 @@ describe('retention config (Story 20.8 AC5)', () => {
     ['RETENTION_MAX_RUN_MS', '999'],
     ['RETENTION_MAX_CLOCK_ADVANCE_HOURS', '23'],
     ['RETENTION_PURGE_CRON', 'not a cron'],
+    ['RETENTION_PURGE_CRON', '61 99 * * *'], // well-formed but impossible: used to stop the start with a bare CronError
+    ['RETENTION_PURGE_CRON', '* * * *'],
+    ['RETENTION_CLOCK_RESYNC', 'yes'],
     ['RETENTION_PURGE_ENABLED', 'yes'],
   ])('%s=%s stops the start, naming the variable', (name, value) => {
     expect(() => readRetentionConfig(env({ [name]: value }))).toThrow(
@@ -57,7 +62,7 @@ describe('retention config (Story 20.8 AC5)', () => {
       env({
         PURGE_SESSION_PII_DAYS: '30',
         PURGE_CONTACT_MONTHS: '3',
-        PURGE_USAGE_LOG_DAYS: '30',
+        PURGE_USAGE_LOG_DAYS: '7',
         RETENTION_BATCH_SIZE: '10',
         RETENTION_PURGE_CRON: '0 5 * * *',
       }),
@@ -65,7 +70,7 @@ describe('retention config (Story 20.8 AC5)', () => {
     );
     expect(c.sessionPiiDays).toBe(30);
     expect(c.contactMonths).toBe(3);
-    expect(c.usageLogDays).toBe(30);
+    expect(c.usageLogDays).toBe(7);
     expect(c.batchSize).toBe(10);
     expect(c.cron).toBe('0 5 * * *');
   });

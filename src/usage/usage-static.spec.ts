@@ -100,16 +100,37 @@ describe('Usage_Logs stays where it belongs (Story 20.7)', () => {
     expect(stripComments(sql)).not.toMatch(/lock_timeout/i);
   });
 
-  it('the cron expressions of the usage purge and the retention job see .env (env-at-import first)', () => {
-    for (const rel of [
-      'src/usage/usage-purge.service.ts',
-      'src/retention/retention.service.ts',
+  it('there is ONE schedule for the usage log purge: the retention job (no @Cron and no USAGE_LOG_PURGE_CRON in the purge service)', () => {
+    const f = sources.find(
+      (x) => x.rel === 'src/usage/usage-purge.service.ts',
+    )!;
+    expect(stripComments(f.text)).not.toMatch(/@Cron|\bCron\b|scheduled\s*\(/);
+    // it may still NAME the variable, only to warn that it is ignored
+    expect(f.text).toMatch(/USAGE_LOG_PURGE_CRON is IGNORED/);
+    const r = sources.find(
+      (x) => x.rel === 'src/retention/retention.service.ts',
+    )!;
+    // the retention schedule comes from the validated configuration, not from a decorator evaluated at import
+    expect(stripComments(r.text)).not.toMatch(/@Cron\(/);
+    expect(r.text).toMatch(/CronJob\.from\(\{\s*cronTime: this\.cfg\.cron/);
+  });
+
+  it('the crons that are decorators (FX, vitrina, audit) read .env (env-at-import) and validate their variable', () => {
+    for (const [rel, name] of [
+      ['src/fx/fx-refresh.service.ts', 'FX_REFRESH_CRON'],
+      ['src/vitrina/vitrina-cron.service.ts', 'VITRINA_RECOMPUTE_CRON'],
+      ['src/audit/audit-verify.cron.ts', 'AUDIT_VERIFY_CRON'],
     ]) {
-      const f = sources.find((x) => x.rel === rel)!;
-      const firstImport = f.text
+      const f = sources.find((x) => x.rel === rel);
+      expect(f, rel).toBeDefined();
+      const firstImport = f!.text
         .split('\n')
         .find((l) => l.startsWith('import '));
       expect(firstImport, rel).toContain('env-at-import');
+      expect(f!.text, rel).toContain(`cronFromEnv('${name}'`);
+      expect(stripComments(f!.text), rel).not.toMatch(
+        new RegExp(`process\\.env\\.${name}`),
+      );
     }
   });
 

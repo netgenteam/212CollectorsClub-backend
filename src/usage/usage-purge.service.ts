@@ -1,12 +1,8 @@
-import '../common/env-at-import.js';
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import type { OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Cron } from '@nestjs/schedule';
-import { Inject } from '@nestjs/common';
 import { isLockWaitExpired } from '../common/lock-timeout.js';
-import { RequestContext } from '../common/request-context.js';
 import { PrismaService } from '../prisma/prisma.service.js';
-import { isRetentionEnabled } from '../retention/retention-config.js';
 import type { UsageLogConfig } from './usage-config.js';
 import { USAGE_LOG_CONFIG } from './usage-log.types.js';
 
@@ -25,22 +21,11 @@ export const PURGE_MAX_RUN_MS = 5 * 60_000;
 /** Distinct from the audit chain lock (2120001) and from Story 20.8's retention run lock (2120002). */
 export const PURGE_ADVISORY_KEY = 2120003;
 
-const CRON_ENV = (process.env.USAGE_LOG_PURGE_CRON ?? '').trim();
-/** `off` disables it; the placeholder expression only keeps the decorator valid. */
-const CRON_OFF = CRON_ENV.toLowerCase() === 'off';
-const CRON_EXPRESSION = CRON_ENV === '' || CRON_OFF ? '0 15 4 * * *' : CRON_ENV;
-/**
- * Story 20.8: this service no longer purges on its own unless `USAGE_LOG_PURGE_CRON` is set to a cron
- * expression: the retention job (`RetentionService`) runs `purgeExpired()` as its `usage_logs` task, and a
- * development server must not delete anything by default.
- */
-const OWN_SCHEDULE = CRON_ENV !== '' && !CRON_OFF;
-
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
  * Story 20.7 (the purge is Story 20.8's, FR-131, but an unbounded table between the two stories is
- * not acceptable): deletes `Usage_Logs` older than `PURGE_USAGE_LOG_DAYS` (default 7, 1..30) every day.
+ * not acceptable): deletes `Usage_Logs` older than `PURGE_USAGE_LOG_DAYS` (default 7, 1..7: the Privacy Policy promises 7) every day.
  *
  *   - batches of 1 000 by `ts` (`DELETE ... WHERE id IN (SELECT id ... ORDER BY ts LIMIT n)`): each batch is
  *     its own short transaction, so no lock is held long and the writer (an INSERT) never waits for it. No
@@ -52,12 +37,12 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  *   - idempotent: running it twice leaves the same table.
  *
  * Story 20.8: `RetentionService` calls `purgeExpired()` as its `usage_logs` task (with the run's clock and
- * stop condition). The cron below is therefore OFF unless `USAGE_LOG_PURGE_CRON` holds a cron expression,
- * and even then it does not run while the retention job is enabled (`RETENTION_PURGE_ENABLED`, default only
- * in production): the job owns the purge, and two schedulers would only fight over the same rows.
+ * stop condition) and is the ONLY schedule: this service has no cron of its own any more (round 2). The old
+ * `USAGE_LOG_PURGE_CRON` left two holes: with the job active and `RETENTION_PURGE_CRON=off` nobody purged, and
+ * with the job disabled the old cron purged without the safety margin or the capped clock.
  */
 @Injectable()
-export class UsageLogPurgeService {
+export class UsageLogPurgeService implements OnModuleInit {
   private readonly logger = new Logger(UsageLogPurgeService.name);
   private running = false;
 
@@ -67,28 +52,16 @@ export class UsageLogPurgeService {
     private readonly config: ConfigService,
   ) {}
 
-  /** Only when `USAGE_LOG_PURGE_CRON` is a cron expression (e.g. `0 15 4 * * *`, UTC) and the retention job is not enabled. */
-  @Cron(CRON_EXPRESSION, {
-    name: 'usage-log-purge',
-    timeZone: 'UTC',
-    disabled: !OWN_SCHEDULE || process.env.NODE_ENV === 'test',
-  })
-  async scheduled(): Promise<void> {
-    // Story 20.8: the retention job runs this purge as its `usage_logs` task.
-    if (!OWN_SCHEDULE || isRetentionEnabled((k) => this.config.get<string>(k)))
-      return;
-    await RequestContext.detached(async () => {
-      try {
-        const r = await this.purgeExpired();
-        this.logger.log(
-          `usage log purge: ${r.rows} rows older than ${this.cfg.purgeDays} days deleted in ${r.batches} batches, ${r.durationMs} ms${r.truncated ? ' (truncated: the rest goes in the next run)' : ''}`,
-        );
-      } catch (err) {
-        this.logger.error(
-          `usage log purge failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    });
+  /** `USAGE_LOG_PURGE_CRON` no longer exists: say so instead of leaving someone to believe it still schedules. */
+  onModuleInit(): void {
+    const legacy = String(
+      this.config.get<string>('USAGE_LOG_PURGE_CRON') ?? '',
+    ).trim();
+    if (legacy !== '' && legacy.toLowerCase() !== 'off') {
+      this.logger.warn(
+        'USAGE_LOG_PURGE_CRON is IGNORED: the usage log is purged only by the retention job (RETENTION_PURGE_CRON, RETENTION_PURGE_ENABLED); remove the variable',
+      );
+    }
   }
 
   async purgeExpired(

@@ -29,6 +29,7 @@ import {
   derivedTagSlugs,
   STANDARD_ROOTS,
 } from '../src/admin-catalog/seeded-taxonomy.js';
+import { withUtcSession } from '../src/prisma/db-session.js';
 import { SINGLETON_FX_RATE_ID } from '../src/checkout/fx-rate.constants.js';
 import {
   LANDING_SECTION_BANNERS,
@@ -50,7 +51,7 @@ if (!databaseUrl) {
 }
 
 const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString: databaseUrl }),
+  adapter: new PrismaPg({ connectionString: withUtcSession(databaseUrl) }),
 });
 
 interface SeedCategory {

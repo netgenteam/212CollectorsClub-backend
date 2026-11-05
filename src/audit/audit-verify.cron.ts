@@ -1,3 +1,5 @@
+import '../common/env-at-import.js';
+import { cronFromEnv } from '../common/cron-expression.js';
 import { Injectable, Logger } from '@nestjs/common';
 import type { OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -85,7 +87,7 @@ export class AuditVerifyCron implements OnApplicationBootstrap {
       : 'full';
   }
 
-  @Cron(process.env.AUDIT_VERIFY_CRON || '0 5 * * 0', {
+  @Cron(cronFromEnv('AUDIT_VERIFY_CRON', '0 5 * * 0'), {
     name: 'audit-verify',
     timeZone: 'UTC',
   })

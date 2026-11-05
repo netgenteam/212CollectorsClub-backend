@@ -103,6 +103,12 @@ pnpm build
 log "validating the ID document keyring (parseIdDocKeyring)"
 node dist/crypto/cli/check-keyring.js --env-file "$ENV_FILE" || fail "the ID document keyring in $ENV_FILE is invalid (see above; docs/deployment.md section 14). Nothing was migrated and the service was NOT restarted."
 
+# Story 20.8 round 2: validate the optional retention / usage-log / cron settings with the SAME functions the service runs at
+# boot, before the migrations and the restart. An optional variable written wrong (PURGE_USAGE_LOG_DAYS=30, a cron of
+# "61 99 * * *", RETENTION_BATCH_SIZE=5000) used to pass here and then stop the service from starting after the restart.
+log "validating the retention configuration (check-config)"
+node dist/retention/cli/check-config.js --env-file "$ENV_FILE" || fail "the retention configuration in $ENV_FILE is invalid (see above; docs/deployment.md section 20). Nothing was migrated and the service was NOT restarted."
+
 # Explicit, separate migration step — see file header. Uses $ENV_FILE's
 # DATABASE_URL (loaded into the shell below), never an implicit boot-time
 # migration.

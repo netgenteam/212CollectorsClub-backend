@@ -1,3 +1,5 @@
+import '../common/env-at-import.js';
+import { cronFromEnv } from '../common/cron-expression.js';
 import {
   Inject,
   Injectable,
@@ -102,10 +104,10 @@ export class FxRefreshService implements OnApplicationBootstrap {
     void this.safeRefresh('bootstrap');
   }
 
-  // NOTE: the expression is read from the process environment when the class
-  // is decorated, so FX_REFRESH_CRON must be exported to the process
-  // (systemd EnvironmentFile / shell), not only present in a .env file.
-  @Cron(process.env.FX_REFRESH_CRON || '*/30 * * * *', { name: 'fx-refresh' })
+  // NOTE: the expression is read when the class is decorated, i.e. at import: `env-at-import` loads `.env` first
+  // (Story 20.8 round 2: before, a value only in `.env` was ignored), and an invalid one stops the start naming
+  // FX_REFRESH_CRON (`cronFromEnv`) instead of a bare CronError.
+  @Cron(cronFromEnv('FX_REFRESH_CRON', '*/30 * * * *'), { name: 'fx-refresh' })
   async handleCron(): Promise<void> {
     if (!this.isEnabled()) return;
     await this.safeRefresh('cron');

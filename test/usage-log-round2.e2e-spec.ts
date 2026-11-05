@@ -665,11 +665,19 @@ describe(
         );
         const t3 = await boot();
         try {
-          // control: in this session `timestamptz - '7 days'` is the OLD, DST-dependent arithmetic
-          const ctl = await t3.prisma.$queryRaw<{ tz: string; old: string }[]>`
+          // Round 2 of 20.8: the application's own connections run in UTC whatever the database says
+          const appTz = await t3.prisma.$queryRaw<
+            { tz: string }[]
+          >`SELECT current_setting('TimeZone') AS tz`;
+          expect(appTz[0].tz).toBe('UTC');
+          // control: in a New York session `timestamptz - '7 days'` is the OLD, DST-dependent arithmetic
+          const ctl = await t3.prisma.$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT set_config('TimeZone', 'America/New_York', true)`;
+            return tx.$queryRaw<{ tz: string; old: string }[]>`
             SELECT current_setting('TimeZone') AS tz,
                    to_char(('2026-11-02T12:00:00Z'::timestamptz - make_interval(days => 7)) AT TIME ZONE 'UTC',
                            'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS old`;
+          });
           expect(ctl[0].tz).toBe('America/New_York');
           expect(ctl[0].old).toBe('2026-10-26T11:00:00Z'); // the bug: 169 hours
           const ins = (iso: string) =>

@@ -45,7 +45,8 @@ describe('readUsageLogConfig', () => {
     ['USAGE_LOG_FLUSH_BATCH', '-1'],
     ['USAGE_LOG_FLUSH_BATCH', '99999'],
     ['PURGE_USAGE_LOG_DAYS', '0'],
-    ['PURGE_USAGE_LOG_DAYS', '31'],
+    ['PURGE_USAGE_LOG_DAYS', '8'],
+    ['PURGE_USAGE_LOG_DAYS', '30'],
     ['USAGE_LOG_ENABLED', 'maybe'],
   ])('%s=%s stops the start naming the variable', (name, value) => {
     expect(() => cfg({ [name]: value })).toThrow(UsageLogConfigError);

@@ -1,3 +1,5 @@
+import '../common/env-at-import.js';
+import { cronFromEnv } from '../common/cron-expression.js';
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -53,8 +55,9 @@ export class VitrinaCronService implements OnApplicationBootstrap {
     }
   }
 
-  // NOTE: read from the process environment when the class is decorated.
-  @Cron(process.env.VITRINA_RECOMPUTE_CRON || '0 * * * *', {
+  // NOTE: read when the class is decorated (at import), after `env-at-import` loaded `.env`; invalid = the start
+  // stops naming VITRINA_RECOMPUTE_CRON.
+  @Cron(cronFromEnv('VITRINA_RECOMPUTE_CRON', '0 * * * *'), {
     name: 'vitrina-recompute',
   })
   async handleCron(): Promise<void> {

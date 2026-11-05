@@ -26,6 +26,7 @@ interface Rig {
     currentDatabase: ReturnType<typeof vi.fn>;
   };
   tasks: RetentionTask[];
+  prisma: { retentionRun: { create: ReturnType<typeof vi.fn> } };
 }
 
 function rig(
@@ -33,6 +34,11 @@ function rig(
     cfg?: ReturnType<typeof cfgOf>;
     dbNow?: Date;
     previous?: Date | null;
+    previousBoot?: string | null;
+    previousUptimeMs?: number | null;
+    monotonic?: {
+      anchor: () => { bootId: string | null; uptimeMs: number | null };
+    };
     auditFails?: boolean;
     createFails?: unknown;
     tasks?: RetentionTask[];
@@ -49,11 +55,21 @@ function rig(
   const query = (first: unknown) => {
     const strings = (first as string[]).join('?');
     sql.push(strings.replace(/\s+/g, ' ').trim());
-    if (/SELECT now\(\)/.test(strings))
-      return Promise.resolve([{ now: opts.dbNow ?? new Date() }]);
+    if (/extract\(epoch FROM now\(\)\)/.test(strings))
+      return Promise.resolve([
+        { ms: BigInt((opts.dbNow ?? new Date()).getTime()) },
+      ]);
     if (/SELECT "effectiveNow"/.test(strings))
       return Promise.resolve(
-        opts.previous ? [{ effectiveNow: opts.previous }] : [],
+        opts.previous
+          ? [
+              {
+                effectiveNow: opts.previous,
+                bootId: opts.previousBoot ?? null,
+                uptimeMs: opts.previousUptimeMs ?? null,
+              },
+            ]
+          : [],
       );
     if (/"finishedAt" IS NOT NULL AND "auditedAt" IS NULL/.test(strings))
       return Promise.resolve([]);
@@ -100,13 +116,14 @@ function rig(
     {
       getCronJob: () => ({ nextDate: () => new Date('2026-11-05T04:30:00Z') }),
     } as never,
+    opts.monotonic ?? { anchor: () => ({ bootId: null, uptimeMs: null }) },
   );
   const tasks: RetentionTask[] = opts.tasks ?? [
     { name: 'a', run: () => Promise.resolve({ rows: 3, truncated: false }) },
     { name: 'b', run: () => Promise.resolve({ rows: 0, truncated: true }) },
   ];
   (svc as unknown as { tasks: RetentionTask[] }).tasks = tasks;
-  return { svc, sql, audited, lock, tasks };
+  return { svc, sql, audited, lock, tasks, prisma };
 }
 
 describe('RetentionService', () => {
@@ -262,6 +279,81 @@ describe('RetentionService', () => {
     // skewMs > MAX_CLOCK_SKEW_MS: nothing ran at all, which is even safer
     expect(seen).toEqual([]);
     expect(MAX_CLOCK_SKEW_MS).toBeLessThanOrEqual(10 * 60_000);
+  });
+
+  it('QA reproduction: the unverifiable clock is capped, saved as clockClamped with its anchor, and the run says so in the WARN', async () => {
+    const seen: Date[] = [];
+    const task: RetentionTask = {
+      name: 'a',
+      run: (ctx) => {
+        seen.push(ctx.asOf);
+        return Promise.resolve({ rows: 0, truncated: false });
+      },
+    };
+    const now = Date.now();
+    const prev = new Date(now - 2 * 86_400_000);
+    const r = rig({
+      tasks: [task],
+      previous: prev,
+      dbNow: new Date(now),
+      monotonic: { anchor: () => ({ bootId: 'boot-B', uptimeMs: 123 }) },
+    });
+    const warn = vi
+      .spyOn(
+        (r.svc as unknown as { logger: { warn: (m: string) => void } }).logger,
+        'warn',
+      )
+      .mockImplementation(() => undefined);
+    // previous run 48 h ago with NO anchor (unverifiable): allowed up to 72 h, so the database clock is used
+    const out = await r.svc.start('SCHEDULED');
+    if (out.kind !== 'started') throw new Error('x');
+    await out.done;
+    expect(seen[0].getTime()).toBe(now);
+    expect(
+      (r.prisma.retentionRun.create.mock.calls[0][0] as { data: unknown }).data,
+    ).toMatchObject({
+      clockClamped: false,
+      bootId: 'boot-B',
+      uptimeMs: 123n,
+    });
+    warn.mockClear();
+    // now the previous run was 10 days ago and unverifiable: capped at +72 h, flagged, and WARN-ed
+    const r2 = rig({
+      tasks: [task],
+      previous: new Date(now - 10 * 86_400_000),
+      dbNow: new Date(now),
+    });
+    const warn2 = vi
+      .spyOn(
+        (r2.svc as unknown as { logger: { warn: (m: string) => void } }).logger,
+        'warn',
+      )
+      .mockImplementation(() => undefined);
+    const o2 = await r2.svc.start('SCHEDULED');
+    if (o2.kind !== 'started') throw new Error('x');
+    await o2.done;
+    expect(seen[1].getTime()).toBe(now - 7 * 86_400_000);
+    expect(
+      (
+        r2.prisma.retentionRun.create.mock.calls[0][0] as {
+          data: { clockClamped: boolean };
+        }
+      ).data.clockClamped,
+    ).toBe(true);
+    const messages = warn2.mock.calls.map((c) => String(c[0]));
+    expect(messages.some((m) => /clockClamped=true/.test(m))).toBe(true);
+    expect(messages.filter((m) => /clockClamped=true/.test(m)).length).toBe(2); // the clock WARN and the run summary
+  });
+
+  it('the clock is read as an epoch (a timestamptz parser can not shift it)', async () => {
+    const r = rig();
+    const out = await r.svc.start('SCHEDULED');
+    if (out.kind !== 'started') throw new Error('x');
+    await out.done;
+    expect(r.sql.some((q) => /extract\(epoch FROM now\(\)\)/.test(q))).toBe(
+      true,
+    );
+    expect(r.sql.some((q) => /^SELECT now\(\)/.test(q))).toBe(false);
   });
 
   it('database and application clocks far apart: nothing is purged, the run is FAILED with CLOCK_SKEW', async () => {

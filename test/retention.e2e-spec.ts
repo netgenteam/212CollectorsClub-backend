@@ -13,6 +13,7 @@ import { AppModule } from './../src/app.module.js';
 import { applyRequestContext } from './../src/common/request-id.middleware.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { SchedulerRegistry } from '@nestjs/schedule';
 import { UsageLogPurgeService } from './../src/usage/usage-purge.service.js';
 import { RetentionService } from './../src/retention/retention.service.js';
 import { RETENTION_ADVISORY_KEY } from './../src/retention/retention.types.js';
@@ -679,18 +680,47 @@ describe('Retention job (e2e, Story 20.8)', { timeout: 120_000 }, () => {
       );
     });
 
-    it('the usage-log purge of 20.7 has no schedule of its own: with the job enabled, or without USAGE_LOG_PURGE_CRON, scheduled() deletes nothing', async () => {
+    it('ONE schedule for the usage log: the retention job. UsageLogPurgeService has no cron (USAGE_LOG_PURGE_CRON is ignored) and the job is registered from the validated configuration', async () => {
+      const jobs = (app: NestExpressApplication) =>
+        [...app.get(SchedulerRegistry).getCronJobs().keys()].filter((n) =>
+          /usage|retention/.test(n),
+        );
+      expect('scheduled' in t.app.get(UsageLogPurgeService)).toBe(false);
+      // job enabled, valid cron: exactly the retention job
+      expect(jobs(t.app)).toEqual(['retention-purge']);
+      // the old per-service cron set, job DISABLED: nobody schedules, nothing is purged
       const rid = randomUUID();
       await x(
         `INSERT INTO "Usage_Logs" ("ts","method","route","status","durationMs","actorType","requestId") VALUES (now() - interval '9 days','GET','/${MARK}',200,1,'ANON',$1::uuid)`,
         rid,
       );
       try {
-        await t.app.get(UsageLogPurgeService).scheduled(); // retention enabled in this app
-        expect(await rowCount('Usage_Logs', `"requestId" = '${rid}'`)).toBe(1);
-        const off = await boot({ RETENTION_PURGE_ENABLED: '__unset__' });
+        const legacy = await boot({
+          RETENTION_PURGE_ENABLED: 'false',
+          USAGE_LOG_PURGE_CRON: '* * * * * *',
+        });
         try {
-          await off.app.get(UsageLogPurgeService).scheduled(); // job off: still not by itself in a development server...
+          expect(jobs(legacy.app)).toEqual([]);
+          await new Promise((r) => setTimeout(r, 2_500));
+          expect(await rowCount('Usage_Logs', `"requestId" = '${rid}'`)).toBe(
+            1,
+          );
+          await legacy.svc.scheduled(); // disabled: a tick does nothing either
+          expect(await rowCount('Usage_Logs', `"requestId" = '${rid}'`)).toBe(
+            1,
+          );
+        } finally {
+          await legacy.close();
+        }
+        // job enabled with the cron OFF: no schedule at all (the production boot logs a WARN), and the old variable changes nothing
+        const off = await boot({
+          RETENTION_PURGE_CRON: 'off',
+          USAGE_LOG_PURGE_CRON: '* * * * * *',
+        });
+        try {
+          expect(jobs(off.app)).toEqual([]);
+          expect(off.svc.nextRunAt()).toBeNull();
+          await new Promise((r) => setTimeout(r, 2_500));
           expect(await rowCount('Usage_Logs', `"requestId" = '${rid}'`)).toBe(
             1,
           );
@@ -702,12 +732,34 @@ describe('Retention job (e2e, Story 20.8)', { timeout: 120_000 }, () => {
       }
     });
 
+    it('GET /config shows the cron that is really registered (set after the modules were imported), and so does the next run', async () => {
+      const custom = await boot({ RETENTION_PURGE_CRON: '15 2 * * *' });
+      try {
+        const res = await custom
+          .server()
+          .get(`${BASE}/admin/retention/config`)
+          .set('Authorization', `Bearer ${admin.token}`)
+          .expect(200);
+        expect(res.body.cron).toBe('15 2 * * *');
+        const next = new Date(res.body.nextRunAt as string);
+        expect([next.getUTCHours(), next.getUTCMinutes()]).toEqual([2, 15]);
+        const registered = custom.app
+          .get(SchedulerRegistry)
+          .getCronJob('retention-purge');
+        expect(String(registered.cronTime.source)).toBe('15 2 * * *');
+      } finally {
+        await custom.close();
+      }
+    });
+
     it('an invalid period stops the application from starting, naming the variable', async () => {
       for (const [name, value] of [
         ['PURGE_SESSION_PII_DAYS', '29'],
         ['PURGE_CONTACT_MONTHS', '2'],
         ['PURGE_USAGE_LOG_DAYS', '0'],
+        ['PURGE_USAGE_LOG_DAYS', '8'], // the Privacy Policy promises 7
         ['RETENTION_BATCH_SIZE', '5000'],
+        ['RETENTION_PURGE_CRON', '61 99 * * *'], // used to stop the start with a bare CronError
       ] as const) {
         await expect(boot({ [name]: value })).rejects.toThrow(new RegExp(name));
       }
@@ -1107,7 +1159,7 @@ describe('Retention job (e2e, Story 20.8)', { timeout: 120_000 }, () => {
 
   // =================================================================================================
   describe('time: margin, clock jumps, budget (AC2, "Reloj")', () => {
-    it('a clock that jumped forward does not bring the purge forward: asOf is capped at the previous run + 72 h', async () => {
+    it('a clock that jumped forward does not bring the purge forward: with an unverifiable previous run asOf is capped at previous + 72 h, then it follows the real time', async () => {
       await x(`DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING'`);
       const prev = randomUUID();
       // the previous run "was" 10 days ago: today's database clock is 7 days past what the cap allows
@@ -1148,7 +1200,16 @@ describe('Retention job (e2e, Story 20.8)', { timeout: 120_000 }, () => {
           )
         )[0];
         expect(ev.after.clockClamped).toBe(true);
-        // the next run (a day later in effect) walks on from there: catching up is by the cap, never at once
+        // saved on the row and shown by GET /admin/retention/runs
+        expect(r.run.clockClamped).toBe(true);
+        expect(r.run.bootId).toBeTruthy();
+        const listed = await get('/admin/retention/runs?limit=5').expect(200);
+        const mine = (
+          listed.body.items as { id: string; clockClamped: boolean }[]
+        ).find((i) => i.id === r.runId);
+        expect(mine?.clockClamped).toBe(true);
+        // the next run seconds later: the real time elapsed is seconds, so the clock stays where it was (round 1 moved
+        // it another 72 h per run)
         const r2 = await runAndWait();
         const eff2 = (
           await q<{ lag: string }>(
@@ -1156,12 +1217,134 @@ describe('Retention job (e2e, Story 20.8)', { timeout: 120_000 }, () => {
             r2.runId,
           )
         )[0];
-        expect(Number(eff2.lag) / 86_400).toBeGreaterThan(3.9);
-        expect(Number(eff2.lag) / 86_400).toBeLessThan(4.1);
+        expect(Number(eff2.lag) / 86_400).toBeGreaterThan(6.9);
+        expect(Number(eff2.lag) / 86_400).toBeLessThan(7.1);
       } finally {
         await x(`DELETE FROM "Contact_Inquiries" WHERE "id" = $1::uuid`, old);
         await cleanup(`${MARK}-j`, s);
         await x(`DELETE FROM "Retention_Runs" WHERE "id" = $1::uuid`, prev);
+      }
+    });
+
+    it('QA reproduction: a +48 h clock jump and three POSTs in a row move asOf by the real seconds, and nothing is purged early (a cart/log/contact still within its period)', async () => {
+      await x(`DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING'`);
+      const JUMP_MS = 48 * 3_600_000;
+      const svc = t.svc as unknown as {
+        monotonic: { anchor: () => { bootId: string; uptimeMs: number } };
+        databaseNow: () => Promise<Date>;
+      };
+      const realDbNow = svc.databaseNow.bind(svc);
+      const realMono = svc.monotonic;
+      let uptime = 1_000_000;
+      let jumped = false;
+      svc.monotonic = {
+        anchor: () => ({ bootId: 'e2e-boot', uptimeMs: uptime }),
+      };
+      svc.databaseNow = async () => {
+        const d = await realDbNow();
+        return jumped ? new Date(d.getTime() + JUMP_MS) : d;
+      };
+      const realNow = Date.now.bind(Date);
+      const nowSpy = vi.spyOn(Date, 'now');
+      // rows that are WITHIN their period by the real clock but past it by the jumped one (the QA run deleted logs of
+      // 5.1, 6.0 and 6.9 days): a contact message of 11 months 29 days (period 12 months) and three logs (period 7 days)
+      const contact = randomUUID();
+      await x(
+        `INSERT INTO "Contact_Inquiries" ("id","name","email","message","createdAt","updatedAt")
+         VALUES ($1::uuid, $2, 'qa@212collectorsclub.test', 'x', ${ago('11 months 29 days')}, ${ago('11 months 29 days')})`,
+        contact,
+        `${MARK}-q-contact`,
+      );
+      const logIds = [5.1, 6.0, 6.9].map(() => randomUUID());
+      for (const [i, days] of [5.1, 6.0, 6.9].entries()) {
+        await x(
+          `INSERT INTO "Usage_Logs" ("ts","method","route","status","durationMs","actorType","requestId")
+           VALUES (now() - make_interval(secs => $2::float8), 'GET', $3, 200, 1, 'ANON', $1::uuid)`,
+          logIds[i],
+          days * 86_400,
+          `/${MARK}-q`,
+        );
+      }
+      try {
+        // run 0: the normal reference run (real clock) with an anchor
+        const r0 = await runAndWait();
+        expect(r0.run.clockClamped).toBe(false);
+        // the clock jumps 48 h forward (database AND application), 10 s of real time pass
+        jumped = true;
+        uptime += 10_000;
+        // started directly (the admin token is a real-clock session and would be "expired" by the jumped Date.now)
+        const runJumped = async () => {
+          nowSpy.mockImplementation(() => realNow() + JUMP_MS);
+          try {
+            const out = await t.svc.start('MANUAL', admin.id);
+            if (out.kind !== 'started')
+              throw new Error(`not started: ${out.kind}`);
+            await out.done;
+            return { runId: out.runId, ...(await waitRun(out.runId)) };
+          } finally {
+            nowSpy.mockImplementation(realNow);
+          }
+        };
+        const runs = [];
+        for (let i = 0; i < 3; i++) {
+          runs.push(await runJumped());
+          uptime += 5_000;
+        }
+        const eff = (id: string) =>
+          q<{ ms: string }>(
+            `SELECT (extract(epoch FROM "effectiveNow") * 1000)::bigint::text AS ms FROM "Retention_Runs" WHERE "id" = $1::uuid`,
+            id,
+          ).then((r) => Number(r[0].ms));
+        const e0 = await eff(r0.runId);
+        const e = [
+          await eff(runs[0].runId),
+          await eff(runs[1].runId),
+          await eff(runs[2].runId),
+        ];
+        // +10 s, +15 s, +20 s of real time, NOT +48 h, +96 h, +144 h and not +3/+6/+9 days
+        expect(e[0] - e0).toBe(10_000);
+        expect(e[1] - e[0]).toBe(5_000);
+        expect(e[2] - e[1]).toBe(5_000);
+        for (const r of runs) {
+          expect(r.run.status).toBe('OK');
+          expect(r.run.clockClamped).toBe(true);
+        }
+        // nothing within its period was deleted
+        expect(await rowCount('Contact_Inquiries', `"id" = '${contact}'`)).toBe(
+          1,
+        );
+        for (const id of logIds) {
+          expect(await rowCount('Usage_Logs', `"requestId" = '${id}'`)).toBe(1);
+        }
+        // the run list says so
+        const listed = await get('/admin/retention/runs?limit=3').expect(200);
+        expect(
+          (listed.body.items as { clockClamped: boolean }[]).map(
+            (i) => i.clockClamped,
+          ),
+        ).toEqual([true, true, true]);
+        // the audit event of the last run says so too
+        const ev = (
+          await q<{ after: Record<string, any> }>(
+            `SELECT "after" FROM "Audit_Events" WHERE "action" = 'RETENTION_PURGE_RUN' AND "entityId" = $1`,
+            runs[2].runId,
+          )
+        )[0];
+        expect(ev.after.clockClamped).toBe(true);
+      } finally {
+        nowSpy.mockRestore();
+        svc.databaseNow = realDbNow;
+        svc.monotonic = realMono;
+        await x(
+          `DELETE FROM "Contact_Inquiries" WHERE "id" = $1::uuid`,
+          contact,
+        );
+        for (const id of logIds)
+          await x(`DELETE FROM "Usage_Logs" WHERE "requestId" = $1::uuid`, id);
+        await x(
+          `DELETE FROM "Retention_Runs" WHERE "status" <> 'RUNNING' AND "triggeredById" = $1::uuid`,
+          admin.id,
+        );
       }
     });
 

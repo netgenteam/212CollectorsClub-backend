@@ -11,7 +11,7 @@ export interface UsageLogConfig {
   flushMs: number;
   /** `USAGE_LOG_FLUSH_BATCH`: rows per INSERT, and the size that triggers an early flush. */
   flushBatch: number;
-  /** `PURGE_USAGE_LOG_DAYS`: how long a row lives (FR-131: default 7, 1..30). */
+  /** `PURGE_USAGE_LOG_DAYS`: how long a row lives (FR-131: default 7, 1..7: the Privacy Policy promises 7). */
   purgeDays: number;
 }
 
@@ -82,7 +82,7 @@ export function readUsageLogConfig(
       'PURGE_USAGE_LOG_DAYS',
       USAGE_LOG_DEFAULTS.purgeDays,
       1,
-      30,
+      7,
     ),
   };
   if (cfg.flushBatch > cfg.bufferMax) {

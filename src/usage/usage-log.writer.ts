@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import pg from 'pg';
+import { withUtcSession } from '../prisma/db-session.js';
 import type { UsageLogRow, UsageLogWriter } from './usage-log.types.js';
 
 /** The database cuts the INSERT itself if it runs longer: no statement outlives the buffer's own timer. */
@@ -65,8 +66,13 @@ export class PrismaUsageLogWriter implements UsageLogWriter, OnModuleDestroy {
     url.searchParams.delete('schema');
     const safeSchema =
       schema !== null && /^[A-Za-z0-9_]{1,63}$/.test(schema) ? schema : null;
+    // Story 20.8 round 2: session time zone UTC like the rest of the application (db-session.ts); in the URL,
+    // because `pg` lets a URL `options` win over a config property.
     const pool = new pg.Pool({
-      connectionString: url.toString(),
+      connectionString: withUtcSession(
+        url.toString(),
+        safeSchema !== null ? [`-c search_path=${safeSchema}`] : [],
+      ),
       max: 1,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 2_000,
@@ -74,9 +80,6 @@ export class PrismaUsageLogWriter implements UsageLogWriter, OnModuleDestroy {
       // startup parameters of the connection (no extra query, so no queueing behind the first INSERT)
       statement_timeout: STATEMENT_TIMEOUT_MS,
       lock_timeout: LOCK_TIMEOUT_MS,
-      ...(safeSchema !== null
-        ? { options: `-c search_path=${safeSchema}` }
-        : {}),
     });
     // An error on an IDLE connection (the database restarted) is an event, not an exception: without a
     // listener it would end the process.

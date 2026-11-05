@@ -28,7 +28,7 @@ export const retentionRunsTask: RetentionTask = {
         WITH picked AS (
           SELECT "id" FROM "Retention_Runs"
            WHERE "status" <> 'RUNNING' AND "finishedAt" IS NOT NULL AND "id" <> ${runId}::uuid
-             AND "startedAt" < ${iso}::timestamptz - make_interval(days => ${days}::int)
+             AND "startedAt" < ((${iso}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => ${days}::int)) AT TIME ZONE 'UTC'
            ORDER BY "startedAt" LIMIT ${limit}::int
            FOR UPDATE SKIP LOCKED)
         DELETE FROM "Retention_Runs" r USING picked WHERE r."id" = picked."id"`,
