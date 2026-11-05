@@ -3,11 +3,16 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { createAdminAuth } from './admin-auth.factory.js';
 import { createCustomerAuth } from './customer-auth.factory.js';
+import type { CustomerAuthInTx } from './customer-auth.factory.js';
 import { Logger } from '@nestjs/common';
 import { MailerModule } from '../common/mailer/mailer.module.js';
 import { MailerService } from '../common/mailer/mailer.service.js';
 import { DEFAULT_FRONTEND_URL, resetPasswordEmail } from './customer-mail.js';
-import { ADMIN_AUTH, CUSTOMER_AUTH } from './auth-core.constants.js';
+import {
+  ADMIN_AUTH,
+  CUSTOMER_AUTH,
+  CUSTOMER_AUTH_IN_TX,
+} from './auth-core.constants.js';
 
 /**
  * Story 12.2 (AD-25): hosts the BetterAuth instances as injectable
@@ -65,7 +70,25 @@ import { ADMIN_AUTH, CUSTOMER_AUTH } from './auth-core.constants.js';
           },
         ),
     },
+    {
+      provide: CUSTOMER_AUTH_IN_TX,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService): CustomerAuthInTx => {
+        const secret = config.getOrThrow<string>('CUSTOMER_AUTH_SECRET');
+        const secureCookies =
+          config.get<string>('NODE_ENV', 'development') !== 'development' &&
+          config.get<string>('NODE_ENV', 'development') !== 'test';
+        return (tx, opts) =>
+          createCustomerAuth(tx, secret, {
+            secureCookies,
+            password: opts?.password,
+            // Collected, never sent from inside the transaction.
+            sendResetPassword: (user, token) =>
+              opts?.onResetMail?.(user, token),
+          });
+      },
+    },
   ],
-  exports: [ADMIN_AUTH, CUSTOMER_AUTH],
+  exports: [ADMIN_AUTH, CUSTOMER_AUTH, CUSTOMER_AUTH_IN_TX],
 })
 export class AuthCoreModule {}

@@ -123,9 +123,59 @@ interface Scan {
   sql: string[];
 }
 
+/**
+ * Story 20.6a (second round): local names bound to a delegate of an account table, so that
+ * `const c = tx.customer; await c.update(...)`, `const { customer } = tx;` and
+ * `const { cart: basket } = this.prisma;` are writes like `tx.customer.update(...)`.
+ * Name -> delegate. Collected over the whole file before the scan (a name is file-wide: a false positive
+ * only asks for the file to be registered, a missed alias would let a writer through).
+ */
+function aliasesOf(sf: ts.SourceFile): Map<string, string> {
+  const out = new Map<string, string>();
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && n.initializer !== undefined) {
+      // const c = tx.customer / tx['customer']
+      if (ts.isIdentifier(n.name)) {
+        const d = memberName(n.initializer);
+        if (d !== null && DELEGATES.has(d)) out.set(n.name.text, d);
+      }
+      // const { customer, cart: basket } = tx
+      if (ts.isObjectBindingPattern(n.name)) {
+        for (const el of n.name.elements) {
+          const src =
+            el.propertyName !== undefined
+              ? ts.isIdentifier(el.propertyName) ||
+                ts.isStringLiteral(el.propertyName)
+                ? el.propertyName.text
+                : null
+              : ts.isIdentifier(el.name)
+                ? el.name.text
+                : null;
+          if (src !== null && DELEGATES.has(src) && ts.isIdentifier(el.name)) {
+            out.set(el.name.text, src);
+          }
+        }
+      }
+    }
+    // c = tx.customer (assignment) and this.c = tx.customer
+    if (
+      ts.isBinaryExpression(n) &&
+      n.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    ) {
+      const d = memberName(n.right);
+      const target = ts.isIdentifier(n.left) ? n.left.text : memberName(n.left);
+      if (d !== null && DELEGATES.has(d) && target !== null) out.set(target, d);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return out;
+}
+
 function scan(text: string, rel: string): Scan {
   const sf = ts.createSourceFile(rel, text, ts.ScriptTarget.Latest, true);
   const out: Scan = { writes: [], locks: 0, sql: [] };
+  const aliases = aliasesOf(sf);
   const visit = (n: ts.Node): void => {
     if (ts.isCallExpression(n)) {
       const callee = n.expression;
@@ -137,6 +187,12 @@ function scan(text: string, rel: string): Scan {
       if (op !== null && WRITE_OPS.has(op) && holder !== null) {
         const d = memberName(holder);
         if (d !== null && DELEGATES.has(d)) out.writes.push(`${d}.${op}`);
+        // an alias: `const c = tx.customer; c.update(...)`, `const { customer } = tx; customer.update(...)`
+        const alias = ts.isIdentifier(holder) ? holder.text : d;
+        const viaAlias = alias !== null ? aliases.get(alias) : undefined;
+        if (viaAlias !== undefined && !(d !== null && DELEGATES.has(d))) {
+          out.writes.push(`alias ${alias}=${viaAlias}.${op}`);
+        }
       }
     }
     // nested write: { customer: { update: ... } }
@@ -352,6 +408,26 @@ describe('the scanner sees the writes the text scan missed (Story 20.6a)', () =>
       'await tx.something.update({ data: { items: { create: [{ a: 1 }] } } });',
     ],
     [
+      'alias const c = tx.customer',
+      'const c = tx.customer; await c.update({ where: { id } });',
+    ],
+    [
+      'alias const c = tx["customer"]',
+      'const c = tx["customer"]; await c.deleteMany({});',
+    ],
+    [
+      'destructuring const { customer } = tx',
+      'const { customer } = tx; await customer.update({ where: { id } });',
+    ],
+    [
+      'destructuring with a rename',
+      'const { cart: basket } = this.prisma; await basket.create({ data: {} });',
+    ],
+    [
+      'alias assigned later',
+      'let w; w = tx.wishlistItem; await w.deleteMany({});',
+    ],
+    [
       'nested deleteMany of addresses',
       'await tx.x.update({ data: { addresses: { deleteMany: {} } } });',
     ],
@@ -361,6 +437,15 @@ describe('the scanner sees the writes the text scan missed (Story 20.6a)', () =>
 
   it.each([
     ['a read', 'await tx.customer.findUnique({ where: { id } });'],
+    [
+      'a read through an alias',
+      'const c = tx.customer; await c.findUnique({ where: { id } });',
+    ],
+    [
+      'a destructured delegate that is only read',
+      'const { customer } = tx; await customer.count();',
+    ],
+    ['an unrelated local called update', 'const c = foo.bar; c.update({});'],
     [
       'a select',
       'await tx.$queryRaw`SELECT * FROM "Customers" WHERE id = ${id}`;',

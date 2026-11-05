@@ -57,8 +57,9 @@ export const accountBusyException = (): ApiException =>
 export async function withAccountLockWait<T>(
   tx: Prisma.TransactionClient,
   fn: () => Promise<T>,
+  waitMs: number = ACCOUNT_LOCK_WAIT_MS,
 ): Promise<T> {
-  const cap = `${ACCOUNT_LOCK_WAIT_MS}ms`;
+  const cap = `${Math.min(waitMs, ACCOUNT_LOCK_WAIT_MS)}ms`;
   // The previous value is kept in a transaction-local custom setting and put back afterwards (a
   // caller's own `LockBudget` survives). `$executeRaw` for both: the lock itself stays ONE `$queryRaw`.
   await tx.$executeRaw`SELECT set_config('cc.prev_lock_timeout', current_setting('lock_timeout'), true), set_config('lock_timeout', ${cap}, true)`;

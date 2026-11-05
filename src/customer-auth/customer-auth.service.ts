@@ -3,19 +3,30 @@ import { HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as argon2 from 'argon2';
 import { APIError } from 'better-auth/api';
-import { CUSTOMER_AUTH } from '../auth-core/auth-core.constants.js';
-import type { CustomerAuth } from '../auth-core/customer-auth.factory.js';
+import {
+  CUSTOMER_AUTH,
+  CUSTOMER_AUTH_IN_TX,
+} from '../auth-core/auth-core.constants.js';
+import type {
+  CustomerAuth,
+  CustomerAuthInTx,
+} from '../auth-core/customer-auth.factory.js';
+import { BackgroundQueue } from '../common/background-queue.js';
 import { ApiException } from '../common/api-exception.js';
 import { isAnonymizedEmail } from '../common/anonymized-email.js';
 import { invalidCustomerTokenException } from '../common/customer-auth.guard.js';
+import { isLockWaitExpired } from '../common/lock-timeout.js';
 import {
+  accountBusyException,
   lockLiveCustomer,
   tryLockLiveCustomer,
+  ACCOUNT_LOCK_WAIT_MS,
   withAccountLockWait,
 } from '../common/customer-write-lock.js';
 import {
   alreadyRegisteredEmail,
   DEFAULT_FRONTEND_URL,
+  resetPasswordEmail,
   verificationEmail,
 } from '../auth-core/customer-mail.js';
 import { MailerService } from '../common/mailer/mailer.service.js';
@@ -64,6 +75,11 @@ function invalidResetTokenException(): ApiException {
   );
 }
 
+/** Login transactions of ONE account that may wait for a held row at the same time. */
+const LOGIN_TX_PER_ACCOUNT = 3;
+/** What the logins beyond that wait for a held account row. */
+const LOGIN_EXTRA_WAIT_MS = 150;
+
 const sha256 = (value: string) =>
   createHash('sha256').update(value).digest('hex');
 
@@ -83,7 +99,16 @@ export class CustomerAuthService {
     private readonly config: ConfigService,
     private readonly consent: ConsentService,
     private readonly audit: AuditService,
+    @Inject(CUSTOMER_AUTH_IN_TX) private readonly authInTx: CustomerAuthInTx,
   ) {}
+
+  /**
+   * Story 20.6a (second round): the token and email jobs that run after the response. Bounded: a few
+   * at a time, a short queue, and one job per key (see `BackgroundQueue`).
+   */
+  private readonly background = new BackgroundQueue(3, 200);
+  /** Story 20.6a: login transactions (correct credentials) in flight per account. */
+  private readonly loginTxInFlight = new Map<string, number>();
 
   private get frontendUrl(): string {
     return this.config.get<string>('FRONTEND_URL', DEFAULT_FRONTEND_URL);
@@ -224,19 +249,38 @@ export class CustomerAuthService {
     // Account committed. Token + email run in the background so this branch
     // awaits exactly what the duplicate branch awaits (no timing oracle) and
     // a failure here never alters the 201 (AC1).
-    void this.issueVerificationToken(created.user.id)
-      .then((token) =>
-        token === null
-          ? undefined
-          : this.sendBestEffort(
-              verificationEmail(dto.email, dto.name, this.frontendUrl, token),
-            ),
-      )
-      .catch((err: unknown) => {
+    this.queueVerificationMail(created.user.id, dto.email, dto.name);
+  }
+
+  /**
+   * The verification token and its email, after the response (best effort, bounded: see
+   * `BackgroundQueue`). The transaction of the token holds a connection for statements only and the
+   * email is sent after it committed.
+   */
+  private queueVerificationMail(
+    customerId: string,
+    email: string,
+    name: string,
+  ): void {
+    const out = this.background.run(null, async () => {
+      try {
+        const token = await this.issueVerificationToken(customerId);
+        if (token !== null) {
+          this.sendBestEffort(
+            verificationEmail(email, name, this.frontendUrl, token),
+          );
+        }
+      } catch (err) {
         this.logger.error(
-          `Verification token for new customer failed: ${err instanceof Error ? err.message : String(err)}`,
+          `Verification token failed: ${err instanceof Error ? err.message : String(err)}`,
         );
-      });
+      }
+    });
+    if (out === 'dropped') {
+      this.logger.warn(
+        'Verification token not issued: the background queue is full (the person can ask again).',
+      );
+    }
   }
 
   /**
@@ -295,19 +339,7 @@ export class CustomerAuthService {
     if (!customer || customer.emailVerified || customer.anonymizedAt) {
       return;
     }
-    void this.issueVerificationToken(customer.id)
-      .then((token) =>
-        token === null
-          ? undefined
-          : this.sendBestEffort(
-              verificationEmail(email, customer.name, this.frontendUrl, token),
-            ),
-      )
-      .catch((err: unknown) => {
-        this.logger.error(
-          `Verification resend failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      });
+    this.queueVerificationMail(customer.id, email, customer.name);
   }
 
   /** Uniform 400 INVALID_VERIFICATION_TOKEN for unknown/used/expired/tampered. */
@@ -348,29 +380,66 @@ export class CustomerAuthService {
     }
     // Background (not awaited): both branches return after the same single
     // lookup, so response time does not reveal whether the account exists.
-    // Story 20.6a: the token is written WHILE this transaction holds the account's KEY SHARE lock
-    // (see `whileAccountLive`): the anonymization (FOR UPDATE) either committed before (then no
-    // token is written at all) or waits until the token exists and then deletes it. No token can
-    // outlive the anonymization.
-    void this.whileAccountLive(found.id, () =>
-      this.customerAuth.api.requestPasswordReset({ body: { email } }),
-    ).catch((err: unknown) => {
-      this.logger.error(
-        `Password reset request failed: ${err instanceof Error ? err.message : String(err)}`,
+    const out = this.background.run(`forgot:${found.id}`, () =>
+      this.requestReset(found.id, email),
+    );
+    if (out === 'dropped') {
+      this.logger.warn(
+        'Password reset not issued: the background queue is full (the person can ask again).',
       );
-    });
+    }
   }
 
   /**
-   * Story 20.6a: runs `fn` (a BetterAuth write on ITS OWN connection that creates or consumes a
-   * credential of the account) while this transaction holds `SELECT ... FOR KEY SHARE` on the
-   * Customers row. That lock conflicts with the `FOR UPDATE` of the anonymization but not with the
-   * `UPDATE` of non-key columns BetterAuth may run on the same row, so there is no self-wait. An
-   * anonymized (or gone) account does not run `fn` and answers `{ live: false }`.
+   * Story 20.6a (second round): the token is written by BetterAuth INSIDE a short transaction that
+   * holds `FOR KEY SHARE` on the account (see `whileAccountLive`): the anonymization (FOR UPDATE)
+   * either committed before (then no token is written at all) or waits until the token exists and then
+   * deletes it. No token can outlive the anonymization. The EMAIL is not part of that transaction:
+   * BetterAuth hands it to `onResetMail` (collected), and it is sent after the commit, so a slow or
+   * hung SMTP server holds no database connection, and never sends a mail for a token that was rolled
+   * back or belongs to an account that is gone.
+   */
+  private async requestReset(customerId: string, email: string): Promise<void> {
+    const mails: { user: { email: string; name: string }; token: string }[] =
+      [];
+    try {
+      const done = await this.whileAccountLive(customerId, (tx) =>
+        this.authInTx(tx, {
+          onResetMail: (user, token) => mails.push({ user, token }),
+        }).api.requestPasswordReset({ body: { email } }),
+      );
+      if (!done.live) return;
+    } catch (err) {
+      const busy = err instanceof ApiException && err.getStatus() === 409;
+      this.logger[busy ? 'warn' : 'error'](
+        `Password reset request failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+    // committed: now (and only now) the email
+    for (const m of mails) {
+      this.sendBestEffort(
+        resetPasswordEmail(
+          m.user.email,
+          m.user.name,
+          this.frontendUrl,
+          m.token,
+        ),
+      );
+    }
+  }
+
+  /**
+   * Story 20.6a: runs `fn` (BetterAuth bound to THIS transaction: it writes a credential of the account
+   * on the transaction's own connection, no second pooled connection, no I/O outside the database)
+   * while this transaction holds `SELECT ... FOR KEY SHARE` on the Customers row. That lock conflicts
+   * with the `FOR UPDATE` of the anonymization but not with the `UPDATE` of non-key columns BetterAuth
+   * may run on the same row, so there is no self-wait. An anonymized (or gone) account does not run
+   * `fn` and answers `{ live: false }`. The wait for the lock is bounded (2.5 s, 409 `ACCOUNT_BUSY`).
    */
   private async whileAccountLive<T>(
     customerId: string,
-    fn: () => Promise<T>,
+    fn: (tx: Prisma.TransactionClient) => Promise<T>,
   ): Promise<{ live: true; value: T } | { live: false }> {
     return this.prisma.$transaction(
       async (tx) => {
@@ -382,9 +451,9 @@ export class CustomerAuthService {
             >`SELECT "anonymizedAt" FROM "Customers" WHERE "id" = ${customerId}::uuid FOR KEY SHARE`,
         );
         if (!rows[0] || rows[0].anonymizedAt !== null) return { live: false };
-        return { live: true, value: await fn() };
+        return { live: true, value: await fn(tx) };
       },
-      { maxWait: 5_000, timeout: 20_000 },
+      { maxWait: 5_000, timeout: 10_000 },
     );
   }
 
@@ -421,15 +490,21 @@ export class CustomerAuthService {
    */
   async resetPassword(token: string, password: string): Promise<void> {
     const owner = await this.resetTokenOwner(token);
-    const reset = () =>
-      this.customerAuth.api.resetPassword({
-        body: { token, newPassword: password },
-      });
     try {
       if (!owner) {
-        await reset();
+        await this.customerAuth.api.resetPassword({
+          body: { token, newPassword: password },
+        });
         return;
       }
+      // The Argon2id hash is computed BEFORE the transaction: it holds its connection for statements only.
+      const hashed = await argon2.hash(password, { type: argon2.argon2id });
+      const reset = (tx: Prisma.TransactionClient) =>
+        this.authInTx(tx, {
+          password: { hash: () => Promise.resolve(hashed) },
+        }).api.resetPassword({
+          body: { token, newPassword: password },
+        });
       // Story 20.6a: for an anonymized account the answer is the one of an invalid token, with
       // no effect (no password, no session, no event) and the token is dropped.
       const done = await this.whileAccountLive(owner.value, reset);
@@ -509,17 +584,65 @@ export class CustomerAuthService {
       await argon2.hash(password, { type: argon2.argon2id });
       throw invalidCredentialsException();
     }
+    // Story 20.6a (second round): BetterAuth's session INSERT needs a share lock on the Customers row
+    // (foreign key) and has no `lock_timeout` of its own: an account whose row is held (the
+    // anonymization, a long operation) left the login waiting for minutes. So the work is split:
+    //   1. the credential check (the Argon2id hash or verify, the same cost for an unknown email, a
+    //      wrong password and a good one) runs with NO connection held;
+    //   2. BetterAuth's own sign-in runs bound to a short transaction whose lock wait is capped at
+    //      2.5 s (`withAccountLockWait`), with the verdict of step 1 and a no-op hash.
+    // The only login that reaches a lock wait is one with CORRECT credentials, so a 409 reveals nothing
+    // an attacker could not learn from the 200 of the same request, and the unknown-email and
+    // wrong-password answers (401, same cost, no lock) never differ with the state of any account.
+    const { ok: verdict, userId } = await this.checkCredential(email, password);
+    // A held account row makes every login of that account wait the cap holding a pooled connection:
+    // the first LOGIN_TX_PER_ACCOUNT of them wait the full 2.5 s, the ones beyond wait only
+    // LOGIN_EXTRA_WAIT_MS (with no lock held they all go through, as six simultaneous logins always did).
+    // Only requests with correct credentials count (the others never reach a lock).
+    const slotKey = verdict && userId !== null ? userId : null;
+    let waitMs = ACCOUNT_LOCK_WAIT_MS;
+    if (slotKey !== null) {
+      const n = this.loginTxInFlight.get(slotKey) ?? 0;
+      if (n >= LOGIN_TX_PER_ACCOUNT) waitMs = LOGIN_EXTRA_WAIT_MS;
+      this.loginTxInFlight.set(slotKey, n + 1);
+    }
     let result;
     try {
-      result = await this.customerAuth.api.signInEmail({
-        body: { email, password },
-        returnHeaders: true,
-      });
+      result = await this.prisma.$transaction(
+        (tx) =>
+          withAccountLockWait(
+            tx,
+            () =>
+              this.authInTx(tx, {
+                password: {
+                  verify: () => Promise.resolve(verdict),
+                  hash: () => Promise.resolve('unused'),
+                },
+              }).api.signInEmail({
+                body: { email, password },
+                returnHeaders: true,
+              }),
+            waitMs,
+          ),
+        { maxWait: 3_000, timeout: 8_000 },
+      );
     } catch (err) {
+      if (err instanceof ApiException) throw err;
+      if (isLockWaitExpired(err)) throw accountBusyException();
       if (err instanceof APIError) {
+        // BetterAuth wraps a failed session insert; a lock wait that expired inside it is "busy".
+        if (verdict && isLockWaitExpired(err.cause ?? err.body)) {
+          throw accountBusyException();
+        }
         throw invalidCredentialsException();
       }
       throw err;
+    } finally {
+      if (slotKey !== null) {
+        const n = (this.loginTxInFlight.get(slotKey) ?? 1) - 1;
+        if (n <= 0) this.loginTxInFlight.delete(slotKey);
+        else this.loginTxInFlight.set(slotKey, n);
+      }
     }
     const found = await this.prisma.customer.findUnique({
       where: { id: result.response.user.id },
@@ -545,6 +668,34 @@ export class CustomerAuthService {
       emailVerified: found.emailVerified,
     };
     return { customer, setCookies: result.headers.getSetCookie() };
+  }
+
+  /**
+   * The password check BetterAuth's sign-in does, without a connection held while it hashes. One
+   * Argon2id operation in every case: a verify for an account with a password, a hash for anything else.
+   */
+  private async checkCredential(
+    email: string,
+    password: string,
+  ): Promise<{ ok: boolean; userId: string | null }> {
+    // A database error here is a 500, like any other: it must not read as "wrong password".
+    const ctx = await this.customerAuth.$context;
+    const found = await ctx.internalAdapter.findUserByEmail(email, {
+      includeAccounts: true,
+    });
+    const hash =
+      found?.accounts?.find((a) => a.providerId === 'credential')?.password ??
+      null;
+    const userId = found?.user.id ?? null;
+    if (hash === null) {
+      await argon2.hash(password, { type: argon2.argon2id });
+      return { ok: false, userId };
+    }
+    try {
+      return { ok: await argon2.verify(hash, password), userId };
+    } catch {
+      return { ok: false, userId };
+    }
   }
 
   /**

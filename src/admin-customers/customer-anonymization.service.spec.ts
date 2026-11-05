@@ -249,7 +249,7 @@ describe('CustomerAnonymizationService (unit; the real locks are in test/custome
       reason: 'Solicitud por WhatsApp, ref ZD-1234567, 2026-11-04',
     }).catch((x: { response: { message: string } }) => x);
     expect((e as { response: { message: string } }).response.message).toMatch(
-      /7 or more digits.*letters right before.*TKT1234567.*ZD-123-4567.*2026-11-04/s,
+      /7 or more digits.*100\.200\.300.*letters right before.*TKT1234567.*ZD-123-4567.*2026-11-04/s,
     );
   });
 

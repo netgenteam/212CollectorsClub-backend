@@ -39,6 +39,9 @@ describe('CustomerAuthService', () => {
     $queryRaw: ReturnType<typeof vi.fn>;
   };
   let service: CustomerAuthService;
+  /** Story 20.6a (second round): BetterAuth bound to a transaction; records how it was built. */
+  let authInTx: ReturnType<typeof vi.fn>;
+  let findUserByEmail: ReturnType<typeof vi.fn>;
   /** Story 19.4: ConsentService double (its own rules are in consent.service.spec.ts). */
   let consent: {
     assertAccepted: ReturnType<typeof vi.fn>;
@@ -86,9 +89,14 @@ describe('CustomerAuthService', () => {
     prisma.customer.updateMany = vi.fn();
     resetPassword = vi.fn();
     requestPasswordReset = vi.fn().mockResolvedValue(undefined);
+    findUserByEmail = vi.fn().mockResolvedValue(null);
+    authInTx = vi.fn(() => ({
+      api: { signInEmail, resetPassword, requestPasswordReset },
+    }));
     service = new CustomerAuthService(
       prisma as never,
       {
+        $context: Promise.resolve({ internalAdapter: { findUserByEmail } }),
         api: {
           signUpEmail,
           signInEmail,
@@ -103,6 +111,7 @@ describe('CustomerAuthService', () => {
       } as never,
       consent as never,
       fakeAudit(prisma as never),
+      authInTx as never,
     );
   });
 
@@ -448,6 +457,93 @@ describe('CustomerAuthService', () => {
     expect(requestPasswordReset).not.toHaveBeenCalled();
   });
 
+  it('Story 20.6a forgotPassword: BetterAuth runs on the transaction client and the email goes out only AFTER the commit', async () => {
+    prisma.customer.findFirst.mockResolvedValue({ id: 'u1' });
+    const order: string[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
+    requestPasswordReset.mockImplementation(() => {
+      const opts = (authInTx.mock.calls.at(-1) as unknown[])[1] as {
+        onResetMail: (u: unknown, t: string) => void;
+      };
+      opts.onResetMail({ email: 'x@y.co', name: 'X' }, 'tok-1');
+      order.push('betterauth-returned');
+      return Promise.resolve(undefined);
+    });
+    prisma.$transaction = vi.fn(
+      async (cb: (tx: unknown) => Promise<unknown>) => {
+        const r = await cb({
+          $executeRaw: vi.fn(),
+          $queryRaw: prisma.$queryRaw,
+        });
+        order.push('commit');
+        return r;
+      },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
+    sendMail.mockImplementation(() => {
+      order.push('mail');
+      return Promise.resolve();
+    });
+    await service.forgotPassword('x@y.co');
+    await vi.waitFor(() => expect(sendMail).toHaveBeenCalledTimes(1));
+    expect(order).toEqual(['betterauth-returned', 'commit', 'mail']);
+    // BetterAuth was built on the transaction client, never called on the root instance
+    expect(authInTx).toHaveBeenCalledTimes(1);
+  });
+
+  it('Story 20.6a forgotPassword: a flood for one account queues ONE job (no pile of transactions on the same lock)', async () => {
+    prisma.customer.findFirst.mockResolvedValue({ id: 'u1' });
+    let release!: () => void;
+    requestPasswordReset.mockImplementation(
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
+      () => new Promise<void>((r) => (release = r)),
+    );
+    for (let i = 0; i < 30; i++) await service.forgotPassword('x@y.co');
+    await vi.waitFor(() => expect(requestPasswordReset).toHaveBeenCalled());
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    release();
+  });
+
+  it('Story 20.6a login: the credential check hashes BEFORE the transaction, and a lock wait that expires is 409 ACCOUNT_BUSY', async () => {
+    findUserByEmail.mockResolvedValue(null);
+    const events: string[] = [];
+    vi.mocked(argon2.hash).mockImplementation(() => {
+      events.push('hash');
+      return Promise.resolve('h');
+    });
+    prisma.$transaction = vi.fn((cb: (tx: unknown) => Promise<unknown>) => {
+      events.push('tx');
+      return cb({ $executeRaw: vi.fn(), $queryRaw: prisma.$queryRaw });
+    });
+    const lockErr = Object.assign(new Error('lock timeout'), { code: '55P03' });
+    signInEmail.mockRejectedValue(lockErr);
+    await expect(service.login('a@b.co', 'x')).rejects.toMatchObject({
+      status: 409,
+      response: { errorCode: 'ACCOUNT_BUSY' },
+    });
+    expect(events).toEqual(['hash', 'tx']);
+    vi.mocked(argon2.hash).mockImplementation(
+      (await vi.importActual<typeof import('argon2')>('argon2')).hash,
+    );
+  });
+
+  it('Story 20.6a login: a wrong password is the generic 401 (no lock wait involved)', async () => {
+    findUserByEmail.mockResolvedValue(null);
+    signInEmail.mockRejectedValue(
+      new APIError('UNAUTHORIZED', {
+        message: 'bad',
+        code: 'INVALID_EMAIL_OR_PASSWORD',
+      }),
+    );
+    await expect(service.login('a@b.co', 'x')).rejects.toMatchObject({
+      status: 401,
+    });
+    const opts = (authInTx.mock.calls.at(-1) as unknown[])[1] as {
+      password: { verify: () => Promise<boolean> };
+    };
+    await expect(opts.password.verify()).resolves.toBe(false);
+  });
+
   it('resetPassword: BetterAuth APIError -> INVALID_RESET_TOKEN', async () => {
     resetPassword.mockRejectedValue(
       new APIError('BAD_REQUEST', { message: 'bad', code: 'INVALID_TOKEN' }),
@@ -598,6 +694,7 @@ describe('CustomerAuthService', () => {
         } as never,
         consent as never,
         fakeAudit(prisma as never),
+        authInTx as never,
       );
       signUpEmail.mockResolvedValue({ user: { id: 'u1' } });
       prisma.customer.count.mockResolvedValue(1);

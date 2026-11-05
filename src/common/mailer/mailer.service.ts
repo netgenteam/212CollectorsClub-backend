@@ -52,6 +52,12 @@ export class MailerService implements OnModuleInit, OnModuleDestroy {
       host,
       port,
       secure,
+      // Story 20.6a: a server that accepts the connection and never answers must not keep a socket (and
+      // the request or background job that waits for it) for nodemailer's defaults of 2 minutes (connect)
+      // and 10 minutes (socket).
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 30_000,
       // Local test SMTP servers (MailHog/maildev) accept unauthenticated
       // connections — omitting `auth` entirely (rather than sending empty
       // strings) is what lets the same code path work against both those

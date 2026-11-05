@@ -66,7 +66,7 @@ const REASON_GROUPED_DIGITS = /(?<![A-Za-z0-9])\d{1,3}(?:[ .]\d{3}){2,}(?!\d)/;
 const UUID_IN_TEXT =
   /(?<![0-9A-Za-z])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9A-Za-z])/gi;
 const REASON_LONG_NUMBER_MESSAGE =
-  'The reason must not contain a number of 7 or more digits on its own (it could be an ID document or a phone number). Put letters right before the reference (TKT1234567) or split it with hyphens in groups of up to 6 digits (ZD-123-4567), and write dates as 2026-11-04.';
+  'The reason must not contain a number of 7 or more digits, whether written together (1234567) or in groups separated by spaces or dots (12 345 678, 100.200.300): it could be an ID document or a phone number. Put letters right before the reference (TKT1234567) or split it with hyphens in groups of up to 6 digits (ZD-123-4567), and write dates as 2026-11-04.';
 const UNICODE_DASHES = /[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D\u00AD]/g;
 
 /**

@@ -281,6 +281,132 @@ describe(
     });
 
     // ---------------------------------------------------------------------------------------
+    describe('BetterAuth calls with the account row held (Story 20.6a, second round)', () => {
+      const GOOD = 'correct-horse-battery-20-6b';
+      const login = (email: string, password: string) =>
+        server().post(`${BASE}/auth/login`).send({ email, password });
+      const tuple = (r: request.Response) => ({
+        status: r.status,
+        code: (r.body as { errorCode?: string }).errorCode,
+      });
+
+      it('POST /auth/login with CORRECT credentials and the row held answers 409 ACCOUNT_BUSY within the cap, creates no session, and works once the lock is free', async () => {
+        const c = await h.mkCustomer('lg');
+        const sessionsBefore = (await h.leftovers(c.id)).sessions;
+        const holder = await holdCustomerRow(c.id);
+        let res: request.Response;
+        let ms: number;
+        try {
+          const t0 = Date.now();
+          res = await login(c.email, GOOD).then((r) => r);
+          ms = Date.now() - t0;
+        } finally {
+          await holder.release();
+        }
+        expect(tuple(res)).toEqual({ status: 409, code: 'ACCOUNT_BUSY' });
+        expect(ms).toBeGreaterThanOrEqual(2_000);
+        expect(ms).toBeLessThan(4_500);
+        expect((await h.leftovers(c.id)).sessions).toBe(sessionsBefore);
+        expect((await login(c.email, GOOD)).status).toBe(200);
+      });
+
+      it('with the row held, a WRONG password and an UNKNOWN email still answer the generic 401 at once (the lock reveals nothing to someone without the password)', async () => {
+        const c = await h.mkCustomer('lw');
+        const holder = await holdCustomerRow(c.id);
+        try {
+          const t0 = Date.now();
+          const [wrong, unknown] = await Promise.all([
+            login(c.email, 'not-the-password-123'),
+            login(`nadie-${randomUUID()}@212collectorsclub.test`, GOOD),
+          ]);
+          const ms = Date.now() - t0;
+          expect(tuple(wrong)).toEqual({
+            status: 401,
+            code: 'INVALID_CUSTOMER_CREDENTIALS',
+          });
+          expect(tuple(unknown)).toEqual(tuple(wrong));
+          expect(wrong.body).toEqual(unknown.body);
+          expect(ms).toBeLessThan(1_500);
+        } finally {
+          await holder.release();
+        }
+      });
+
+      it('a login held 12 s does not keep a pooled connection: the other routes answer meanwhile and the request is over at the cap', async () => {
+        const c = await h.mkCustomer('l12');
+        const holder = await holdCustomerRow(c.id);
+        try {
+          const t0 = Date.now();
+          const pending = Array.from({ length: 12 }, () =>
+            login(c.email, GOOD).then((r) => r),
+          );
+          await new Promise((r) => setTimeout(r, 600));
+          const t1 = Date.now();
+          const cat = await server().get(`${BASE}/categories`);
+          const catMs = Date.now() - t1;
+          expect(cat.status).toBe(200);
+          expect(catMs).toBeLessThan(1_500);
+          const all = await Promise.all(pending);
+          expect(all.every((r) => r.status === 409)).toBe(true);
+          expect(Date.now() - t0).toBeLessThan(6_000);
+        } finally {
+          await holder.release();
+        }
+      });
+
+      it('reset-password with the row held answers 409 ACCOUNT_BUSY within the cap and the token is NOT consumed', async () => {
+        const c = await h.mkCustomer('rp');
+        const ctx = await h.app.get<CustomerAuth>(CUSTOMER_AUTH).$context;
+        const token = `tok-${randomUUID()}`;
+        await ctx.internalAdapter.createVerificationValue({
+          identifier: `reset-password:${token}`,
+          value: c.id,
+          expiresAt: new Date(Date.now() + 3_600_000),
+        });
+        const holder = await holdCustomerRow(c.id);
+        let res: request.Response;
+        let ms: number;
+        try {
+          const t0 = Date.now();
+          res = await server()
+            .post(`${BASE}/auth/reset-password`)
+            .send({ token, password: 'brand-new-password-20-6a' });
+          ms = Date.now() - t0;
+        } finally {
+          await holder.release();
+        }
+        expect(tuple(res)).toEqual({ status: 409, code: 'ACCOUNT_BUSY' });
+        expect(ms).toBeLessThan(4_500);
+        const again = await server()
+          .post(`${BASE}/auth/reset-password`)
+          .send({ token, password: 'brand-new-password-20-6a' });
+        expect(again.status, JSON.stringify(again.body)).toBe(200);
+      });
+
+      it('forgot-password with the row held answers 200 at once and holds no connection while it waits', async () => {
+        const c = await h.mkCustomer('fh');
+        const holder = await holdCustomerRow(c.id);
+        try {
+          const t0 = Date.now();
+          const rs = await Promise.all(
+            Array.from({ length: 20 }, () =>
+              server()
+                .post(`${BASE}/auth/forgot-password`)
+                .send({ email: c.email }),
+            ),
+          );
+          expect(rs.every((r) => r.status === 200)).toBe(true);
+          expect(Date.now() - t0).toBeLessThan(1_500);
+          const t1 = Date.now();
+          expect((await server().get(`${BASE}/categories`)).status).toBe(200);
+          expect(Date.now() - t1).toBeLessThan(1_500);
+        } finally {
+          await holder.release();
+        }
+      });
+    });
+
+    // ---------------------------------------------------------------------------------------
     const checkoutBody = () =>
       withBuyerId({
         paymentRail: 'pago_movil',
