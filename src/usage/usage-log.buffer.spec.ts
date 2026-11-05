@@ -1,3 +1,4 @@
+import { setImmediate as nextTurn } from 'node:timers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DROP_WARN_INTERVAL_MS,
@@ -244,6 +245,28 @@ describe('UsageLogBuffer (Story 20.7, AC4)', () => {
     expect(b.size()).toBe(0);
   });
 
+  it('a row pushed on the turn after the final flush found nothing (a cut client whose socket closes after server.close) is still written (round 4)', async () => {
+    const { w, batches } = writerOf();
+    const b = new UsageLogBuffer({ ...CFG, flushBatch: 100 }, w);
+    const done = b.onModuleDestroy(); // nothing pending: the first flush returns at once
+    // what the usage middleware does when the last socket emits `close`, one turn later
+    nextTurn(() => b.push(row({ status: 499 })));
+    await done;
+    expect(batches.flat().map((r) => r.status)).toEqual([499]);
+    expect(b.size()).toBe(0);
+  });
+
+  it('a row pushed after onModuleDestroy returned is written on the next turn, not left in memory (round 4)', async () => {
+    const { w, batches } = writerOf();
+    const b = new UsageLogBuffer({ ...CFG, flushBatch: 100 }, w);
+    await b.onModuleDestroy();
+    b.push(row({ status: 499 }));
+    await new Promise<void>((r) => nextTurn(r));
+    await b.settle(100);
+    expect(batches.flat()).toHaveLength(1);
+    expect(b.size()).toBe(0);
+  });
+
   it('final flush gives up after 2 s when the database does not answer', async () => {
     const { w } = writerOf(() => new Promise<void>(() => undefined));
     const b = new UsageLogBuffer({ ...CFG, flushBatch: 100 }, w);
@@ -351,6 +374,17 @@ describe('UsageLogBuffer priorities and drop notices (Story 20.7 round 2)', () =
         ),
       ).toBe(2);
     }
+    // round 4: ANY anonymous failure on an admin route is tier 2: the 400 of a login with an invalid body,
+    // a 404 or a 5xx; an admin's own 400 is still admin work, and an anonymous 400 elsewhere is ordinary
+    for (const status of [400, 404, 422, 500]) {
+      expect(
+        usageTier(
+          row({ route: '/api/v1/admin/auth/login', actorType: 'ANON', status }),
+        ),
+      ).toBe(2);
+    }
+    expect(usageTier({ ...admin(), status: 400 })).toBe(3);
+    expect(usageTier(row({ status: 400 }))).toBe(1);
     // ... but an admin's own refused request is
     expect(usageTier(admin())).toBe(3);
     for (const status of [401, 403, 429, 499, 500, 503]) {

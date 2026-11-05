@@ -1,3 +1,4 @@
+import { setImmediate as nextTurn } from 'node:timers';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { RequestContext } from '../common/request-context.js';
@@ -27,7 +28,7 @@ export const DROP_WARN_INTERVAL_MS = 60_000;
  * Story 20.7 round 2/3: when the queue is full, WHAT goes first. A flood of anonymous 404s (a scanner) or of
  * anonymous 401s (a password spray) must not push out the rows that matter.
  *   3 (kept longest): what an admin did: an admin actor, or anything under `/api/v1/admin/` that is not an
- *     anonymous refusal;
+ *     anonymous failure (401/403/429 and, since round 4, any other anonymous 4xx such as the 400 of a login);
  *   2: failed access and failures of anyone else: 401/403/429, 5xx, and a request the client cut (499);
  *   1: everything else (ordinary traffic);
  *   0 (first to go): an anonymous 404 (`__unmatched__`: scans and typos).
@@ -49,13 +50,23 @@ const ADMIN_ROUTE_PREFIX = '/api/v1/admin/';
 export function usageTier(row: UsageLogRow): UsageTier {
   const s = row.status;
   const refusal = s === 401 || s === 403 || s === 429;
+  // Round 4: ANY failed request of an anonymous caller on an admin route is a refusal too, not only
+  // 401/403/429: the anonymous 400 of `POST /admin/auth/login` (an invalid body, a spray) entered tier 3.
+  const anonymousFailure = row.actorType === 'ANON' && s >= 400;
   if (
     row.actorType === 'ADMIN' ||
-    (row.route.startsWith(ADMIN_ROUTE_PREFIX) && !refusal)
+    (row.route.startsWith(ADMIN_ROUTE_PREFIX) && !refusal && !anonymousFailure)
   ) {
     return 3;
   }
-  if (refusal || s === 499 || s >= 500) return 2;
+  if (
+    refusal ||
+    (anonymousFailure && row.route.startsWith(ADMIN_ROUTE_PREFIX)) ||
+    s === 499 ||
+    s >= 500
+  ) {
+    return 2;
+  }
   if (s === 404 && row.actorType === 'ANON') return 0;
   return 1;
 }
@@ -183,6 +194,9 @@ export class UsageLogBuffer implements OnModuleInit, OnModuleDestroy {
   /** Rows taken from the queue by the write that is running: not in `size()`, not yet in the table. */
   private inFlightRows = 0;
   private kickScheduled = false;
+  /** The app is closing: a row that still arrives (a cut client's 499) is written at once, not at the next tick. */
+  private closing = false;
+  private lateFlushScheduled = false;
   private timer: NodeJS.Timeout | null = null;
   private readonly tombstones = new Map<string, number>();
 
@@ -271,11 +285,28 @@ export class UsageLogBuffer implements OnModuleInit, OnModuleDestroy {
         this.noteDrop(lowest);
       }
       this.tiers[tier].push(row);
-      if (this.size() >= this.cfg.flushBatch) this.kick();
+      if (this.closing) this.lateFlush();
+      else if (this.size() >= this.cfg.flushBatch) this.kick();
     } catch {
       // Never reaches the request. A row that could not even be queued is a drop.
       this.droppedTotal += 1;
     }
+  }
+
+  /**
+   * Story 20.7 round 4: after the final flush of `onModuleDestroy` a row can still arrive (the middleware records a
+   * client the shutdown cut when that socket emits `close`, which Node does AFTER `server.close()` has called back).
+   * It is written on the next turn, while the writer's pool is still open (Prisma closes its own pool later).
+   */
+  private lateFlush(): void {
+    if (this.lateFlushScheduled) return;
+    this.lateFlushScheduled = true;
+    nextTurn(() => {
+      this.lateFlushScheduled = false;
+      RequestContext.detached(() => {
+        void this.flush(true, true).catch(() => undefined);
+      });
+    });
   }
 
   private lowestNonEmpty(): UsageTier | null {
@@ -459,6 +490,7 @@ export class UsageLogBuffer implements OnModuleInit, OnModuleDestroy {
       this.timer = null;
     }
     if (!this.cfg.enabled) return;
+    this.closing = true;
     let stop: NodeJS.Timeout | undefined;
     try {
       const gaveUp = new Promise<'timeout'>((r) => {
@@ -466,8 +498,17 @@ export class UsageLogBuffer implements OnModuleInit, OnModuleDestroy {
       });
       const done = (async () => {
         // a write already in flight may fail and put its rows back: finish it, then drain the rest
+        // Drain, give the event loop one turn (the `close` of the last socket, which pushes the 499 of a cut
+        // client, runs there: it used to arrive 3 ms after a flush that had found 0 rows and was never
+        // written), and drain again while rows keep arriving. A failed write is not retried in a loop.
+        for (let pass = 0; pass < 4; pass++) {
+          await this.settle(SHUTDOWN_FLUSH_MS);
+          await this.flush(true, true);
+          await new Promise<void>((r) => nextTurn(r));
+          if (this.size() === 0 || this.fails > 0) break;
+        }
         await this.settle(SHUTDOWN_FLUSH_MS);
-        await this.flush(true, true);
+        if (this.size() > 0 && this.fails === 0) await this.flush(true, true);
       })();
       const r = await Promise.race([done.then(() => 'ok' as const), gaveUp]);
       if (r === 'timeout' || this.size() > 0) {

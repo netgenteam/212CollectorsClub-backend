@@ -176,6 +176,15 @@ export default async function setup(): Promise<() => Promise<void>> {
           `current_database() is "${db}", not the throw-away clone`,
         );
       }
+      // Story 20.7 round 4: a database that was only migrated (CI, a disposable container) has no `default`
+      // row of `Fx_Rate_Settings` (`prisma/seed.ts` creates it, no migration does): 313 e2e and two perf
+      // specs failed on it. Only here, in the clone that was just verified to be one, it is created when
+      // missing (the value the seed uses); a database that already has it is not touched, and the real
+      // database never is.
+      await c.query(
+        `INSERT INTO "Fx_Rate_Settings" ("id", "vesPerUsd", "updatedAt", "rateFetchedAt")
+         VALUES ('default', 200, now(), now()) ON CONFLICT ("id") DO NOTHING`,
+      );
     } finally {
       await c.end();
     }

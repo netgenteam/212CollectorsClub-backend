@@ -22,6 +22,9 @@ import { mintAdminToken } from './helpers/admin-session.js';
 import { blockAuditAction } from './helpers/block-audit-action.js';
 import { withBuyerId } from './helpers/buyer-id.js';
 
+// Story 20.7 round 4: this suite tests the schedule itself, so the real cron jobs do start (see helpers/stop-crons-global.ts).
+globalThis.__E2E_REAL_CRONS__ = true;
+
 /**
  * Story 20.8 (FR-130..132, AD-101), against the real database (a throw-away clone: see
  * test/helpers/global-test-db.ts), with the application running as the LIMITED role when the suite is run

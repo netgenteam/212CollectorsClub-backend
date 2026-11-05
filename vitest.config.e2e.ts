@@ -11,7 +11,11 @@ export default defineConfig({
     // Story 19.4: the consent documents resolve to the SANDBOX slugs
     // (`e2e-terminos`, ...): no e2e ever publishes on a real, immutable document.
     env: { LEGAL_CONSENT_SLUG_PREFIX: 'e2e-', ...generateIdDocTestEnv() },
-    setupFiles: ['./test/helpers/assert-test-db.ts'],
+    setupFiles: [
+      './test/helpers/assert-test-db.ts',
+      // Story 20.7 round 4: no real `@Cron` ticks during the other suites (see the file).
+      './test/helpers/stop-crons-global.ts',
+    ],
     // Shared dev Postgres: specs mutate stock/orders, so files run serially (AD-48).
     fileParallelism: false,
     // Story 18.3: keep the real (possibly weeks-old) FX row usable by checkout.

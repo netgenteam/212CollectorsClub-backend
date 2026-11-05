@@ -15,6 +15,9 @@ import {
   type SyncRuns,
 } from './helpers/db-snapshot.js';
 
+// Story 20.7 round 4: this suite tests the schedule itself, so the real cron jobs do start (see helpers/stop-crons-global.ts).
+globalThis.__E2E_REAL_CRONS__ = true;
+
 const GAME = 'e2e157';
 const PREFIX = 'e2e157-';
 const SET = (n: number) => FakeTcgApiClient.setIdFor(GAME, n);
