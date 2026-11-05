@@ -383,6 +383,31 @@ describe('UsageLogBuffer priorities and drop notices (Story 20.7 round 2)', () =
         ),
       ).toBe(2);
     }
+    // round 5: the same for a CUSTOMER actor on an admin route (400/404/499/5xx are refusals or failures: tier 2)
+    for (const status of [400, 401, 403, 404, 422, 429, 499, 500, 503]) {
+      expect(
+        usageTier(
+          row({
+            route: '/api/v1/admin/orders',
+            actorType: 'CUSTOMER',
+            actorId: '55555555-5555-4555-8555-555555555555',
+            status,
+          }),
+        ),
+        `CUSTOMER ${status}`,
+      ).toBe(2);
+    }
+    // a customer's successful request there is still not an admin failure (unchanged: 3), and elsewhere it is ordinary
+    expect(
+      usageTier(
+        row({
+          route: '/api/v1/admin/orders',
+          actorType: 'CUSTOMER',
+          status: 200,
+        }),
+      ),
+    ).toBe(3);
+    expect(usageTier(row({ actorType: 'CUSTOMER', status: 404 }))).toBe(1);
     expect(usageTier({ ...admin(), status: 400 })).toBe(3);
     expect(usageTier(row({ status: 400 }))).toBe(1);
     // ... but an admin's own refused request is

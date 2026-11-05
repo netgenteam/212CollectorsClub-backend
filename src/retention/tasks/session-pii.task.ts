@@ -1,4 +1,4 @@
-import { marginalClock } from '../retention-clock.js';
+import { marginalClock } from '../retention-config.js';
 import { runBatches } from '../retention-batch.js';
 import type { RetentionTask } from '../retention.types.js';
 

@@ -14,10 +14,8 @@ import {
  * The bounds that are NOT in the story's text and why:
  *  - `PURGE_SESSION_PII_DAYS` also has a MAXIMUM of 90: the published Privacy Policy says 90 days, so a
  *    longer period would make the text untrue.
- *  - `RETENTION_MAX_CLOCK_ADVANCE_HOURS` (see `retention-clock.ts`): the most a run may add on top of the
- *    real elapsed time, both to recover a lag and as credit for an elapsed time that cannot be verified.
- *  - `RETENTION_CLOCK_RESYNC` no longer exists (the lag recovers by itself); a leftover value is only warned about
- *    (`LEGACY_RESYNC_MESSAGE`).
+ *  - `RETENTION_MAX_CLOCK_ADVANCE_HOURS` and `RETENTION_CLOCK_RESYNC` no longer exist (the retention clock is the
+ *    database clock, with no cap: see `marginalClock`); a leftover value is only warned about (`LEGACY_CLOCK_VARS`).
  */
 export interface RetentionConfig {
   /** Whether the daily cron AND the manual run are allowed to purge (see `isRetentionEnabled`). */
@@ -40,19 +38,26 @@ export interface RetentionConfig {
   expiredTokenDays: number;
   /** `PURGE_RETENTION_RUNS_DAYS`: finished rows of `Retention_Runs` itself are deleted after this (90..3650). */
   retentionRunsDays: number;
-  /** `RETENTION_MAX_CLOCK_ADVANCE_HOURS`: the most a run adds on top of the real time (recovery and unverified credit), see `retention-clock.ts` (24..720). */
-  maxClockAdvanceHours: number;
 }
 
 export class RetentionConfigError extends Error {}
 
-/** `RETENTION_CLOCK_RESYNC` was removed: the lag of the clock now recovers by itself (see `retention-clock.ts`). */
-export const LEGACY_RESYNC_MESSAGE =
-  'RETENTION_CLOCK_RESYNC is no longer used and is ignored (the retention clock recovers its lag by itself, at twice the real time); delete it from the environment';
+/**
+ * Removed variables of the retention clock. The clock is now the database clock with no cap (decision of the
+ * coordinator, 20.8 round 4): a cap that follows the real time cannot tell a clock jump from an outage, and one
+ * VPS that reboots every night never converged. A leftover value is ignored and only warned about.
+ */
+export const LEGACY_CLOCK_VARS = [
+  'RETENTION_CLOCK_RESYNC',
+  'RETENTION_MAX_CLOCK_ADVANCE_HOURS',
+] as const;
 
-/** Is the removed variable still set? (any non-empty value) */
-export function legacyResyncSet(get: (key: string) => unknown): boolean {
-  return text(get('RETENTION_CLOCK_RESYNC')) !== '';
+/** One WARN per removed variable that is still set (any non-empty value); empty when none is. */
+export function legacyClockWarnings(get: (key: string) => unknown): string[] {
+  return LEGACY_CLOCK_VARS.filter((name) => text(get(name)) !== '').map(
+    (name) =>
+      `${name} is no longer used and is ignored (the retention clock is the database clock, with no cap; a jump of the server clock purges early by that difference); delete it from the environment`,
+  );
 }
 
 export const RETENTION_DEFAULTS = {
@@ -65,7 +70,6 @@ export const RETENTION_DEFAULTS = {
   usageLogDays: 7,
   expiredTokenDays: 1,
   retentionRunsDays: 400,
-  maxClockAdvanceHours: 72,
 } as const;
 
 /**
@@ -83,6 +87,16 @@ export const EXPIRED_SESSION_GRACE_DAYS = 7;
  * set to make the purge earlier.
  */
 export const SAFETY_MARGIN_MS = 60 * 60_000;
+
+/**
+ * `asOf` minus the safety margin: the instant from which every period of every task is counted back.
+ * `asOf` is the DATABASE clock read at the start of the run (an epoch, session in UTC), with no cap.
+ * ACCEPTED RISK: if the server's clock jumps forward (WSL2 waking up, an NTP step, a VM restored from a snapshot)
+ * the data is purged early by that same difference. It is a bias in favour of privacy, and the periods are days
+ * and months. The only guard is `CLOCK_SKEW` (database and application differ by more than 5 min: nothing is purged).
+ */
+export const marginalClock = (asOf: Date): Date =>
+  new Date(asOf.getTime() - SAFETY_MARGIN_MS);
 
 const text = (v: unknown): string =>
   typeof v === 'string' || typeof v === 'number' ? String(v).trim() : '';
@@ -183,13 +197,6 @@ export function readRetentionConfig(
       d.retentionRunsDays,
       90,
       3_650,
-    ),
-    maxClockAdvanceHours: int(
-      get,
-      'RETENTION_MAX_CLOCK_ADVANCE_HOURS',
-      d.maxClockAdvanceHours,
-      24,
-      720,
     ),
   };
 }

@@ -3,8 +3,7 @@ import { parse } from 'dotenv';
 import { assertCronExpression } from '../../common/cron-expression.js';
 import { readUsageLogConfig } from '../../usage/usage-config.js';
 import {
-  LEGACY_RESYNC_MESSAGE,
-  legacyResyncSet,
+  legacyClockWarnings,
   readRetentionConfig,
 } from '../retention-config.js';
 
@@ -51,7 +50,7 @@ export function checkRetentionConfig(
         'RETENTION_PURGE_ENABLED=false in production: the retention job is OFF; nothing is purged and the usage log (IP and user agent, promised to be deleted after 7 days) is kept without limit',
       );
     }
-    if (legacyResyncSet(get)) out.warnings.push(LEGACY_RESYNC_MESSAGE);
+    out.warnings.push(...legacyClockWarnings(get));
     if (c.enabled && c.cron === 'off' && nodeEnv === 'production') {
       out.warnings.push(
         'RETENTION_PURGE_CRON=off in production: nothing purges on a schedule (the usage log included); only POST /admin/retention/run does',

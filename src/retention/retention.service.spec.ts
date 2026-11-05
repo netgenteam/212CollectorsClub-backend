@@ -33,12 +33,6 @@ function rig(
   opts: {
     cfg?: ReturnType<typeof cfgOf>;
     dbNow?: Date;
-    previous?: Date | null;
-    previousBoot?: string | null;
-    previousUptimeMs?: number | null;
-    monotonic?: {
-      anchor: () => { bootId: string | null; uptimeMs: number | null };
-    };
     auditFails?: boolean;
     createFails?: unknown;
     tasks?: RetentionTask[];
@@ -59,18 +53,6 @@ function rig(
       return Promise.resolve([
         { ms: BigInt((opts.dbNow ?? new Date()).getTime()) },
       ]);
-    if (/SELECT "effectiveNow"/.test(strings))
-      return Promise.resolve(
-        opts.previous
-          ? [
-              {
-                effectiveNow: opts.previous,
-                bootId: opts.previousBoot ?? null,
-                uptimeMs: opts.previousUptimeMs ?? null,
-              },
-            ]
-          : [],
-      );
     if (/"finishedAt" IS NOT NULL AND "auditedAt" IS NULL/.test(strings))
       return Promise.resolve([]);
     if (/UPDATE "Retention_Runs"/.test(strings))
@@ -119,7 +101,6 @@ function rig(
     {
       getCronJob: () => ({ nextDate: () => new Date('2026-11-05T04:30:00Z') }),
     } as never,
-    opts.monotonic ?? { anchor: () => ({ bootId: null, uptimeMs: null }) },
   );
   const tasks: RetentionTask[] = opts.tasks ?? [
     { name: 'a', run: () => Promise.resolve({ rows: 3, truncated: false }) },
@@ -257,101 +238,88 @@ describe('RetentionService', () => {
     expect(RetentionSessionLock.tryAcquire).not.toHaveBeenCalled();
   });
 
-  it('the clock of the run is capped: a database clock a year ahead is not used', async () => {
-    const seen: Date[] = [];
-    const task: RetentionTask = {
-      name: 'a',
-      run: (ctx) => {
-        seen.push(ctx.asOf);
-        return Promise.resolve({ rows: 0, truncated: false });
-      },
-    };
-    const prev = new Date('2026-11-04T04:30:00Z');
-    const r = rig({
-      tasks: [task],
-      previous: prev,
-      dbNow: new Date(Date.now() + 365 * 86_400_000),
-    });
-    // the skew check would stop a real jump; here only the cap is under test
-    (r.svc as unknown as { cfg: unknown }).cfg = cfgOf({
-      RETENTION_BATCH_PAUSE_MS: '0',
-    });
+  const seenClock = async (r: Rig) => {
     const out = await r.svc.start('SCHEDULED');
     if (out.kind !== 'started') throw new Error('x');
-    await out.done;
-    // skewMs > MAX_CLOCK_SKEW_MS: nothing ran at all, which is even safer
-    expect(seen).toEqual([]);
-    expect(MAX_CLOCK_SKEW_MS).toBeLessThanOrEqual(10 * 60_000);
+    return { sum: await out.done };
+  };
+  const clockTask = (seen: Date[]): RetentionTask => ({
+    name: 'a',
+    run: (ctx) => {
+      seen.push(ctx.asOf);
+      return Promise.resolve({ rows: 0, truncated: false });
+    },
   });
 
-  it('QA reproduction: the unverifiable clock is capped, saved as clockClamped with its anchor, and the run says so in the WARN', async () => {
-    const seen: Date[] = [];
-    const dbNows: Date[] = [];
-    const task: RetentionTask = {
-      name: 'a',
-      run: (ctx) => {
-        seen.push(ctx.asOf);
-        dbNows.push(ctx.dbNow);
-        return Promise.resolve({ rows: 0, truncated: false });
-      },
-    };
-    const now = Date.now();
-    const prev = new Date(now - 2 * 86_400_000);
-    const r = rig({
-      tasks: [task],
-      previous: prev,
-      dbNow: new Date(now),
-      monotonic: { anchor: () => ({ bootId: 'boot-B', uptimeMs: 123 }) },
+  describe('the run clock is the database clock, with no cap (round 4)', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it('every task cuts by the database clock exactly as read; the row stores it as effectiveNow and no anchor columns', async () => {
+      const seen: Date[] = [];
+      const now = Date.now();
+      const r = rig({ tasks: [clockTask(seen)], dbNow: new Date(now) });
+      await seenClock(r);
+      expect(seen[0].getTime()).toBe(
+        Math.floor(now / 1000) * 1000 + (now % 1000),
+      );
+      expect(
+        (r.prisma.retentionRun.create.mock.calls[0][0] as { data: object })
+          .data,
+      ).toEqual({
+        trigger: 'SCHEDULED',
+        triggeredById: null,
+        status: 'RUNNING',
+        effectiveNow: new Date(now),
+      });
     });
-    const warn = vi
-      .spyOn(
-        (r.svc as unknown as { logger: { warn: (m: string) => void } }).logger,
-        'warn',
-      )
-      .mockImplementation(() => undefined);
-    // previous run 48 h ago with NO anchor (unverifiable): only the 123 ms of uptime are credited, twice. The
-    // purge no longer takes the database clock's word (the round-2 branch adopted up to 72 h: purga anticipada).
-    const out = await r.svc.start('SCHEDULED');
-    if (out.kind !== 'started') throw new Error('x');
-    await out.done;
-    expect(seen[0].getTime()).toBe(prev.getTime() + 246);
-    // ...but the task that cuts by the database clock (usage_logs) can see it, uncapped
-    expect(dbNows[0].getTime()).toBe(now);
-    expect(
-      (r.prisma.retentionRun.create.mock.calls[0][0] as { data: unknown }).data,
-    ).toMatchObject({
-      clockClamped: true,
-      bootId: 'boot-B',
-      uptimeMs: 123n,
+
+    it('a server that reboots every night (the QA case) never lags: 30 daily runs, asOf equals the database clock each time', async () => {
+      const seen: Date[] = [];
+      const day = 86_400_000;
+      const t0 = Date.now();
+      for (let d = 0; d < 30; d++) {
+        const dbNow = new Date(t0 + d * day);
+        vi.spyOn(Date, 'now').mockReturnValue(dbNow.getTime());
+        await seenClock(rig({ tasks: [clockTask(seen)], dbNow }));
+      }
+      expect(seen.map((x) => x.getTime())).toEqual(
+        Array.from({ length: 30 }, (_, d) => t0 + d * day),
+      );
     });
-    warn.mockClear();
-    // the previous run was 10 days ago and unverifiable, 30 min of uptime: asOf moves 1 h, flagged, and WARN-ed
-    const r2 = rig({
-      tasks: [task],
-      previous: new Date(now - 10 * 86_400_000),
-      dbNow: new Date(now),
-      monotonic: { anchor: () => ({ bootId: 'boot-B', uptimeMs: 1_800_000 }) },
+
+    it('a jump of the shared clock is adopted at once (accepted, documented: the purge is early by that difference)', async () => {
+      const seen: Date[] = [];
+      const jumped = new Date(Date.now() + 72 * 3_600_000);
+      vi.spyOn(Date, 'now').mockReturnValue(jumped.getTime()); // app and database clocks jump together
+      await seenClock(rig({ tasks: [clockTask(seen)], dbNow: jumped }));
+      expect(seen[0]).toEqual(jumped);
     });
-    const warn2 = vi
-      .spyOn(
-        (r2.svc as unknown as { logger: { warn: (m: string) => void } }).logger,
-        'warn',
-      )
-      .mockImplementation(() => undefined);
-    const o2 = await r2.svc.start('SCHEDULED');
-    if (o2.kind !== 'started') throw new Error('x');
-    await o2.done;
-    expect(seen[1].getTime()).toBe(now - 10 * 86_400_000 + 3_600_000);
-    expect(
-      (
-        r2.prisma.retentionRun.create.mock.calls[0][0] as {
-          data: { clockClamped: boolean };
-        }
-      ).data.clockClamped,
-    ).toBe(true);
-    const messages = warn2.mock.calls.map((c) => String(c[0]));
-    expect(messages.some((m) => /clockClamped=true/.test(m))).toBe(true);
-    expect(messages.filter((m) => /clockClamped=true/.test(m)).length).toBe(2); // the clock WARN and the run summary
+
+    it('CLOCK_SKEW edge: a difference of exactly 5 min still purges, 5 min + 1 ms purges nothing and is FAILED', async () => {
+      const t = 1_800_000_000_000;
+      vi.spyOn(Date, 'now').mockReturnValue(t);
+      expect(MAX_CLOCK_SKEW_MS).toBe(5 * 60_000);
+      for (const sign of [1, -1]) {
+        const seen: Date[] = [];
+        const ok = await seenClock(
+          rig({
+            tasks: [clockTask(seen)],
+            dbNow: new Date(t + sign * MAX_CLOCK_SKEW_MS),
+          }),
+        );
+        expect(ok.sum.status).toBe('OK');
+        expect(seen).toHaveLength(1);
+        const bad = await seenClock(
+          rig({
+            tasks: [clockTask(seen)],
+            dbNow: new Date(t + sign * (MAX_CLOCK_SKEW_MS + 1)),
+          }),
+        );
+        expect(bad.sum.status).toBe('FAILED');
+        expect(bad.sum.tasks).toEqual([]);
+        expect(seen).toHaveLength(1);
+      }
+    });
   });
 
   describe('start-up warnings (onModuleInit)', () => {
@@ -385,13 +353,14 @@ describe('RetentionService', () => {
       expect(warnings(r)).toEqual([]);
     });
 
-    it('a leftover RETENTION_CLOCK_RESYNC is warned about at start and has no effect', () => {
+    it('leftover RETENTION_CLOCK_RESYNC and RETENTION_MAX_CLOCK_ADVANCE_HOURS are warned about at start and have no effect', () => {
       vi.stubEnv('NODE_ENV', 'production');
       vi.stubEnv('RETENTION_CLOCK_RESYNC', 'true');
+      vi.stubEnv('RETENTION_MAX_CLOCK_ADVANCE_HOURS', '72');
       const r = rig({ cfg: cfgOf({ RETENTION_PURGE_CRON: 'off' }) });
-      expect(warnings(r).join('\n')).toMatch(
-        /RETENTION_CLOCK_RESYNC is no longer used/,
-      );
+      const w = warnings(r).join('\n');
+      expect(w).toMatch(/RETENTION_CLOCK_RESYNC is no longer used/);
+      expect(w).toMatch(/RETENTION_MAX_CLOCK_ADVANCE_HOURS is no longer used/);
     });
   });
 

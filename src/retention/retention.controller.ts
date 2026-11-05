@@ -156,7 +156,6 @@ export class RetentionController {
           ? (r.tasks as unknown as RetentionRunsDto['items'][number]['tasks'])
           : [],
         effectiveNow: r.effectiveNow?.toISOString() ?? null,
-        clockClamped: r.clockClamped,
         auditedAt: r.auditedAt?.toISOString() ?? null,
         errorSummary: r.errorSummary,
       })),
@@ -181,7 +180,6 @@ export class RetentionController {
       batchPauseMs: c.batchPauseMs,
       maxRunMs: c.maxRunMs,
       safetyMarginMinutes: SAFETY_MARGIN_MS / 60_000,
-      maxClockAdvanceHours: c.maxClockAdvanceHours,
       periods: {
         sessionPiiDays: c.sessionPiiDays,
         expiredSessionDays: EXPIRED_SESSION_GRACE_DAYS,

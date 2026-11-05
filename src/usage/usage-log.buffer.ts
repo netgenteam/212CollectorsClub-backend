@@ -28,7 +28,7 @@ export const DROP_WARN_INTERVAL_MS = 60_000;
  * Story 20.7 round 2/3: when the queue is full, WHAT goes first. A flood of anonymous 404s (a scanner) or of
  * anonymous 401s (a password spray) must not push out the rows that matter.
  *   3 (kept longest): what an admin did: an admin actor, or anything under `/api/v1/admin/` that is not an
- *     anonymous failure (401/403/429 and, since round 4, any other anonymous 4xx such as the 400 of a login);
+ *     anonymous failure (401/403/429 and, since round 4, any other 4xx of a non-admin caller, anonymous or CUSTOMER, such as the 400 of a login);
  *   2: failed access and failures of anyone else: 401/403/429, 5xx, and a request the client cut (499);
  *   1: everything else (ordinary traffic);
  *   0 (first to go): an anonymous 404 (`__unmatched__`: scans and typos).
@@ -50,18 +50,19 @@ const ADMIN_ROUTE_PREFIX = '/api/v1/admin/';
 export function usageTier(row: UsageLogRow): UsageTier {
   const s = row.status;
   const refusal = s === 401 || s === 403 || s === 429;
-  // Round 4: ANY failed request of an anonymous caller on an admin route is a refusal too, not only
-  // 401/403/429: the anonymous 400 of `POST /admin/auth/login` (an invalid body, a spray) entered tier 3.
-  const anonymousFailure = row.actorType === 'ANON' && s >= 400;
+  // Round 4/5: ANY failed request of a caller who is not an admin (anonymous or CUSTOMER) on an admin route is a refusal
+  // too, not only 401/403/429: the anonymous 400 of `POST /admin/auth/login` (an invalid body, a spray) or a customer's
+  // 400/404 on an admin route entered tier 3.
+  const nonAdminFailure = row.actorType !== 'ADMIN' && s >= 400;
   if (
     row.actorType === 'ADMIN' ||
-    (row.route.startsWith(ADMIN_ROUTE_PREFIX) && !refusal && !anonymousFailure)
+    (row.route.startsWith(ADMIN_ROUTE_PREFIX) && !refusal && !nonAdminFailure)
   ) {
     return 3;
   }
   if (
     refusal ||
-    (anonymousFailure && row.route.startsWith(ADMIN_ROUTE_PREFIX)) ||
+    (nonAdminFailure && row.route.startsWith(ADMIN_ROUTE_PREFIX)) ||
     s === 499 ||
     s >= 500
   ) {

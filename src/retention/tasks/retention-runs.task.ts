@@ -1,4 +1,4 @@
-import { marginalClock } from '../retention-clock.js';
+import { marginalClock } from '../retention-config.js';
 import { runBatches } from '../retention-batch.js';
 import type { RetentionTask } from '../retention.types.js';
 
@@ -10,8 +10,7 @@ import type { RetentionTask } from '../retention.types.js';
  * What it must never delete (each one is a condition of the statement):
  *  - a `RUNNING` row (a live run, or a dead one the next run has not reconciled yet);
  *  - a row of a run that has not finished (`finishedAt IS NULL`);
- *  - the row of the CURRENT run (`id <> runId`): it is the anchor of the clock of the next run
- *    (`effectiveNow`), and the newest row always is newer than the cut-off in any case.
+ *  - the row of the CURRENT run (`id <> runId`): the newest row always is newer than the cut-off in any case.
  * Only rows older than `PURGE_RETENTION_RUNS_DAYS` (default 400, 90..3650) go. Rows hold counters and
  * the id of the admin who started a manual run; nothing else.
  */

@@ -58,14 +58,9 @@ export class RetentionRunDto {
   @ApiProperty({
     format: 'date-time',
     nullable: true,
-    description: 'The clock the run used for every cut-off.',
+    description: 'The database clock the run used for every cut-off.',
   })
   effectiveNow!: string | null;
-  @ApiProperty({
-    description:
-      'The run clock was capped: the database clock was ahead of the previous run plus the real time elapsed (a clock jump, or an outage whose length cannot be verified). The purge ran as of effectiveNow, not as of startedAt.',
-  })
-  clockClamped!: boolean;
   @ApiProperty({
     format: 'date-time',
     nullable: true,
@@ -129,11 +124,6 @@ export class RetentionConfigDto {
   @ApiProperty() maxRunMs!: number;
   @ApiProperty({ description: 'Added to every period (fixed).' })
   safetyMarginMinutes!: number;
-  @ApiProperty({
-    description:
-      'The most a run adds on top of the real elapsed time (lag recovery, and credit when the elapsed time cannot be verified).',
-  })
-  maxClockAdvanceHours!: number;
   @ApiProperty({ type: RetentionPeriodsDto }) periods!: RetentionPeriodsDto;
   @ApiProperty({ type: [String] }) tasks!: string[];
   @ApiProperty({ type: [String], description: 'What the job never deletes.' })

@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SchedulerRegistry } from '@nestjs/schedule';
@@ -10,13 +10,7 @@ import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { UsageLogPurgeService } from '../usage/usage-purge.service.js';
 import { ProductSignalsService } from '../vitrina/product-signals.service.js';
-import {
-  effectiveClock,
-  hostMonotonicSource,
-  RETENTION_MONOTONIC,
-} from './retention-clock.js';
-import type { ClockAnchor, MonotonicSource } from './retention-clock.js';
-import { LEGACY_RESYNC_MESSAGE, legacyResyncSet } from './retention-config.js';
+import { legacyClockWarnings } from './retention-config.js';
 import type { RetentionConfig } from './retention-config.js';
 import { RetentionSessionLock } from './retention-lock.js';
 import { RETENTION_ADVISORY_KEY, RETENTION_CONFIG } from './retention.types.js';
@@ -96,13 +90,6 @@ interface PreviousRun {
   effectiveNow: Date | null;
 }
 
-/** The clock of the previous run, with the anchor that lets the next one measure the real time between them. */
-interface PreviousClockRow {
-  effectiveNow: Date;
-  bootId: string | null;
-  uptimeMs: bigint | number | null;
-}
-
 /**
  * Story 20.8 (AD-101, FR-130..132): the daily retention job.
  *
@@ -113,7 +100,7 @@ interface PreviousClockRow {
  *    transaction, a bounded lock wait, a pause) and stops at the run's deadline. No task is a
  *    prerequisite of another; a failed one is recorded and the rest still run.
  *  - NOTHING is passed in by the caller that could move a cut-off: the periods come from the boot
- *    configuration, the clock is `retention-clock.ts` (the database clock, capped), the margin is a
+ *    configuration, the clock is the database clock (no cap, see `marginalClock`), the margin is a
  *    constant. The manual endpoint takes no parameter at all.
  *  - Audit (decision, AD-99 "fail-closed" applies to a business action; this is an expiry of data the
  *    Privacy Policy promises to delete): the purge is NOT conditional on the audit log being writable.
@@ -131,7 +118,6 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
   private readonly tasks: RetentionTask[];
   private inflight: Promise<RunSummary> | null = null;
   private stopping = false;
-  private readonly monotonic: MonotonicSource;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -141,9 +127,7 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
     usagePurge: UsageLogPurgeService,
     signals: ProductSignalsService,
     private readonly scheduler: SchedulerRegistry,
-    @Optional() @Inject(RETENTION_MONOTONIC) monotonic?: MonotonicSource,
   ) {
-    this.monotonic = monotonic ?? hostMonotonicSource;
     // The order is the budget: the small tables first, the big one (usage log) last, so a backlog in
     // it cannot starve the others of the run's time.
     this.tasks = [
@@ -192,8 +176,8 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
    */
   onModuleInit(): void {
     const production = process.env.NODE_ENV === 'production';
-    if (legacyResyncSet((k) => this.config.get<string>(k))) {
-      this.logger.warn(LEGACY_RESYNC_MESSAGE);
+    for (const w of legacyClockWarnings((k) => this.config.get<string>(k))) {
+      this.logger.warn(w);
     }
     if (!this.cfg.enabled) {
       if (production) {
@@ -272,8 +256,6 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
 
     let runId: string;
     let asOf: Date;
-    let now: Date;
-    let clamped: boolean;
     let skewMs: number;
     try {
       await this.assertSafeDatabase(lock);
@@ -281,27 +263,13 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
       await this.failOrphanedRuns();
       const dbNow = await this.databaseNow();
       skewMs = Math.abs(dbNow.getTime() - Date.now());
-      const previous = await this.previousClock();
-      const anchor = this.monotonic.anchor();
-      const clock = effectiveClock({
-        dbNow,
-        previous,
-        current: anchor,
-        maxAdvanceHours: this.cfg.maxClockAdvanceHours,
-      });
-      asOf = clock.asOf;
-      now = dbNow;
-      clamped = clock.clamped;
-      this.reportClock(clock, dbNow);
+      asOf = dbNow;
       const row = await this.prisma.retentionRun.create({
         data: {
           trigger,
           triggeredById: adminId,
           status: 'RUNNING',
           effectiveNow: asOf,
-          clockClamped: clamped,
-          bootId: anchor.bootId,
-          uptimeMs: anchor.uptimeMs === null ? null : BigInt(anchor.uptimeMs),
         },
         select: { id: true },
       });
@@ -318,8 +286,6 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
       trigger,
       adminId,
       asOf,
-      dbNow: now,
-      clamped,
       skewMs,
       lock,
     }).finally(() => {
@@ -352,36 +318,6 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
     return new Date(Number(r[0].ms));
   }
 
-  private async previousClock(): Promise<
-    (ClockAnchor & { effectiveNow: Date }) | null
-  > {
-    const r = await this.prisma.$queryRaw<PreviousClockRow[]>`
-      SELECT "effectiveNow", "bootId", "uptimeMs" FROM "Retention_Runs"
-       WHERE "effectiveNow" IS NOT NULL ORDER BY "startedAt" DESC LIMIT 1`;
-    const p = r[0];
-    if (!p) return null;
-    return {
-      effectiveNow: p.effectiveNow,
-      bootId: p.bootId,
-      uptimeMs: p.uptimeMs === null ? null : Number(p.uptimeMs),
-    };
-  }
-
-  /** WARN every time the clock was capped, with the lag and how long it takes to close, so it is never silent. */
-  private reportClock(
-    clock: ReturnType<typeof effectiveClock>,
-    dbNow: Date,
-  ): void {
-    if (!clock.clamped) return;
-    const lagH = (clock.lagMs / 3_600_000).toFixed(1);
-    this.logger.warn(
-      `retention clock capped (clockClamped=true): the database clock (${dbNow.toISOString()}) is ${lagH} h ahead of what the time elapsed since the previous run allows ` +
-        `(${clock.basis === 'verified' ? 'elapsed time measured with the host uptime counter' : 'elapsed time not verifiable: other boot, other machine or no anchor, only the current uptime is credited'}); ` +
-        `purging as of ${clock.asOf.toISOString()}. The lag closes by itself at the pace of the real time (about ${lagH} h from now); ` +
-        `the usage log is purged by the database clock regardless (docs/deployment.md 20.5)`,
-    );
-  }
-
   /** `RUNNING` rows left by a dead run -> `FAILED` (AC6 asks for 30 minutes; holding the lock proves death sooner). */
   private async failOrphanedRuns(): Promise<void> {
     const n = await this.prisma.$executeRaw`
@@ -401,8 +337,6 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
     trigger: RetentionTrigger;
     adminId: string | null;
     asOf: Date;
-    dbNow: Date;
-    clamped: boolean;
     skewMs: number;
     lock: RetentionSessionLock;
   }): Promise<RunSummary> {
@@ -426,7 +360,6 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
           runId: p.runId,
           cfg: this.cfg,
           asOf: p.asOf,
-          dbNow: p.dbNow,
           shouldStop: () =>
             Date.now() >= deadline || p.lock.lost() || this.stopping,
           pause: () => sleep(this.cfg.batchPauseMs),
@@ -496,7 +429,6 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
       await p.lock.release(RETENTION_ADVISORY_KEY);
     }
     const total = results.reduce((n, r) => n + r.rows, 0);
-    // WARN when the clock was capped: it must stand out in the log (and is on the run row and in the audit event).
     const summary =
       `retention run ${p.runId} (${p.trigger}) ${status}: ${total} rows in ${Date.now() - t0} ms; ` +
       results
@@ -504,10 +436,8 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
           (r) =>
             `${r.name}=${r.rows}${r.truncated ? '+' : ''}${r.error ? '!' : ''}`,
         )
-        .join(' ') +
-      (p.clamped ? ' [clockClamped=true]' : '');
-    if (p.clamped) this.logger.warn(summary);
-    else this.logger.log(summary);
+        .join(' ');
+    this.logger.log(summary);
     return { runId: p.runId, status, tasks: results, audited };
   }
 
@@ -532,7 +462,6 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
       status: string;
       startedAt: Date;
       finishedAt: Date;
-      clockClamped: boolean;
       tasks: unknown;
     },
     lateAudit: boolean,
@@ -543,7 +472,6 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
       status: run.status,
       startedAt: run.startedAt,
       finishedAt: run.finishedAt,
-      clockClamped: run.clockClamped,
       lateAudit,
       tasks: run.tasks,
     });
@@ -558,7 +486,6 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
       runId: string;
       trigger: RetentionTrigger;
       adminId: string | null;
-      clamped: boolean;
     },
     status: RetentionRunStatus,
     results: RetentionTaskResult[],
@@ -584,7 +511,6 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
             status,
             startedAt: row.startedAt,
             finishedAt: row.finishedAt,
-            clockClamped: p.clamped,
             tasks: results,
           },
           false,
@@ -648,7 +574,6 @@ export class RetentionService implements OnModuleInit, OnApplicationShutdown {
                 status: r.status,
                 startedAt: r.startedAt,
                 finishedAt: r.finishedAt as Date,
-                clockClamped: false,
                 tasks: r.tasks,
               },
               true,

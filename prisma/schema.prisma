@@ -1641,21 +1641,13 @@ model RetentionRun {
   status        String     @db.VarChar(16)
   /// [{ name, rows, durationMs, truncated, error? }]
   tasks         Json       @default("[]")
-  /// Story 20.8: the clock the run used for every cut-off: the database clock, never further than
-  /// `RETENTION_MAX_CLOCK_ADVANCE_HOURS` past the previous run's (a clock that jumps forward does not
-  /// bring the purge forward). Null for a run that never got that far.
+  /// Story 20.8: the clock the run used for every cut-off: the database clock at the start of the run
+  /// (no cap, round 4). Null for a run that never got that far.
   effectiveNow  DateTime?  @db.Timestamptz(3)
   /// Story 20.8: when `RETENTION_PURGE_RUN` was written (null: not written yet, the next run writes it).
   auditedAt     DateTime?  @db.Timestamptz(3)
   /// Story 20.8: a short code of what went wrong at run level (never a message that could carry data).
   errorSummary  String?    @db.VarChar(200)
-  /// Story 20.8 round 2: the run's clock was capped (the database clock was ahead of the previous run's `effectiveNow`
-  /// plus the real time that elapsed). Shown by GET /admin/retention/runs.
-  clockClamped  Boolean    @default(false)
-  /// Story 20.8 round 2: anchor of the run's clock for measuring the REAL time to the next run: the boot of the machine
-  /// (`/proc/sys/kernel/random/boot_id`) and its uptime counter in ms; neither moves when the wall clock jumps. Null: unknown.
-  bootId        String?    @db.VarChar(64)
-  uptimeMs      BigInt?
 
   /// NOT MODELED BY PRISMA: partial unique index "Retention_Runs_one_running_key" ON ("status") WHERE
   /// "status" = 'RUNNING' (hand-written in migration 20261111100000: a second RUNNING row cannot exist).

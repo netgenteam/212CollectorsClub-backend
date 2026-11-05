@@ -2,7 +2,7 @@ import {
   RETENTION_DEFAULTS,
   RetentionConfigError,
   isRetentionEnabled,
-  legacyResyncSet,
+  legacyClockWarnings,
   readRetentionConfig,
 } from './retention-config.js';
 
@@ -22,7 +22,6 @@ describe('retention config (Story 20.8 AC5)', () => {
       usageLogDays: 7,
       expiredTokenDays: 1,
       retentionRunsDays: 400,
-      maxClockAdvanceHours: 72,
     });
     expect(RETENTION_DEFAULTS.sessionPiiDays).toBe(90);
   });
@@ -42,7 +41,6 @@ describe('retention config (Story 20.8 AC5)', () => {
     ['RETENTION_BATCH_SIZE', '5'],
     ['RETENTION_BATCH_PAUSE_MS', '-1'],
     ['RETENTION_MAX_RUN_MS', '999'],
-    ['RETENTION_MAX_CLOCK_ADVANCE_HOURS', '23'],
     ['RETENTION_PURGE_CRON', 'not a cron'],
     ['RETENTION_PURGE_CRON', '61 99 * * *'], // well-formed but impossible: used to stop the start with a bare CronError
     ['RETENTION_PURGE_CRON', '* * * *'],
@@ -80,17 +78,29 @@ describe('retention config (Story 20.8 AC5)', () => {
     );
   });
 
-  it('RETENTION_CLOCK_RESYNC was removed: any value is ignored by the reader and only detected to be warned about', () => {
-    const c = readRetentionConfig(env({ RETENTION_CLOCK_RESYNC: 'true' }));
-    expect(c).not.toHaveProperty('clockResync');
+  it('RETENTION_CLOCK_RESYNC and RETENTION_MAX_CLOCK_ADVANCE_HOURS were removed: any value (even garbage or out of range) is ignored by the reader and only detected to be warned about', () => {
+    const base = readRetentionConfig(env({}));
+    for (const o of [] as Record<string, string>[]) void o;
+    for (const o of <Record<string, string>[]>[
+      { RETENTION_CLOCK_RESYNC: 'garbage' },
+      { RETENTION_MAX_CLOCK_ADVANCE_HOURS: '1' },
+    ]) {
+      const c = readRetentionConfig(env(o));
+      expect(c).toEqual(base);
+      expect(c).not.toHaveProperty('maxClockAdvanceHours');
+    }
     expect(
-      readRetentionConfig(env({ RETENTION_CLOCK_RESYNC: 'garbage' })),
-    ).toEqual(readRetentionConfig(env({})));
-    expect(legacyResyncSet(env({ RETENTION_CLOCK_RESYNC: 'true' }))).toBe(true);
-    expect(legacyResyncSet(env({ RETENTION_CLOCK_RESYNC: 'false' }))).toBe(
-      true,
-    );
-    expect(legacyResyncSet(env({}))).toBe(false);
+      legacyClockWarnings(env({ RETENTION_CLOCK_RESYNC: 'false' })),
+    ).toHaveLength(1);
+    expect(
+      legacyClockWarnings(
+        env({
+          RETENTION_CLOCK_RESYNC: 'true',
+          RETENTION_MAX_CLOCK_ADVANCE_HOURS: '72',
+        }),
+      ),
+    ).toHaveLength(2);
+    expect(legacyClockWarnings(env({}))).toEqual([]);
   });
 
   it('the message about an invalid value quotes it, except for a variable whose name looks sensitive', () => {
