@@ -1,6 +1,7 @@
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
 import { stripIdDocFromName } from '../crypto/id-doc-in-name.js';
+import { UsageLogErasure } from '../usage/usage-erasure.service.js';
 import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
 import { toAddressResponse } from '../customer-addresses/customer-addresses.service.js';
 import { Prisma } from '../generated/prisma/client.js';
@@ -83,6 +84,7 @@ export class CustomerDirectoryService {
     private readonly prisma: PrismaService,
     private readonly idDocCrypto: IdDocCryptoService,
     private readonly adminOrders: AdminOrdersService,
+    private readonly usageErasure: UsageLogErasure,
   ) {}
 
   /** `cursor` only (the GET list): newest first. Same shape as the search. */
@@ -218,6 +220,7 @@ export class CustomerDirectoryService {
       consents,
       inquiries,
       refundPending,
+      usageLogs,
     ] = await Promise.all([
       this.prisma.customerAddress.findMany({
         where: { customerId },
@@ -278,6 +281,8 @@ export class CustomerDirectoryService {
       >`SELECT count(DISTINCT e."orderId") AS "n" FROM "Stripe_Webhook_Events" e
           JOIN "Orders" o ON o."id" = e."orderId"
          WHERE o."customerId" = ${customerId}::uuid AND starts_with(e."outcome", 'refund_pending_')`,
+      // Story 20.7: the rows of the usage log (IP, 7 days) the anonymization will delete.
+      this.usageErasure.countFor(customerId),
     ]);
     const inquiriesKept = Number(inquiries[0]?.n ?? 0);
     const ordersRefundPending = Number(refundPending[0]?.n ?? 0);
@@ -331,6 +336,7 @@ export class CustomerDirectoryService {
           verificationTokens: verifications,
           carts,
           wishlists,
+          usageLogs,
         },
         willKeep: {
           orders: ordersTotal,

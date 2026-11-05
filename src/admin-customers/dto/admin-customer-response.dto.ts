@@ -58,6 +58,11 @@ export class AnonymizationWillDeleteDto {
   verificationTokens: number;
   @ApiProperty() carts: number;
   @ApiProperty() wishlists: number;
+  @ApiProperty({
+    description:
+      'Rows of the usage log (IP, user agent, routes; kept 7 days) of this account. Deleted too, including the ones still in the memory of the server.',
+  })
+  usageLogs: number;
 }
 
 export class AnonymizationWillKeepDto {

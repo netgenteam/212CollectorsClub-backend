@@ -14,6 +14,8 @@ import {
   proxyStartupWarning,
 } from './common/proxy-diagnostics.js';
 import { applyRequestContext } from './common/request-id.middleware.js';
+import { UsageLogBuffer } from './usage/usage-log.buffer.js';
+import { applyUsageLog } from './usage/usage-log.middleware.js';
 import { applyJsonBodyLimit } from './common/json-body-limit.js';
 import { createGlobalValidationPipe } from './common/global-validation-pipe.js';
 import { RedactingLogger } from './common/redacting-logger.js';
@@ -60,6 +62,12 @@ async function bootstrap() {
   // only for requests carrying a Bearer token). See `json-body-limit.ts`.
   // Story 20.1: requestId + ip context for every request, before cookie-parser.
   applyRequestContext(app);
+
+  // Story 20.7 (AD-100): the usage log. A plain Express middleware (an interceptor would not see a 404
+  // nor a request a guard rejected), right after the request id it records and before cookie-parser.
+  // It only queues a row when the response finishes; the write is asynchronous and never blocks.
+  // `USAGE_LOG_ENABLED=false` mounts nothing.
+  applyUsageLog(app, app.get(UsageLogBuffer));
 
   applyJsonBodyLimit(app);
 
@@ -145,7 +153,8 @@ async function bootstrap() {
   SwaggerModule.setup('api/docs', app, swaggerDocument);
 
   // Story 20.5: closing the app (SIGTERM from systemd) flushes what the services keep pending,
-  // such as the discarded failed-login counts (`AdminLoginFailureSummary`).
+  // such as the discarded failed-login counts (`AdminLoginFailureSummary`), and (Story 20.7) the usage
+  // rows still in memory (`UsageLogBuffer.onModuleDestroy`, 2 s at most, before Prisma disconnects).
   app.enableShutdownHooks();
 
   if (host && host.trim() !== '') await app.listen(port, host.trim());

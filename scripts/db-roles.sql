@@ -90,6 +90,13 @@ BEGIN
   IF to_regclass('public."Audit_Events"') IS NOT NULL THEN
     EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON public."Audit_Events" FROM %I', app);
   END IF;
+  -- The usage log (Story 20.7) is MUTABLE on purpose (rows are deleted by the 7-day purge and by the
+  -- anonymization of an account) but it is only ever INSERTed, SELECTed and DELETEd: a row is never updated,
+  -- so the blanket UPDATE above is taken back, and so are TRUNCATE (a whole-table wipe is the owner's) and the
+  -- privileges the application has no use for.
+  IF to_regclass('public."Usage_Logs"') IS NOT NULL THEN
+    EXECUTE format('REVOKE UPDATE, TRUNCATE, REFERENCES, TRIGGER ON public."Usage_Logs" FROM %I', app);
+  END IF;
   -- Prisma's own bookkeeping table is the migrator's.
   IF to_regclass('public."_prisma_migrations"') IS NOT NULL THEN
     EXECUTE format('REVOKE ALL ON public."_prisma_migrations" FROM %I', app);

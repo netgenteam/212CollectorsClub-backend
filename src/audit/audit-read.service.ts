@@ -39,6 +39,51 @@ export interface AuditEventsFilter {
 const invalid = (message: string): ApiException =>
   new ApiException(HttpStatus.BAD_REQUEST, 'AUDIT_FILTER_INVALID', message);
 
+/**
+ * Strict calendar check shared by the audit and the usage log filters: `2026-02-30` is NOT 2 March,
+ * `24:00`, `:60` and `+24:00` are not accepted, and the year is 2000..2999. `bad(name)` builds the 400.
+ */
+export function parseFilterDate(
+  k: string,
+  v: string,
+  bad: (name: string) => Error,
+): Date {
+  const invalidDate = (): Error => bad(k);
+  const d = DATE_RE.exec(v);
+  const dt = d ? null : DATETIME_RE.exec(v);
+  const m = d ?? dt;
+  if (!m) throw invalidDate();
+  const [y, mo, da] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (mo < 1 || mo > 12 || da < 1 || da > daysInMonth(y, mo)) {
+    throw invalidDate();
+  }
+  let ms: number;
+  if (d) {
+    ms = Date.UTC(y, mo - 1, da);
+  } else {
+    const [h, mi, se, frac, off] = [
+      Number(dt![4]),
+      Number(dt![5]),
+      Number(dt![6] ?? 0),
+      dt![7] ? Number(dt![7].padEnd(3, '0')) : 0,
+      dt![8],
+    ];
+    if (h > 23 || mi > 59 || se > 59) throw invalidDate();
+    let offsetMin = 0;
+    if (off !== 'Z') {
+      const oh = Number(off.slice(1, 3));
+      const om = Number(off.slice(4, 6));
+      if (oh > 23 || om > 59) throw invalidDate();
+      offsetMin = (off[0] === '-' ? -1 : 1) * (oh * 60 + om);
+    }
+    ms = Date.UTC(y, mo - 1, da, h, mi, se, frac) - offsetMin * 60_000;
+  }
+  if (!Number.isFinite(ms) || ms < FILTER_MIN_DATE || ms > FILTER_MAX_DATE) {
+    throw bad(k);
+  }
+  return new Date(ms);
+}
+
 /** Pure: raw query strings -> validated filter (400 `AUDIT_FILTER_INVALID`). */
 export function parseAuditEventsQuery(
   q: Record<string, unknown>,
@@ -52,44 +97,12 @@ export function parseAuditEventsQuery(
     return v;
   };
   const f: AuditEventsFilter = {};
-  /** Strict calendar check: `2026-02-30` is NOT 2 March, `24:00`, `:60` and `+24:00` are not accepted. */
-  const date = (k: string, v: string): Date => {
-    const bad = (): ApiException =>
+  const date = (k: string, v: string): Date =>
+    parseFilterDate(k, v, (name) =>
       invalid(
-        `${k} must be a valid ISO 8601 date (YYYY-MM-DD) or date-time with offset.`,
-      );
-    const d = DATE_RE.exec(v);
-    const dt = d ? null : DATETIME_RE.exec(v);
-    const m = d ?? dt;
-    if (!m) throw bad();
-    const [y, mo, da] = [Number(m[1]), Number(m[2]), Number(m[3])];
-    if (mo < 1 || mo > 12 || da < 1 || da > daysInMonth(y, mo)) throw bad();
-    let ms: number;
-    if (d) {
-      ms = Date.UTC(y, mo - 1, da);
-    } else {
-      const [h, mi, se, frac, off] = [
-        Number(dt![4]),
-        Number(dt![5]),
-        Number(dt![6] ?? 0),
-        dt![7] ? Number(dt![7].padEnd(3, '0')) : 0,
-        dt![8],
-      ];
-      if (h > 23 || mi > 59 || se > 59) throw bad();
-      let offsetMin = 0;
-      if (off !== 'Z') {
-        const oh = Number(off.slice(1, 3));
-        const om = Number(off.slice(4, 6));
-        if (oh > 23 || om > 59) throw bad();
-        offsetMin = (off[0] === '-' ? -1 : 1) * (oh * 60 + om);
-      }
-      ms = Date.UTC(y, mo - 1, da, h, mi, se, frac) - offsetMin * 60_000;
-    }
-    if (!Number.isFinite(ms) || ms < FILTER_MIN_DATE || ms > FILTER_MAX_DATE) {
-      throw invalid(`${k} must be between 2000-01-01 and 2999-12-31.`);
-    }
-    return new Date(ms);
-  };
+        `${name} must be a valid ISO 8601 date (YYYY-MM-DD) or date-time with offset.`,
+      ),
+    );
   const from = one('from');
   if (from !== undefined) f.from = date('from', from);
   const to = one('to');

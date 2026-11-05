@@ -616,8 +616,10 @@ describe('Admin audit API (e2e, Story 20.1) on a sandbox schema', () => {
       c.app,
       new DocumentBuilder().setTitle('t').setVersion('1').build(),
     );
-    const paths = Object.keys(doc.paths).filter((p) =>
-      p.includes('/admin/audit'),
+    // `/admin/audit/usage...` is Story 20.7's usage log (a separate, mutable table); its Swagger
+    // is checked in test/usage-log.e2e-spec.ts.
+    const paths = Object.keys(doc.paths).filter(
+      (p) => p.includes('/admin/audit') && !p.includes('/admin/audit/usage'),
     );
     expect(paths.sort()).toEqual([
       '/api/v1/admin/audit/events',

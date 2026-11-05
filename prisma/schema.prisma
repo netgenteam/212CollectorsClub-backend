@@ -813,7 +813,9 @@ model AdminUser {
   adminaccounts AdminAccount[]
 
   /// Story 20.6: back-reference for `Customer.anonymizedById`.
-  anonymizedCustomers Customer[] @relation("CustomerAnonymizedBy")
+  anonymizedCustomers Customer[]     @relation("CustomerAnonymizedBy")
+  /// Story 20.7: the retention runs this admin started by hand (SET NULL when the admin goes).
+  retentionRuns       RetentionRun[]
 
   @@map("Admin_Users")
 }
@@ -1582,4 +1584,49 @@ model AuditVerification {
 
   @@index([startedAt])
   @@map("Audit_Verifications")
+}
+
+/// Story 20.7 (AD-100, A95, A102): one row per HTTP request, kept 7 days. MUTABLE on purpose (it holds the IP
+/// and user agent of visitors: rows must be deletable) and separate from `Audit_Events`; the app role has
+/// no UPDATE on it. Written ONLY by `PrismaUsageLogWriter` (one `INSERT ... SELECT FROM unnest`, raw SQL)
+/// and read by `UsageReadService`; `route` is the route TEMPLATE, never a path with ids or a query string.
+model UsageLog {
+  id         BigInt               @id @default(autoincrement())
+  ts         DateTime             @db.Timestamptz(3)
+  method     String               @db.VarChar(10)
+  route      String               @db.VarChar(200)
+  status     Int                  @db.SmallInt
+  durationMs Int
+  /// ADMIN | CUSTOMER | ANON (CHECK in the migration)
+  actorType  String               @db.VarChar(16)
+  actorId    String?              @db.Uuid
+  ip         Unsupported("inet")?
+  userAgent  String?              @db.VarChar(200)
+  requestId  String               @db.Uuid
+
+  @@index([ts])
+  @@index([actorId, ts])
+  @@index([route(ops: raw("varchar_pattern_ops")), ts])
+  @@index([status, ts])
+  @@index([ip, ts])
+  @@index([requestId])
+  @@map("Usage_Logs")
+}
+
+/// Operational (admits UPDATE, A105); not evidence. Written by Story 20.8's retention job.
+model RetentionRun {
+  id            String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// SCHEDULED | MANUAL
+  trigger       String     @db.VarChar(16)
+  triggeredById String?    @db.Uuid
+  triggeredBy   AdminUser? @relation(fields: [triggeredById], references: [id], onDelete: SetNull)
+  startedAt     DateTime   @default(now()) @db.Timestamptz(3)
+  finishedAt    DateTime?  @db.Timestamptz(3)
+  /// RUNNING | OK | PARTIAL | FAILED
+  status        String     @db.VarChar(16)
+  /// [{ name, rows, durationMs, truncated, error? }]
+  tasks         Json       @default("[]")
+
+  @@index([startedAt])
+  @@map("Retention_Runs")
 }

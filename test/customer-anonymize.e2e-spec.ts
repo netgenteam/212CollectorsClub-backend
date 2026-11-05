@@ -864,12 +864,30 @@ describe(
           ),
         ).toBe(2);
         expect(consentsBefore).not.toMatch(/:0$/); // register wrote evidence
+        // Story 20.7: two rows of the usage log (IP, 7 days) of this account and one of another
+        const usageOf = async (id: string) =>
+          count(
+            `SELECT count(*) AS n FROM "Usage_Logs" WHERE "actorId" = $1::uuid`,
+            [id],
+          );
+        await sql(
+          `INSERT INTO "Usage_Logs" ("ts","method","route","status","durationMs","actorType","actorId","ip","requestId")
+           VALUES (now(),'GET','/zz206/usage',200,1,'CUSTOMER',$1::uuid,'203.0.113.5'::inet,gen_random_uuid()),
+                  (now(),'POST','/zz206/usage',200,1,'CUSTOMER',$1::uuid,'203.0.113.5'::inet,gen_random_uuid()),
+                  (now(),'GET','/zz206/usage',200,1,'CUSTOMER',$2::uuid,'203.0.113.6'::inet,gen_random_uuid())`,
+          [c.id, other.id],
+        );
+        expect(await usageOf(c.id)).toBe(2);
 
         const res = await anonymize(c.id, {
           confirmEmail: c.email,
           reason: GOOD_REASON,
         }).expect(200);
         expect(res.headers['cache-control']).toBe('no-store');
+        // the usage rows of the account are gone (Story 20.7, 18.2); the other account's stay
+        expect(await usageOf(c.id)).toBe(0);
+        expect(await usageOf(other.id)).toBe(1);
+        await sql(`DELETE FROM "Usage_Logs" WHERE "route" = '/zz206/usage'`);
         expect(res.body).toMatchObject({
           customerId: c.id,
           alreadyAnonymized: false,
@@ -1005,6 +1023,7 @@ describe(
           verificationTokensDeleted: tokensBefore,
           cartsDeleted: 1,
           wishlistsDeleted: 1,
+          usageLogsDeleted: 2,
           ordersRetained: 5,
           consentRecordsRetained: expect.any(Number),
         });
@@ -1967,6 +1986,7 @@ describe(
             verificationTokens: tokens,
             carts: 1,
             wishlists: 1,
+            usageLogs: 0,
           },
           willKeep: {
             orders: 6,
@@ -2022,6 +2042,7 @@ describe(
           verificationTokens: 0,
           carts: 0,
           wishlists: 0,
+          usageLogs: 0,
         });
         await server()
           .get(`${BASE}/admin/customers/${randomUUID()}`)

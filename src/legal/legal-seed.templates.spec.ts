@@ -174,7 +174,12 @@ describe('legal seed templates (Story 19.3)', () => {
   const G = '[[CONFIRMAR_SEGUIMIENTO_VISIBLE_AL_CLIENTE]]';
   // Story 20.6 (QA round 2): the immutable audit log keeps the IP of customer actions for good.
   const IPA = '[[CONFIRMAR_CONSERVACION_IP_EN_AUDITORIA_PARA_SIEMPRE]]';
+  // Story 20.7: the usage log keeps the IP and the user agent of every visitor for 7 days.
+  const USO = '[[CONFIRMAR_REGISTRO_DE_USO_7_DIAS_IMPLEMENTADO]]';
   const claims: [string, RegExp, string][] = [
+    ['privacidad', /\*\*Registro de uso \(7 días\):\*\*/, USO],
+    ['privacidad', /Registro de uso \(incluida la dirección IP/, USO],
+    ['privacidad', /el registro de uso de tu cuenta/, USO],
     ['privacidad', /\*\*Registro de auditoría \(inmutable\):\*\*/, IPA],
     ['privacidad', /Registro de auditoría \(incluida la dirección IP/, IPA],
     ['privacidad', /que no se borra ni se anonimiza/, IPA],
@@ -245,6 +250,25 @@ describe('legal seed templates (Story 19.3)', () => {
     expect(templates.devoluciones).not.toMatch(/48 a 72/);
     expect(templates.privacidad).not.toMatch(/mientras mantengas la cuenta/);
     expect(templates.privacidad).toMatch(/90 días de creada la sesión/);
+  });
+
+  it('Story 20.7: privacidad declares the usage log (IP, user agent, 7 days, what it never keeps) with its markers', () => {
+    const t = templates.privacidad;
+    const line = t
+      .split('\n')
+      .find((l) => l.includes('**Registro de uso (7 días):**'));
+    expect(line).toBeDefined();
+    expect(line).toMatch(/dirección IP/);
+    expect(line).toMatch(/agente de usuario/);
+    expect(line).toMatch(/identificador interno de tu cuenta/);
+    expect(line).toMatch(/\*\*No\*\* guarda .*cookies.*cédula/);
+    expect(line).toContain(
+      '[[CONFIRMAR_CON_ABOGADO_BASE_LEGAL_DEL_REGISTRO_DE_USO]]',
+    );
+    expect(t).toMatch(
+      /Registro de uso \(incluida la dirección IP[^\n]*\*\*7 días\*\*/,
+    );
+    expect(t).toMatch(/registro de uso de tu cuenta se borra/);
   });
 
   it('Story 19.4a: the age declaration is made at registration / re-acceptance (FR-116), not "al comprar"', () => {

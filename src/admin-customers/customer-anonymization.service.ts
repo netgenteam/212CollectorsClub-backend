@@ -11,6 +11,7 @@ import {
   isLockWaitExpired,
 } from '../common/lock-timeout.js';
 import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
+import { UsageLogErasure } from '../usage/usage-erasure.service.js';
 import { OrderStatus } from '../generated/prisma/enums.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import {
@@ -193,6 +194,7 @@ export class CustomerAnonymizationService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly crypto: IdDocCryptoService,
+    private readonly usageLogs: UsageLogErasure,
   ) {}
 
   async anonymize(
@@ -201,7 +203,7 @@ export class CustomerAnonymizationService {
     dto: Readonly<AnonymizeCustomerDto>,
   ): Promise<AnonymizeCustomerResponseDto> {
     try {
-      return await this.audit.transaction(
+      const result = await this.audit.transaction(
         async (tx, audit): Promise<AnonymizeCustomerResponseDto> => {
           const budget = new LockBudget(tx, ANONYMIZE_LOCK_BUDGET_MS);
           await budget.arm();
@@ -294,8 +296,10 @@ export class CustomerAnonymizationService {
           const wishlists = await tx.wishlist.deleteMany({
             where: { customerId },
           });
-          // Story 20.7 (Usage_Logs, 7 days, customer id and IP): when that table exists, add HERE its
-          // `DELETE ... WHERE "actorType" = 'CUSTOMER' AND "actorId" = customerId` (docs/deployment.md 18.2).
+          // Story 20.7: the usage log holds the account's id and IP for 7 days. Deleted here, under the
+          // Customers row lock; `afterCommit` below sweeps what the in-memory buffer could still bring
+          // (docs/deployment.md 19.5).
+          const usageLogs = await this.usageLogs.deleteInTx(tx, customerId);
           // `Contact_Inquiries` are NOT deleted (QA 20.6 round 2, decision of Angel: do not delete
           // records): the 12-month retention of Story 20.8 covers them. A formal claim may be
           // among them and there is no verified link between the form and the account.
@@ -330,6 +334,7 @@ export class CustomerAnonymizationService {
               verificationTokensDeleted: verifications.count,
               cartsDeleted: carts.count,
               wishlistsDeleted: wishlists.count,
+              usageLogsDeleted: usageLogs,
               ordersRetained,
               consentRecordsRetained: consentsRetained,
             },
@@ -345,6 +350,11 @@ export class CustomerAnonymizationService {
         },
         { onTimeout: 'rethrow', timeout: 30_000, maxWait: 10_000 },
       );
+      // Committed: nothing of this account may come back from the memory of the usage log.
+      if (!result.alreadyAnonymized) {
+        await this.usageLogs.afterCommit(customerId);
+      }
+      return result;
     } catch (err) {
       if (err instanceof ApiException) throw err;
       if (isLockWaitExpired(err) || isDeadlock(err)) {

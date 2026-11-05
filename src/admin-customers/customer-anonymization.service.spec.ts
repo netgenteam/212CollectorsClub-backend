@@ -13,6 +13,10 @@ describe('CustomerAnonymizationService (unit; the real locks are in test/custome
   let calls: string[];
   let service: CustomerAnonymizationService;
   let audit: ReturnType<typeof fakeAudit>;
+  let usage: {
+    deleteInTx: ReturnType<typeof vi.fn>;
+    afterCommit: ReturnType<typeof vi.fn>;
+  };
   let selectRow: { id: string; email: string; anonymizedAt: Date | null }[];
 
   const run = (dto: { confirmEmail?: string; reason?: string }) =>
@@ -74,9 +78,22 @@ describe('CustomerAnonymizationService (unit; the real locks are in test/custome
       $transaction: vi.fn((cb: (t: unknown) => unknown) => cb(tx)),
     };
     audit = fakeAudit(prisma);
-    service = new CustomerAnonymizationService(prisma as never, audit, {
-      hashEmail: vi.fn().mockReturnValue('h'.repeat(64)),
-    } as never);
+    usage = {
+      // Story 20.7: the usage rows of the account, deleted under the same lock; swept after the commit
+      deleteInTx: vi.fn(() => {
+        calls.push('usageLogs');
+        return Promise.resolve(7);
+      }),
+      afterCommit: vi.fn().mockResolvedValue(undefined),
+    };
+    service = new CustomerAnonymizationService(
+      prisma as never,
+      audit,
+      {
+        hashEmail: vi.fn().mockReturnValue('h'.repeat(64)),
+      } as never,
+      usage as never,
+    );
   });
 
   it('happy path: locks FIRST, deletes, updates, and emits ONE event with no email and no PII', async () => {
@@ -103,8 +120,13 @@ describe('CustomerAnonymizationService (unit; the real locks are in test/custome
       addressesDeleted: 5,
       sessionsRevoked: 4,
       ordersRetained: 0,
+      usageLogsDeleted: 7,
     });
     expect(JSON.stringify(ev)).not.toContain('ana@example.com');
+    // Story 20.7: deleted under the lock, before the account row changes; swept once more after the commit
+    expect(calls.indexOf('usageLogs')).toBeGreaterThan(calls.indexOf('lock'));
+    expect(calls.indexOf('usageLogs')).toBeLessThan(calls.indexOf('update'));
+    expect(usage.afterCommit).toHaveBeenCalledWith(ID);
   });
 
   it('404 CUSTOMER_NOT_FOUND, nothing else runs', async () => {
@@ -133,6 +155,7 @@ describe('CustomerAnonymizationService (unit; the real locks are in test/custome
       notices: [],
     });
     expect(calls).toEqual(['lock']);
+    expect(usage.afterCommit).not.toHaveBeenCalled();
     expect(audit.events).toHaveLength(0);
   });
 
