@@ -94,3 +94,44 @@ export const isTxTimeout = (err: unknown): boolean =>
 /** True when the lock wait (or the tx budget) expired: answer 409 `*_BUSY`, never 500. */
 export const isLockWaitExpired = (err: unknown): boolean =>
   isTxTimeout(err) || isLockTimeout(err);
+
+/** Postgres deadlock_detected (40P01) / serialization_failure (40001), however Prisma wraps it (P2034). */
+export const isDeadlock = (err: unknown): boolean => {
+  if (!(err instanceof Error)) return false;
+  const e = err as { code?: unknown; meta?: unknown; cause?: unknown };
+  if (e.code === 'P2034' || e.code === '40P01' || e.code === '40001')
+    return true;
+  let meta = '';
+  try {
+    meta = JSON.stringify(e.meta ?? '');
+  } catch {
+    /* unserializable meta: fall through to the message */
+  }
+  return (
+    meta.includes('40P01') ||
+    meta.includes('40001') ||
+    /deadlock detected/i.test(err.message) ||
+    (e.cause !== undefined && isDeadlock(e.cause))
+  );
+};
+
+/**
+ * Story 20.6a: runs `fn` (a WHOLE transaction: Postgres has already rolled the victim back, nothing
+ * of it survives) again when it was chosen as the deadlock victim. Safe only for a callback with no
+ * effect outside its transaction. Gives up after `attempts` and rethrows the original error.
+ */
+export async function retryOnDeadlock<T>(
+  fn: () => Promise<T>,
+  attempts = 3,
+): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (i >= attempts || !isDeadlock(err)) throw err;
+      await new Promise((r) =>
+        setTimeout(r, 10 + Math.floor(Math.random() * 40)),
+      );
+    }
+  }
+}

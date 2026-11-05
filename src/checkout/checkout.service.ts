@@ -61,6 +61,8 @@ import {
   type CheckoutShippingFormat,
   type ResolvedBuyerId,
 } from './buyer-id.js';
+import { lockAccountCart } from '../common/customer-write-lock.js';
+import { retryOnDeadlock } from '../common/lock-timeout.js';
 import {
   assertExpectedCustomer,
   lockCustomerForCheckout,
@@ -306,276 +308,289 @@ export class CheckoutService implements OnModuleInit {
     // `audit.transaction` AFTER the callback: the chain-head lock is taken after the Products
     // rows (guarded UPDATEs), the Cart row and every other business lock, held only for the
     // INSERT and the COMMIT. Stripe is called after this transaction, never inside it.
-    const result = await this.audit.transaction(
-      async (tx, audit): Promise<CheckoutTransactionResult> => {
-        // Story 20.4 (AC4) / 20.6: FIRST statement with a session (see checkout-account-lock.ts).
-        if (customer) {
-          await lockCustomerForCheckout(tx, customer.id);
-        }
+    // Story 20.6a: if Postgres still picks this transaction as a deadlock victim (a pair of
+    // statements nobody foresaw), it was rolled back whole: nothing exists, so it runs again
+    // (up to 3 times) and never surfaces as a 500. Pure callback: no effect outside the transaction.
+    const result = await retryOnDeadlock(() =>
+      this.audit.transaction(
+        async (tx, audit): Promise<CheckoutTransactionResult> => {
+          // Story 20.4 (AC4) / 20.6: FIRST statement with a session (see checkout-account-lock.ts).
+          if (customer) {
+            await lockCustomerForCheckout(tx, customer.id);
+            // Story 20.6a: then the advisory lock of the account's cart, the SAME order as the
+            // cart merge and the account addItem (Customers, cart lock, rows). Without it the merge
+            // (Cart_Items, then UPDATE Carts) and the DELETE of this cart (Carts, then cascade to
+            // Cart_Items) crossed: deadlock 40P01 -> 500 (1 case in 25 rounds under load).
+            await lockAccountCart(tx, customer.id);
+          }
 
-        // Story 19.4 (AD-92, FR-114): FIRST statement of the transaction,
-        // before the cart is read, a StockHold is reserved or the Order is
-        // created. Plain SELECTs (no lock held). Guests and accounts, both
-        // rails, and the flat legacy format alike: every path to an Order
-        // goes through this transaction.
-        const accepted = await this.consent.assertAccepted(tx, {
-          terms: dto.acceptedTermsVersion,
-          shipping: dto.acceptedShippingVersion,
-          returns: dto.acceptedReturnsVersion,
-        });
+          // Story 19.4 (AD-92, FR-114): FIRST statement of the transaction,
+          // before the cart is read, a StockHold is reserved or the Order is
+          // created. Plain SELECTs (no lock held). Guests and accounts, both
+          // rails, and the flat legacy format alike: every path to an Order
+          // goes through this transaction.
+          const accepted = await this.consent.assertAccepted(tx, {
+            terms: dto.acceptedTermsVersion,
+            shipping: dto.acceptedShippingVersion,
+            returns: dto.acceptedReturnsVersion,
+          });
 
-        // Story 17.4: shipping (and saved-address snapshot) resolved inside
-        // the checkout transaction.
-        const shippingData = await resolveCheckoutShipping(
-          tx,
-          this.shipping,
-          dto,
-          customer?.id ?? null,
-          { crypto: this.idDocCrypto, prepared: preparedIdDoc },
-        );
+          // Story 17.4: shipping (and saved-address snapshot) resolved inside
+          // the checkout transaction.
+          const shippingData = await resolveCheckoutShipping(
+            tx,
+            this.shipping,
+            dto,
+            customer?.id ?? null,
+            { crypto: this.idDocCrypto, prepared: preparedIdDoc },
+          );
 
-        // Story 20.4 (AC3): what the order keeps as buyer ID. Inside the transaction only because
-        // `buyerSameAsRecipient` with a saved address copies the cipher of the saved address.
-        const buyerData = this.buyerOrderData(
-          buyer,
-          preparedBuyer,
-          shippingData,
-        );
+          // Story 20.4 (AC3): what the order keeps as buyer ID. Inside the transaction only because
+          // `buyerSameAsRecipient` with a saved address copies the cipher of the saved address.
+          const buyerData = this.buyerOrderData(
+            buyer,
+            preparedBuyer,
+            shippingData,
+          );
 
-        const cart = await tx.cart.findFirst({
-          where: customer
-            ? { customerId: customer.id }
-            : {
-                id: cartId as string,
-                customerId: null,
-                expiresAt: { gt: new Date() },
-              },
-          include: {
-            items: {
-              include: {
-                product: {
-                  select: {
-                    id: true,
-                    name: true,
-                    priceUsd: true,
-                    stock: true,
-                    heldQty: true,
+          const cart = await tx.cart.findFirst({
+            where: customer
+              ? { customerId: customer.id }
+              : {
+                  id: cartId as string,
+                  customerId: null,
+                  expiresAt: { gt: new Date() },
+                },
+            include: {
+              items: {
+                include: {
+                  product: {
+                    select: {
+                      id: true,
+                      name: true,
+                      priceUsd: true,
+                      stock: true,
+                      heldQty: true,
+                    },
                   },
                 },
+                orderBy: { createdAt: 'asc' },
               },
-              orderBy: { createdAt: 'asc' },
             },
-          },
-        });
+          });
 
-        if (!cart || cart.items.length === 0) {
-          throw this.emptyCartException();
-        }
+          if (!cart || cart.items.length === 0) {
+            throw this.emptyCartException();
+          }
 
-        // --- FR-12: re-validate stock for EVERY line, right now — never the
-        // add-time check. This SELECT-based pre-check is informative (it can
-        // report every failing line in one response); for pago_movil it is
-        // deliberately NOT the actual concurrency guarantee (the guarded
-        // UPDATE loop further below, AD-6, is).
-        const stockIssues: StockLineIssue[] = [];
-        for (const item of cart.items) {
-          const available = Math.max(
-            item.product.stock - item.product.heldQty,
-            0,
-          );
-          if (item.quantity > available) {
-            stockIssues.push({
+          // --- FR-12: re-validate stock for EVERY line, right now — never the
+          // add-time check. This SELECT-based pre-check is informative (it can
+          // report every failing line in one response); for pago_movil it is
+          // deliberately NOT the actual concurrency guarantee (the guarded
+          // UPDATE loop further below, AD-6, is).
+          const stockIssues: StockLineIssue[] = [];
+          for (const item of cart.items) {
+            const available = Math.max(
+              item.product.stock - item.product.heldQty,
+              0,
+            );
+            if (item.quantity > available) {
+              stockIssues.push({
+                productId: item.productId,
+                productName: item.product.name,
+                requested: item.quantity,
+                available,
+              });
+            }
+          }
+          if (stockIssues.length > 0) {
+            throw insufficientStockException(stockIssues);
+          }
+
+          // --- AD-3: money is Decimal throughout, never float. Each line's
+          // total is rounded to 2dp individually (Decimal addition of already-
+          // rounded values introduces no further precision loss, unlike
+          // float — so summing needs no second rounding pass).
+          let totalUsd = new Prisma.Decimal(0);
+          const lineCreates: Prisma.OrderLineCreateManyOrderInput[] = [];
+          for (const item of cart.items) {
+            const unitPriceUsd = item.product.priceUsd;
+            const lineTotalUsd = unitPriceUsd
+              .times(item.quantity)
+              .toDecimalPlaces(2);
+            totalUsd = totalUsd.plus(lineTotalUsd);
+            lineCreates.push({
               productId: item.productId,
               productName: item.product.name,
-              requested: item.quantity,
-              available,
+              unitPriceUsd,
+              quantity: item.quantity,
+              lineTotalUsd,
             });
           }
-        }
-        if (stockIssues.length > 0) {
-          throw insufficientStockException(stockIssues);
-        }
 
-        // --- AD-3: money is Decimal throughout, never float. Each line's
-        // total is rounded to 2dp individually (Decimal addition of already-
-        // rounded values introduces no further precision loss, unlike
-        // float — so summing needs no second rounding pass).
-        let totalUsd = new Prisma.Decimal(0);
-        const lineCreates: Prisma.OrderLineCreateManyOrderInput[] = [];
-        for (const item of cart.items) {
-          const unitPriceUsd = item.product.priceUsd;
-          const lineTotalUsd = unitPriceUsd
-            .times(item.quantity)
-            .toDecimalPlaces(2);
-          totalUsd = totalUsd.plus(lineTotalUsd);
-          lineCreates.push({
-            productId: item.productId,
-            productName: item.product.name,
-            unitPriceUsd,
-            quantity: item.quantity,
-            lineTotalUsd,
+          // --- AD-3: a stripe Order never snapshots an FX rate or a VES
+          // total — only pago_movil does. `fxRate`/`totalVes` stay null.
+          let fxRate: {
+            vesPerUsd: Prisma.Decimal;
+            source: FxRateSource;
+          } | null = null;
+          let totalVes: Prisma.Decimal | null = null;
+          if (!isStripe) {
+            // Story 18.3 (AD-80): one SELECT in this tx => coherent
+            // (rate, source); 503 FX_RATE_UNAVAILABLE; never any network.
+            fxRate = await this.fxRates.getForCheckout(tx);
+            totalVes = totalUsd.times(fxRate.vesPerUsd).toDecimalPlaces(2);
+          }
+
+          // --- AD-17: raw token returned to the buyer exactly once below;
+          // only its hash is ever written to the DB.
+          const { rawToken, tokenHash } = generateOrderAccessToken();
+
+          // --- AD-7: a pago_movil Order enters pending_verification
+          // directly; a stripe Order enters the transient payment_processing
+          // state instead (resolved later by the Stripe webhook / timeout cron).
+          const initialStatus = isStripe
+            ? OrderStatus.PAYMENT_PROCESSING
+            : OrderStatus.PENDING_VERIFICATION;
+
+          const order = await tx.order.create({
+            data: {
+              status: initialStatus,
+              paymentRail: isStripe
+                ? PaymentRail.STRIPE
+                : PaymentRail.PAGO_MOVIL,
+              fulfillmentType: FulfillmentType.DELIVERY,
+              ...shippingData,
+              ...buyerData,
+              totalUsd,
+              fxRateVesPerUsd: fxRate?.vesPerUsd ?? null,
+              fxRateSource: fxRate?.source ?? null,
+              totalVes,
+              accessTokenHash: tokenHash,
+              customerId: customer?.id ?? null,
+              // Story 19.4: NULL for a document with no version in force (then
+              // nothing was accepted, and no ConsentRecord exists for it).
+              termsVersion: accepted.versions.terms?.versionNumber ?? null,
+              shippingVersion:
+                accepted.versions.shipping?.versionNumber ?? null,
+              returnsVersion: accepted.versions.returns?.versionNumber ?? null,
+              termsAcceptedAt: Object.keys(accepted.versions).length
+                ? accepted.now
+                : null,
+              lines: { createMany: { data: lineCreates } },
+            },
           });
-        }
 
-        // --- AD-3: a stripe Order never snapshots an FX rate or a VES
-        // total — only pago_movil does. `fxRate`/`totalVes` stay null.
-        let fxRate: {
-          vesPerUsd: Prisma.Decimal;
-          source: FxRateSource;
-        } | null = null;
-        let totalVes: Prisma.Decimal | null = null;
-        if (!isStripe) {
-          // Story 18.3 (AD-80): one SELECT in this tx => coherent
-          // (rate, source); 503 FX_RATE_UNAVAILABLE; never any network.
-          fxRate = await this.fxRates.getForCheckout(tx);
-          totalVes = totalUsd.times(fxRate.vesPerUsd).toDecimalPlaces(2);
-        }
-
-        // --- AD-17: raw token returned to the buyer exactly once below;
-        // only its hash is ever written to the DB.
-        const { rawToken, tokenHash } = generateOrderAccessToken();
-
-        // --- AD-7: a pago_movil Order enters pending_verification
-        // directly; a stripe Order enters the transient payment_processing
-        // state instead (resolved later by the Stripe webhook / timeout cron).
-        const initialStatus = isStripe
-          ? OrderStatus.PAYMENT_PROCESSING
-          : OrderStatus.PENDING_VERIFICATION;
-
-        const order = await tx.order.create({
-          data: {
-            status: initialStatus,
-            paymentRail: isStripe ? PaymentRail.STRIPE : PaymentRail.PAGO_MOVIL,
-            fulfillmentType: FulfillmentType.DELIVERY,
-            ...shippingData,
-            ...buyerData,
-            totalUsd,
-            fxRateVesPerUsd: fxRate?.vesPerUsd ?? null,
-            fxRateSource: fxRate?.source ?? null,
-            totalVes,
-            accessTokenHash: tokenHash,
+          // Story 19.4: same transaction as the Order, so a later failure
+          // (stock, empty cart) leaves no ConsentRecord behind.
+          await this.consent.recordConsents(tx, {
+            context: ConsentContext.CHECKOUT,
+            orderId: order.id,
             customerId: customer?.id ?? null,
-            // Story 19.4: NULL for a document with no version in force (then
-            // nothing was accepted, and no ConsentRecord exists for it).
-            termsVersion: accepted.versions.terms?.versionNumber ?? null,
-            shippingVersion: accepted.versions.shipping?.versionNumber ?? null,
-            returnsVersion: accepted.versions.returns?.versionNumber ?? null,
-            termsAcceptedAt: Object.keys(accepted.versions).length
-              ? accepted.now
-              : null,
-            lines: { createMany: { data: lineCreates } },
-          },
-        });
+            accepted,
+            keys: ['terms', 'shipping', 'returns'],
+            audit,
+          });
 
-        // Story 19.4: same transaction as the Order, so a later failure
-        // (stock, empty cart) leaves no ConsentRecord behind.
-        await this.consent.recordConsents(tx, {
-          context: ConsentContext.CHECKOUT,
-          orderId: order.id,
-          customerId: customer?.id ?? null,
-          accepted,
-          keys: ['terms', 'shipping', 'returns'],
-          audit,
-        });
-
-        // --- AD-6 / AD-50: both rails guardedly reserve stock at checkout.
-        {
-          // `Cart_Items` guarantees at most one row per Product (Story
-          // 3.1's `@@unique([cartId, productId])`), so each Product here is
-          // guarded exactly once. Zero affected rows on ANY line means that
-          // Product's available stock (evaluated by Postgres itself, under
-          // a real row lock, at the instant of this UPDATE — not this
-          // function's earlier SELECT-based pre-check) no longer covers the
-          // requested quantity; this is what actually makes two concurrent
-          // checkouts racing the same Product's last units safe — the
-          // second one's guarded UPDATE blocks on the first's row lock,
-          // then re-evaluates the WHERE guard against the FIRST checkout's
-          // already-committed heldQty increase, so the two can never both
-          // succeed past physical stock (see Story 4.1's dedicated
-          // concurrency test).
-          for (const item of cart.items) {
-            const affected = await executeGuardedUpdate(
-              tx,
-              Prisma.sql`
+          // --- AD-6 / AD-50: both rails guardedly reserve stock at checkout.
+          {
+            // `Cart_Items` guarantees at most one row per Product (Story
+            // 3.1's `@@unique([cartId, productId])`), so each Product here is
+            // guarded exactly once. Zero affected rows on ANY line means that
+            // Product's available stock (evaluated by Postgres itself, under
+            // a real row lock, at the instant of this UPDATE — not this
+            // function's earlier SELECT-based pre-check) no longer covers the
+            // requested quantity; this is what actually makes two concurrent
+            // checkouts racing the same Product's last units safe — the
+            // second one's guarded UPDATE blocks on the first's row lock,
+            // then re-evaluates the WHERE guard against the FIRST checkout's
+            // already-committed heldQty increase, so the two can never both
+            // succeed past physical stock (see Story 4.1's dedicated
+            // concurrency test).
+            for (const item of cart.items) {
+              const affected = await executeGuardedUpdate(
+                tx,
+                Prisma.sql`
                 UPDATE "Products"
                 SET "heldQty" = "heldQty" + ${item.quantity}
                 WHERE id = ${item.productId}::uuid
                   AND stock - "heldQty" >= ${item.quantity}
               `,
-            );
+              );
 
-            if (affected === 0) {
-              const product = await tx.product.findUniqueOrThrow({
-                where: { id: item.productId },
-                select: { name: true, stock: true, heldQty: true },
-              });
-              const available = Math.max(product.stock - product.heldQty, 0);
-              throw insufficientStockException([
-                {
+              if (affected === 0) {
+                const product = await tx.product.findUniqueOrThrow({
+                  where: { id: item.productId },
+                  select: { name: true, stock: true, heldQty: true },
+                });
+                const available = Math.max(product.stock - product.heldQty, 0);
+                throw insufficientStockException([
+                  {
+                    productId: item.productId,
+                    productName: product.name,
+                    requested: item.quantity,
+                    available,
+                  },
+                ]);
+              }
+
+              await tx.stockHold.create({
+                data: {
+                  orderId: order.id,
                   productId: item.productId,
-                  productName: product.name,
-                  requested: item.quantity,
-                  available,
+                  quantity: item.quantity,
+                  expiresAt: new Date(
+                    Date.now() +
+                      (isStripe ? STRIPE_STOCK_HOLD_TTL_MS : STOCK_HOLD_TTL_MS),
+                  ),
                 },
-              ]);
+              });
             }
-
-            await tx.stockHold.create({
-              data: {
-                orderId: order.id,
-                productId: item.productId,
-                quantity: item.quantity,
-                expiresAt: new Date(
-                  Date.now() +
-                    (isStripe ? STRIPE_STOCK_HOLD_TTL_MS : STOCK_HOLD_TTL_MS),
-                ),
-              },
-            });
           }
-        }
 
-        // --- AD-7: []->pending_verification (pago_movil) or
-        // []->payment_processing (stripe), actorType=system.
-        await recordInitialOrderStatus(tx, {
-          orderId: order.id,
-          toStatus: initialStatus,
-          actorType: OrderActorType.SYSTEM,
-        });
+          // --- AD-7: []->pending_verification (pago_movil) or
+          // []->payment_processing (stripe), actorType=system.
+          await recordInitialOrderStatus(tx, {
+            orderId: order.id,
+            toStatus: initialStatus,
+            actorType: OrderActorType.SYSTEM,
+          });
 
-        // --- AD-5: a successful checkout clears the Cart. Deleting the Cart
-        // row cascades to its CartItems via the existing `onDelete: Cascade`
-        // FK (Story 3.1's schema) — no separate CartItem delete needed.
-        // Applies to both rails: the Order snapshot already captured the
-        // cart's contents, so there is nothing left for the buyer to edit
-        // while they finish paying (whether that's off at Stripe, or by
-        // Pago Móvil transfer).
-        // Of two concurrent checkouts of the SAME cart only one removes the
-        // row; the other rolls back as an empty cart (P2025) instead of a 500.
-        try {
-          await tx.cart.delete({ where: { id: cart.id } });
-        } catch (err) {
-          if (
-            err instanceof Prisma.PrismaClientKnownRequestError &&
-            err.code === 'P2025'
-          ) {
-            throw this.emptyCartException();
+          // --- AD-5: a successful checkout clears the Cart. Deleting the Cart
+          // row cascades to its CartItems via the existing `onDelete: Cascade`
+          // FK (Story 3.1's schema) — no separate CartItem delete needed.
+          // Applies to both rails: the Order snapshot already captured the
+          // cart's contents, so there is nothing left for the buyer to edit
+          // while they finish paying (whether that's off at Stripe, or by
+          // Pago Móvil transfer).
+          // Of two concurrent checkouts of the SAME cart only one removes the
+          // row; the other rolls back as an empty cart (P2025) instead of a 500.
+          try {
+            await tx.cart.delete({ where: { id: cart.id } });
+          } catch (err) {
+            if (
+              err instanceof Prisma.PrismaClientKnownRequestError &&
+              err.code === 'P2025'
+            ) {
+              throw this.emptyCartException();
+            }
+            throw err;
           }
-          throw err;
-        }
 
-        return {
-          orderId: order.id,
-          status: initialStatus,
-          paymentRail: order.paymentRail,
-          totalUsd,
-          lines: lineCreates,
-          fxRateVesPerUsd: fxRate?.vesPerUsd ?? null,
-          fxRateSource: fxRate?.source ?? null,
-          totalVes,
-          rawToken,
-          customerEmail: accountEmail,
-        };
-      },
+          return {
+            orderId: order.id,
+            status: initialStatus,
+            paymentRail: order.paymentRail,
+            totalUsd,
+            lines: lineCreates,
+            fxRateVesPerUsd: fxRate?.vesPerUsd ?? null,
+            fxRateSource: fxRate?.source ?? null,
+            totalVes,
+            rawToken,
+            customerEmail: accountEmail,
+          };
+        },
+      ),
     );
 
     if (isStripe) {

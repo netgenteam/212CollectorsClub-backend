@@ -428,7 +428,24 @@ describe('CustomerAuthService', () => {
     expect(requestPasswordReset).not.toHaveBeenCalled();
     prisma.customer.findFirst.mockResolvedValue({ id: 'u1' });
     await service.forgotPassword('x@y.co');
-    expect(requestPasswordReset).toHaveBeenCalledTimes(1);
+    // Story 20.6a: the token is written in the background, under the account's KEY SHARE lock.
+    await vi.waitFor(() =>
+      expect(requestPasswordReset).toHaveBeenCalledTimes(1),
+    );
+    const lock = prisma.$queryRaw.mock.calls.at(
+      -1,
+    )?.[0] as TemplateStringsArray;
+    expect(lock.join('?')).toMatch(
+      /FROM "Customers" WHERE "id" = \?::uuid FOR KEY SHARE$/,
+    );
+  });
+
+  it('Story 20.6a forgotPassword: an account anonymized after the lookup gets no token at all', async () => {
+    prisma.customer.findFirst.mockResolvedValue({ id: 'u1' });
+    prisma.$queryRaw.mockResolvedValue([{ anonymizedAt: new Date() }]);
+    await service.forgotPassword('x@y.co');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(requestPasswordReset).not.toHaveBeenCalled();
   });
 
   it('resetPassword: BetterAuth APIError -> INVALID_RESET_TOKEN', async () => {
@@ -492,6 +509,27 @@ describe('CustomerAuthService', () => {
         }),
       ]);
       expect(JSON.stringify(events)).not.toContain('tok-123');
+    });
+
+    it('Story 20.6a: the token of an anonymized account answers like an invalid one, with no effect and no event', async () => {
+      const { events } = withOwner('cust-1');
+      prisma.$queryRaw.mockResolvedValue([{ anonymizedAt: new Date() }]);
+      resetPassword.mockResolvedValue({ status: true });
+      await expect(
+        service.resetPassword('tok-123', 'longenough1'),
+      ).rejects.toMatchObject({
+        status: 400,
+        response: { errorCode: 'INVALID_RESET_TOKEN' },
+      });
+      expect(resetPassword).not.toHaveBeenCalled();
+      expect(events).toEqual([]);
+      // the leftover token is dropped
+      const sql = prisma.$executeRaw.mock.calls.map((c) =>
+        (c[0] as TemplateStringsArray).join('?'),
+      );
+      expect(sql.some((q) => q.includes('"Customer_Verifications"'))).toBe(
+        true,
+      );
     });
 
     it('a rejected token emits nothing; an unknown or expired owner emits nothing', async () => {

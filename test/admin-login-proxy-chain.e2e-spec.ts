@@ -271,18 +271,19 @@ describe(
       } finally {
         forward.ip = true;
       }
+      // LOGIN_ADMIN_FAILED is written after the 401 is sent: let all five land BEFORE reading the
+      // latest one (the 'latest' of a partial set is not the one we mean) and before this test ends,
+      // or the last one can fall inside the `since` window of the next test (flaky, seen once with
+      // --sequence.shuffle.files).
+      await waitFor(async () => {
+        const r = await lastEvents('LOGIN_ADMIN_FAILED', since0);
+        return r.length >= 5 ? r : null;
+      });
       // the lock came from the Next server address, the only one Nest could see
       const seen = await sql(
         `SELECT host("ip") AS ip FROM "Audit_Events" WHERE "action" = 'LOGIN_ADMIN_FAILED' ORDER BY "seq" DESC LIMIT 1`,
       );
       expect(seen[0].ip).toBe('127.0.0.1');
-      // LOGIN_ADMIN_FAILED is written after the 401 is sent: let all five land before this test
-      // ends, or the last one can fall inside the `since` window of the next test (flaky, seen
-      // once with --sequence.shuffle.files).
-      await waitFor(async () => {
-        const r = await lastEvents('LOGIN_ADMIN_FAILED', since0);
-        return r.length >= 5 ? r : null;
-      });
     });
 
     it('FIXED: an anonymous attacker with 5 failures on the admin user does NOT block the real admin from another IP; the events carry the real IPs', async () => {

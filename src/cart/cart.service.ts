@@ -3,7 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { ApiException } from '../common/api-exception.js';
-import { lockLiveCustomer } from '../common/customer-write-lock.js';
+import {
+  lockAccountCart,
+  lockLiveCustomer,
+} from '../common/customer-write-lock.js';
 import { executeGuardedUpdate } from '../common/guarded-update.js';
 import { AddCartItemDto } from './dto/add-cart-item.dto.js';
 import {
@@ -433,20 +436,6 @@ export class CartService {
   }
 
   /**
-   * Serializes everything that creates/assigns THE cart of one account
-   * (account addItem vs. login merges) so the `customerId` unique index can
-   * never be hit by a race. Released at commit/rollback.
-   */
-  private async lockAccountCart(
-    tx: Prisma.TransactionClient,
-    customerId: string,
-  ): Promise<void> {
-    await tx.$executeRaw(
-      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${'cart:' + customerId}, 0))`,
-    );
-  }
-
-  /**
    * Account variant of `addItem`: the cart is created on demand (under the
    * account lock) and the line is written by ONE guarded statement
    * (`INSERT ... SELECT ... WHERE stock - heldQty >= qty ON CONFLICT DO
@@ -468,7 +457,7 @@ export class CartService {
         throw new NotFoundException(`Product ${dto.productId} not found`);
       }
 
-      await this.lockAccountCart(tx, customerId);
+      await lockAccountCart(tx, customerId);
       const expiresAt = new Date(Date.now() + CART_COOKIE_TTL_MS);
       const cartId = await this.ensureAccountCart(tx, customerId, expiresAt);
 
@@ -545,7 +534,7 @@ export class CartService {
       // Story 20.6: an anonymized account takes no cart (401; the anonymous cart stays untouched
       // and still belongs to nobody: the claim below is never reached).
       await lockLiveCustomer(tx, customerId, 'SHARE');
-      await this.lockAccountCart(tx, customerId);
+      await lockAccountCart(tx, customerId);
       const expiresAt = new Date(Date.now() + CART_COOKIE_TTL_MS);
 
       const accountCart = await tx.cart.findUnique({

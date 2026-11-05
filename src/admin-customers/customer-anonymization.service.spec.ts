@@ -177,6 +177,21 @@ describe('CustomerAnonymizationService (unit; the real locks are in test/custome
     ['llamó al ０４１２１２３４５６７ ok', 'REASON_CONTAINS_PERSONAL_DATA'],
     ['solicitud número 12345678 por correo', 'REASON_CONTAINS_PERSONAL_DATA'],
     ['texto con NUL \u0000 dentro', 'ANONYMIZE_REASON_REQUIRED'],
+    // Story 20.6a: a ticket of 7+ digits after a hyphen, grouped numbers, other scripts' digits
+    [
+      'Solicitud por WhatsApp, ref ZD-1234567, 2026-11-04',
+      'REASON_CONTAINS_PERSONAL_DATA',
+    ],
+    ['pidió el titular, número 12 345 678 ok', 'REASON_CONTAINS_PERSONAL_DATA'],
+    ['pidió el titular, número 1.234.567 ok', 'REASON_CONTAINS_ID_DOC'],
+    [
+      'pidió el titular, número \u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668 ok',
+      'REASON_CONTAINS_PERSONAL_DATA',
+    ],
+    [
+      'pidió el titular, número \u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7 ok',
+      'REASON_CONTAINS_PERSONAL_DATA',
+    ],
   ])('reason %j -> 400 %s', async (reason, errorCode) => {
     expect(await code(run({ confirmEmail: EMAIL, reason }))).toMatchObject({
       status: 400,
@@ -191,9 +206,28 @@ describe('CustomerAnonymizationService (unit; the real locks are in test/custome
     'Pedido por correo el 2026-11-04, ticket T-45, atendido por soporte',
     'El titular lo pidió en la tienda; ref interna 4521',
     'Solicitud ref ORD-2026-11-04 recibida por el formulario de contacto',
+    // Story 20.6a: the ways the message tells the admin to write a reference
+    'Solicitud del titular por WhatsApp, ref TKT1234567, 2026-11-04',
+    'Solicitud del titular por WhatsApp, ref ZD-123-4567, 2026-11-04',
+    'Solicitud del titular por WhatsApp, ref 123-4567, 2026-11-04',
+    // an order id is a natural reference, even one with a long run of digits or shaped like a phone
+    'Solicitud por la orden 7c1d2e3f-4a5b-4c6d-8e9f-123456789012 del 2026-11-04',
+    'Solicitud por la orden 12345678-1234-4234-8234-123456789012 del 2026-11-04',
+    'Solicitud por la orden 58200123-4567-4abc-8def-0123456789ab del 2026-11-04',
+    'Solicitud por la orden 0412abcd-1234-4234-9234-0123456789ab del 2026-11-04',
   ])('a plain description is accepted: %j', async (reason) => {
     await run({ confirmEmail: EMAIL, reason });
     expect(audit.events).toHaveLength(1);
+  });
+
+  it('the long-number message says what to do (Story 20.6a)', async () => {
+    const e = await run({
+      confirmEmail: EMAIL,
+      reason: 'Solicitud por WhatsApp, ref ZD-1234567, 2026-11-04',
+    }).catch((x: { response: { message: string } }) => x);
+    expect((e as { response: { message: string } }).response.message).toMatch(
+      /7 or more digits.*letters right before.*TKT1234567.*ZD-123-4567.*2026-11-04/s,
+    );
   });
 
   it('never deletes contact messages (Story 20.8 retention covers them) nor counts them in the event', async () => {

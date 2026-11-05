@@ -11,6 +11,7 @@ import { invalidCustomerTokenException } from '../common/customer-auth.guard.js'
 import {
   lockLiveCustomer,
   tryLockLiveCustomer,
+  withAccountLockWait,
 } from '../common/customer-write-lock.js';
 import {
   alreadyRegisteredEmail,
@@ -347,16 +348,44 @@ export class CustomerAuthService {
     }
     // Background (not awaited): both branches return after the same single
     // lookup, so response time does not reveal whether the account exists.
-    void this.customerAuth.api
-      .requestPasswordReset({ body: { email } })
-      .catch((err: unknown) => {
-        this.logger.error(
-          `Password reset request failed: ${err instanceof Error ? err.message : String(err)}`,
+    // Story 20.6a: the token is written WHILE this transaction holds the account's KEY SHARE lock
+    // (see `whileAccountLive`): the anonymization (FOR UPDATE) either committed before (then no
+    // token is written at all) or waits until the token exists and then deletes it. No token can
+    // outlive the anonymization.
+    void this.whileAccountLive(found.id, () =>
+      this.customerAuth.api.requestPasswordReset({ body: { email } }),
+    ).catch((err: unknown) => {
+      this.logger.error(
+        `Password reset request failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
+  /**
+   * Story 20.6a: runs `fn` (a BetterAuth write on ITS OWN connection that creates or consumes a
+   * credential of the account) while this transaction holds `SELECT ... FOR KEY SHARE` on the
+   * Customers row. That lock conflicts with the `FOR UPDATE` of the anonymization but not with the
+   * `UPDATE` of non-key columns BetterAuth may run on the same row, so there is no self-wait. An
+   * anonymized (or gone) account does not run `fn` and answers `{ live: false }`.
+   */
+  private async whileAccountLive<T>(
+    customerId: string,
+    fn: () => Promise<T>,
+  ): Promise<{ live: true; value: T } | { live: false }> {
+    return this.prisma.$transaction(
+      async (tx) => {
+        const rows = await withAccountLockWait(
+          tx,
+          () =>
+            tx.$queryRaw<
+              { anonymizedAt: Date | null }[]
+            >`SELECT "anonymizedAt" FROM "Customers" WHERE "id" = ${customerId}::uuid FOR KEY SHARE`,
         );
-      })
-      // BetterAuth writes the token on its own connection: if the anonymization committed in
-      // between, the token it just stored (hash + id, no PII) is removed.
-      .finally(() => this.scrubIfAnonymized(found.id));
+        if (!rows[0] || rows[0].anonymizedAt !== null) return { live: false };
+        return { live: true, value: await fn() };
+      },
+      { maxWait: 5_000, timeout: 20_000 },
+    );
   }
 
   /**
@@ -392,18 +421,28 @@ export class CustomerAuthService {
    */
   async resetPassword(token: string, password: string): Promise<void> {
     const owner = await this.resetTokenOwner(token);
-    try {
-      await this.customerAuth.api.resetPassword({
+    const reset = () =>
+      this.customerAuth.api.resetPassword({
         body: { token, newPassword: password },
       });
+    try {
+      if (!owner) {
+        await reset();
+        return;
+      }
+      // Story 20.6a: for an anonymized account the answer is the one of an invalid token, with
+      // no effect (no password, no session, no event) and the token is dropped.
+      const done = await this.whileAccountLive(owner.value, reset);
+      if (!done.live) {
+        await this.scrubIfAnonymized(owner.value);
+        throw invalidResetTokenException();
+      }
     } catch (err) {
       if (err instanceof APIError) {
         throw invalidResetTokenException();
       }
       throw err;
     }
-    if (!owner) return;
-    await this.scrubIfAnonymized(owner.value);
     try {
       await this.audit.transaction((_tx, audit) => {
         audit.add({

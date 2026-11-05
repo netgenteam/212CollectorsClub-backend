@@ -32,6 +32,7 @@ function build(count: number, createImpl?: () => Promise<unknown>) {
   );
   const tx = {
     $queryRaw: vi.fn().mockResolvedValue([{ anonymizedAt: null }]),
+    $executeRaw: vi.fn().mockResolvedValue(1),
     customerAddress: { count: vi.fn().mockResolvedValue(count), create },
   };
   const prisma = { $transaction: (fn: (t: typeof tx) => unknown) => fn(tx) };
@@ -182,6 +183,7 @@ function buildWrite(opts: {
   };
   const tx = {
     $queryRaw: vi.fn().mockResolvedValue([{ anonymizedAt: null }]),
+    $executeRaw: vi.fn().mockResolvedValue(1),
     customerAddress: ca,
   };
   const prisma = { $transaction: (fn: (t: typeof tx) => unknown) => fn(tx) };

@@ -55,7 +55,7 @@ const BARE_VALUE = /[^\s,;)}\]"'`\\&]+/y;
  * spaces in n ways (`'ci' + ' '.repeat(n)` was quadratic).
  */
 const LABEL_VALUE = new RegExp(
-  String.raw`(?<![\w])(c\.?\s?i\.?|c[eé]dula|ced\.?|rif|pasaporte)(\s*(?:[:=#]\s*)?)((?:[VEJGP][\s.-]?)?\d(?:[.\s-]?\d){4,10}(?:-\d)?|P[\s.-]?[A-Z]{1,3}\d{4,10})(?![\w])`,
+  String.raw`(?<![\w])(?<![0-9a-f]{4}-)(c\.?\s?i\.?|c[eé]dula|ced\.?|rif|pasaporte)(\s*(?:[:=#]\s*)?)((?:[VEJGP][\s.-]?)?\d(?:[.\s-]?\d){4,10}(?:-\d)?|P[\s.-]?[A-Z]{1,3}\d{4,10})(?![\w])`,
   'gi',
 );
 const INVISIBLE = new RegExp('[\u200B-\u200D\u2060\uFEFF]', 'g');

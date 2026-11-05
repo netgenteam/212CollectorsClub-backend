@@ -5,7 +5,11 @@ import { ApiException } from '../common/api-exception.js';
 import { looksLikeIdDocInText } from '../common/id-doc-not-in-url.js';
 import { newIdDocInTextRegex } from '../common/id-doc-pattern.js';
 import { anonymizedEmailFor, emailsMatch } from '../common/anonymized-email.js';
-import { LockBudget, isLockWaitExpired } from '../common/lock-timeout.js';
+import {
+  LockBudget,
+  isDeadlock,
+  isLockWaitExpired,
+} from '../common/lock-timeout.js';
 import { IdDocCryptoService } from '../crypto/id-doc-crypto.service.js';
 import { OrderStatus } from '../generated/prisma/enums.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -47,7 +51,39 @@ const REASON_PHONE =
   /(?<![\d])(?:\+?58[\s.-]?)?0?4(?:12|14|16|24|26)[\s.-]?\d{3}[\s.-]?\d{4}(?![\d])/;
 /** A run of 7+ digits standing alone: a number, not a date (`2026-11-04`) nor a word-glued reference (`t1234567`). */
 const REASON_LONG_DIGITS = /(?<![A-Za-z0-9])\d{7,}/;
+/**
+ * A number written the way cedulas are printed, with thousands separators (`12 345 678`, `1.234.567`):
+ * 7+ digits in groups of three after the first one or two. Only that shape: `2026 11 04` and `10 20`
+ * are not matched.
+ */
+const REASON_GROUPED_DIGITS = /(?<![A-Za-z0-9])\d{1,3}(?:[ .]\d{3}){2,}(?!\d)/;
+/**
+ * An id the system itself prints (an order id): not personal data, and a natural reference to give as
+ * the motive. Taken out of the text before the digit checks, because a random UUID can hold a run of 7+
+ * digits (`...-123456789012`) or look like a phone.
+ */
+const UUID_IN_TEXT =
+  /(?<![0-9A-Za-z])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9A-Za-z])/gi;
+const REASON_LONG_NUMBER_MESSAGE =
+  'The reason must not contain a number of 7 or more digits on its own (it could be an ID document or a phone number). Put letters right before the reference (TKT1234567) or split it with hyphens in groups of up to 6 digits (ZD-123-4567), and write dates as 2026-11-04.';
 const UNICODE_DASHES = /[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D\u00AD]/g;
+
+/**
+ * Digits of any script (Arabic-Indic `\u0663`, Extended Arabic-Indic, Devanagari, ...) as `0-9`: NFKC only
+ * folds the full-width ones. The digit is the position inside its run of `\p{Nd}` code points (every
+ * script lays its ten digits out in order).
+ */
+function asciiDigits(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  if (!/[^\x00-\x7F]/.test(s)) return s;
+  return s.replace(/\p{Nd}/gu, (ch) => {
+    const cp = ch.codePointAt(0) as number;
+    if (cp < 128) return ch;
+    let start = cp;
+    while (/^\p{Nd}$/u.test(String.fromCodePoint(start - 1))) start -= 1;
+    return String((cp - start) % 10);
+  });
+}
 
 /**
  * The text a person typed, folded to what it LOOKS like: NFKC (full-width `Ｖ`), every Unicode dash as
@@ -55,8 +91,7 @@ const UNICODE_DASHES = /[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D\u00AD]/g;
  * this, so `V  12345678`, `Ｖ‐ 12345678` or `V\u200B12345678` are caught like `V-12345678`.
  */
 export function foldReasonText(raw: string): string {
-  return raw
-    .normalize('NFKC')
+  return asciiDigits(raw.normalize('NFKC'))
     .replace(UNICODE_DASHES, '-')
     .replace(/\p{Cf}/gu, '')
     .replace(/\s+/g, ' ')
@@ -71,26 +106,6 @@ export function reasonLooksLikeIdDoc(folded: string): boolean {
     newIdDocInTextRegex().test(folded)
   );
 }
-
-/** Postgres deadlock_detected (40P01) / serialization_failure (40001), however Prisma wraps it. */
-const isDeadlock = (err: unknown): boolean => {
-  if (!(err instanceof Error)) return false;
-  const e = err as { code?: unknown; meta?: unknown; cause?: unknown };
-  if (e.code === 'P2034' || e.code === '40P01' || e.code === '40001')
-    return true;
-  let meta = '';
-  try {
-    meta = JSON.stringify(e.meta ?? '');
-  } catch {
-    /* ignore */
-  }
-  return (
-    meta.includes('40P01') ||
-    meta.includes('40001') ||
-    /deadlock detected/i.test(err.message) ||
-    (e.cause !== undefined && isDeadlock(e.cause))
-  );
-};
 
 function reasonOrThrow(raw: unknown): string {
   const reason = typeof raw === 'string' ? raw.trim() : '';
@@ -111,7 +126,7 @@ function reasonOrThrow(raw: unknown): string {
       { min: ANONYMIZE_REASON_MIN, max: ANONYMIZE_REASON_MAX },
     );
   }
-  const folded = foldReasonText(reason);
+  const folded = foldReasonText(reason).replace(UUID_IN_TEXT, 'uuid');
   if (reasonLooksLikeIdDoc(folded)) {
     throw new ApiException(
       HttpStatus.BAD_REQUEST,
@@ -119,17 +134,24 @@ function reasonOrThrow(raw: unknown): string {
       'The reason must not contain an ID document number. Describe the request (channel, date, reference) without personal data.',
     );
   }
-  if (REASON_PHONE.test(folded) || REASON_LONG_DIGITS.test(folded)) {
+  if (REASON_PHONE.test(folded)) {
     throw new ApiException(
       HttpStatus.BAD_REQUEST,
       'REASON_CONTAINS_PERSONAL_DATA',
-      'The reason must not contain a phone number or a long number. Write dates as 2026-11-04 and give a short reference.',
+      'The reason must not contain a phone number. Describe the request (channel, date, reference) without personal data.',
+    );
+  }
+  if (REASON_LONG_DIGITS.test(folded) || REASON_GROUPED_DIGITS.test(folded)) {
+    throw new ApiException(
+      HttpStatus.BAD_REQUEST,
+      'REASON_CONTAINS_PERSONAL_DATA',
+      REASON_LONG_NUMBER_MESSAGE,
     );
   }
   // The reason is written to the immutable audit log. The log's own guard would mask an email,
   // phone, cedula or secret in it, but a masked log line is a worse record than a refused request.
   // (Checked on the text as typed AND on the folded one.)
-  const { hits } = redactReason(reason);
+  const { hits } = redactReason(reason.replace(UUID_IN_TEXT, 'uuid'));
   const { hits: foldedHits } = redactReason(folded);
   const all = [...hits, ...foldedHits];
   if (all.length > 0) {

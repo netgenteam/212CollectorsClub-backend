@@ -1,5 +1,8 @@
-import type { Prisma } from '../generated/prisma/client.js';
+import { HttpStatus } from '@nestjs/common';
+import { Prisma } from '../generated/prisma/client.js';
+import { ApiException } from './api-exception.js';
 import { invalidCustomerTokenException } from './customer-auth.guard.js';
+import { isLockWaitExpired } from './lock-timeout.js';
 
 /**
  * Story 20.6 (AD-97/98): THE serialization point of every write to the data of a customer account.
@@ -30,6 +33,64 @@ import { invalidCustomerTokenException } from './customer-auth.guard.js';
  */
 export type CustomerLockMode = 'SHARE' | 'UPDATE';
 
+/**
+ * Story 20.6a: how long a request of an account waits for the lock of its own account. It must stay
+ * well below Prisma's default interactive-transaction timeout (5 s): when the wait outlived it, the
+ * transaction expired (P2028) and the request answered 500. The wait is bounded IN THE DATABASE
+ * (`set_config('lock_timeout', ...)`, transaction-local) and the outcome is ALWAYS the same answer in
+ * every route that takes the lock: 409 `ACCOUNT_BUSY`, nothing written, retry in a few seconds.
+ */
+export const ACCOUNT_LOCK_WAIT_MS = 2_500;
+
+export const accountBusyException = (): ApiException =>
+  new ApiException(
+    HttpStatus.CONFLICT,
+    'ACCOUNT_BUSY',
+    'Your account is being used by another operation. Nothing was changed: try again in a few seconds.',
+  );
+
+/**
+ * Runs `fn` (one or more locking statements of the account) with `lock_timeout` capped at
+ * `ACCOUNT_LOCK_WAIT_MS`, then puts back whatever the transaction had (a caller's own `LockBudget`
+ * survives). A lock wait that expires is 409 `ACCOUNT_BUSY`.
+ */
+export async function withAccountLockWait<T>(
+  tx: Prisma.TransactionClient,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const cap = `${ACCOUNT_LOCK_WAIT_MS}ms`;
+  // The previous value is kept in a transaction-local custom setting and put back afterwards (a
+  // caller's own `LockBudget` survives). `$executeRaw` for both: the lock itself stays ONE `$queryRaw`.
+  await tx.$executeRaw`SELECT set_config('cc.prev_lock_timeout', current_setting('lock_timeout'), true), set_config('lock_timeout', ${cap}, true)`;
+  let out: T;
+  try {
+    out = await fn();
+  } catch (err) {
+    if (isLockWaitExpired(err)) throw accountBusyException();
+    throw err;
+  }
+  await tx.$executeRaw`SELECT set_config('lock_timeout', current_setting('cc.prev_lock_timeout'), true)`;
+  return out;
+}
+
+/**
+ * The advisory lock of the account's cart. Order of every transaction that touches the cart of an
+ * account: the Customers row (`lockLiveCustomer`), THEN this lock, then the rows. The checkout takes
+ * it too (Story 20.6a): the cart merge writes `Cart_Items` and then UPDATEs the `Carts` row, the
+ * checkout DELETEs the `Carts` row (cascade to the lines): without a common lock first the two
+ * crossed (40P01).
+ */
+export async function lockAccountCart(
+  tx: Prisma.TransactionClient,
+  customerId: string,
+): Promise<void> {
+  await withAccountLockWait(tx, async () => {
+    await tx.$executeRaw(
+      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${'cart:' + customerId}, 0))`,
+    );
+  });
+}
+
 async function readCustomerRow(
   tx: Prisma.TransactionClient,
   customerId: string,
@@ -52,7 +113,9 @@ export async function lockLiveCustomer(
   customerId: string,
   mode: CustomerLockMode = 'SHARE',
 ): Promise<void> {
-  const row = await readCustomerRow(tx, customerId, mode);
+  const row = await withAccountLockWait(tx, () =>
+    readCustomerRow(tx, customerId, mode),
+  );
   if (!row || row.anonymizedAt !== null) {
     throw invalidCustomerTokenException();
   }
@@ -64,6 +127,8 @@ export async function tryLockLiveCustomer(
   customerId: string,
   mode: CustomerLockMode = 'SHARE',
 ): Promise<boolean> {
-  const row = await readCustomerRow(tx, customerId, mode);
+  const row = await withAccountLockWait(tx, () =>
+    readCustomerRow(tx, customerId, mode),
+  );
   return row !== null && row.anonymizedAt === null;
 }
