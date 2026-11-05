@@ -49,6 +49,17 @@ export class UsageStatsDto {
   })
   droppedLowPrioritySinceBoot: number;
   @ApiProperty({
+    description:
+      'Discards by priority, first to go first: anonymous 404s, ordinary traffic, refusals (401/403/429) and failures (5xx, cut requests), admin rows. The sum is `droppedSinceBoot`.',
+    example: { anonymous404: 0, ordinary: 0, refusedOrFailed: 0, admin: 0 },
+  })
+  droppedByTier: {
+    anonymous404: number;
+    ordinary: number;
+    refusedOrFailed: number;
+    admin: number;
+  };
+  @ApiProperty({
     type: String,
     format: 'date-time',
     nullable: true,

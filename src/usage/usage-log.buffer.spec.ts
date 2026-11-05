@@ -338,11 +338,21 @@ describe('UsageLogBuffer priorities and drop notices (Story 20.7 round 2)', () =
       route: '/api/v1/admin/orders',
     });
 
-  it('tiers: admin / admin route / 401 / 403 / 429 / 5xx / 499 are kept longest, anonymous 404 goes first', () => {
-    expect(usageTier(admin())).toBe(2);
+  it('tiers: admin work 3 > refusals / failures 2 > ordinary 1 > anonymous 404 0', () => {
+    expect(usageTier(admin())).toBe(3);
     expect(
       usageTier(row({ route: '/api/v1/admin/x', actorType: 'ANON' })),
-    ).toBe(2);
+    ).toBe(3);
+    // an anonymous refusal on an admin route (a password spray on the login) is NOT admin work
+    for (const status of [401, 403, 429]) {
+      expect(
+        usageTier(
+          row({ route: '/api/v1/admin/auth/login', actorType: 'ANON', status }),
+        ),
+      ).toBe(2);
+    }
+    // ... but an admin's own refused request is
+    expect(usageTier(admin())).toBe(3);
     for (const status of [401, 403, 429, 499, 500, 503]) {
       expect(usageTier(row({ status }))).toBe(2);
     }
@@ -357,6 +367,34 @@ describe('UsageLogBuffer priorities and drop notices (Story 20.7 round 2)', () =
       ),
     ).toBe(1);
     expect(usageTier(notFound())).toBe(0);
+  });
+
+  it('a flood of anonymous 401s (3000 against 500) leaves every admin row, and the drops are told apart by tier', () => {
+    const { w } = writerOf();
+    const b = new UsageLogBuffer(
+      { ...CFG, bufferMax: 500, flushBatch: 500 },
+      w,
+    );
+    const warn = vi
+      .spyOn(
+        (b as unknown as { logger: { warn: (m: string) => void } }).logger,
+        'warn',
+      )
+      .mockImplementation(() => undefined);
+    for (let i = 0; i < 50; i++) b.push(admin());
+    for (let i = 0; i < 3000; i++) b.push(row({ status: 401 }));
+    const s = b.stats();
+    expect(s.buffered).toBe(500);
+    expect(s.droppedByTier.admin).toBe(0);
+    expect(s.droppedByTier.refusedOrFailed).toBe(2550);
+    expect(s.droppedSinceBoot).toBe(2550);
+    vi.advanceTimersByTime(61_000);
+    b.push(row({ status: 401 }));
+    const text = warn.mock.calls.join('\n');
+    expect(text).toMatch(/refusedOrFailed \d+/);
+    expect(text).toMatch(
+      /anonymous404 0, ordinary 0, refusedOrFailed \d+, admin 0/,
+    );
   });
 
   it('a flood of anonymous 404s does not push out the admin rows, the 401/403 or the ordinary traffic', () => {

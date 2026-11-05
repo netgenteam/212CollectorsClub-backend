@@ -24,23 +24,38 @@ const MAX_TOMBSTONES = 1_000;
 export const DROP_WARN_INTERVAL_MS = 60_000;
 
 /**
- * Story 20.7 round 2: when the queue is full, WHAT goes first. A flood of anonymous 404s (a scanner
- * walking `/wp-admin/...`: 158 795 requests, 55 % of them discarded in QA's measurement) must not push out
- * the rows that matter.
- *   2 (kept longest): an admin's request, anything under `/api/v1/admin/`, a 401/403/429/5xx, and a request
- *     the client cut (499): who did what, failed access, failures;
+ * Story 20.7 round 2/3: when the queue is full, WHAT goes first. A flood of anonymous 404s (a scanner) or of
+ * anonymous 401s (a password spray) must not push out the rows that matter.
+ *   3 (kept longest): what an admin did: an admin actor, or anything under `/api/v1/admin/` that is not an
+ *     anonymous refusal;
+ *   2: failed access and failures of anyone else: 401/403/429, 5xx, and a request the client cut (499);
  *   1: everything else (ordinary traffic);
  *   0 (first to go): an anonymous 404 (`__unmatched__`: scans and typos).
+ * Round 2 put the 401s in the same tier as the admin: 3000 anonymous 401s against a 500-row buffer left 0
+ * of 50 admin rows. Now they sit below it.
  */
-export type UsageTier = 0 | 1 | 2;
+export type UsageTier = 0 | 1 | 2 | 3;
+export const USAGE_TIERS = [0, 1, 2, 3] as const;
+const TIERS_DESC = [3, 2, 1, 0] as const;
+/** Names used in the WARN and in `/stats` (`droppedByTier`). */
+export const TIER_NAMES = [
+  'anonymous404',
+  'ordinary',
+  'refusedOrFailed',
+  'admin',
+] as const;
 const ADMIN_ROUTE_PREFIX = '/api/v1/admin/';
 
 export function usageTier(row: UsageLogRow): UsageTier {
-  if (row.actorType === 'ADMIN' || row.route.startsWith(ADMIN_ROUTE_PREFIX)) {
-    return 2;
-  }
   const s = row.status;
-  if (s === 401 || s === 403 || s === 429 || s === 499 || s >= 500) return 2;
+  const refusal = s === 401 || s === 403 || s === 429;
+  if (
+    row.actorType === 'ADMIN' ||
+    (row.route.startsWith(ADMIN_ROUTE_PREFIX) && !refusal)
+  ) {
+    return 3;
+  }
+  if (refusal || s === 499 || s >= 500) return 2;
   if (s === 404 && row.actorType === 'ANON') return 0;
   return 1;
 }
@@ -151,14 +166,11 @@ function describe(err: unknown): string {
 @Injectable()
 export class UsageLogBuffer implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(UsageLogBuffer.name);
-  /** One queue per tier (see `usageTier`): [0] goes first when full, [2] last; a write takes [2] first. */
-  private readonly tiers: [RowQueue, RowQueue, RowQueue] = [
-    new RowQueue(),
-    new RowQueue(),
-    new RowQueue(),
-  ];
+  /** One queue per tier (see `usageTier`): [0] goes first when full, [3] last; a write takes [3] first. */
+  private readonly tiers: RowQueue[] = USAGE_TIERS.map(() => new RowQueue());
   private droppedTotal = 0;
-  private droppedLow = 0;
+  private readonly droppedBy: number[] = USAGE_TIERS.map(() => 0);
+  private dropsByTierSinceWarn: number[] = USAGE_TIERS.map(() => 0);
   private lastDropAt: number | null = null;
   private dropsSinceWarn = 0;
   private lastDropWarnAt = 0;
@@ -200,13 +212,16 @@ export class UsageLogBuffer implements OnModuleInit, OnModuleDestroy {
   }
 
   size(): number {
-    return this.tiers[0].size + this.tiers[1].size + this.tiers[2].size;
+    let n = 0;
+    for (const t of this.tiers) n += t.size;
+    return n;
   }
 
   /** Counts (and, rate-limited, announces) rows that will never be written. */
   private noteDrop(tier: UsageTier, n = 1): void {
     this.droppedTotal += n;
-    if (tier === 0) this.droppedLow += n;
+    this.droppedBy[tier] += n;
+    this.dropsByTierSinceWarn[tier] += n;
     this.lastDropAt = Date.now();
     this.dropsSinceWarn += n;
     this.warnDrops();
@@ -224,8 +239,11 @@ export class UsageLogBuffer implements OnModuleInit, OnModuleDestroy {
     this.lastDropWarnAt = now;
     const n = this.dropsSinceWarn;
     this.dropsSinceWarn = 0;
+    const per = this.dropsByTierSinceWarn;
+    this.dropsByTierSinceWarn = USAGE_TIERS.map(() => 0);
+    const byTier = TIER_NAMES.map((name, i) => `${name} ${per[i]}`).join(', ');
     this.logger.warn(
-      `usage log: ${n} rows discarded since the last notice (buffer ${this.size()}/${this.cfg.bufferMax}; ${this.droppedTotal} since boot, ${this.droppedLow} of them anonymous 404s, which go first). The database cannot keep up with the traffic or is not answering; GET /admin/audit/usage/stats has the counters.`,
+      `usage log: ${n} rows discarded since the last notice (${byTier}; the first go first: anonymous 404s, then ordinary traffic, then refusals and failures, admin rows last) (buffer ${this.size()}/${this.cfg.bufferMax}; ${this.droppedTotal} since boot). The database cannot keep up with the traffic or is not answering; GET /admin/audit/usage/stats has the counters.`,
     );
   }
 
@@ -261,14 +279,14 @@ export class UsageLogBuffer implements OnModuleInit, OnModuleDestroy {
   }
 
   private lowestNonEmpty(): UsageTier | null {
-    for (const t of [0, 1, 2] as const) if (this.tiers[t].size > 0) return t;
+    for (const t of USAGE_TIERS) if (this.tiers[t].size > 0) return t;
     return null;
   }
 
   /** Up to `n` rows, the most important first. */
   private take(n: number): UsageLogRow[] {
     const batch: UsageLogRow[] = [];
-    for (const t of [2, 1, 0] as const) {
+    for (const t of TIERS_DESC) {
       if (batch.length >= n) break;
       batch.push(...this.tiers[t].take(n - batch.length));
     }
@@ -277,9 +295,9 @@ export class UsageLogBuffer implements OnModuleInit, OnModuleDestroy {
 
   /** The batch goes back to the FRONT of its tiers; what no longer fits is the oldest of the lowest tier. */
   private requeue(batch: UsageLogRow[]): void {
-    const by: [UsageLogRow[], UsageLogRow[], UsageLogRow[]] = [[], [], []];
+    const by: UsageLogRow[][] = USAGE_TIERS.map(() => []);
     for (const r of batch) by[usageTier(r)].push(r);
-    for (const t of [0, 1, 2] as const) this.tiers[t].unshiftMany(by[t]);
+    for (const t of USAGE_TIERS) this.tiers[t].unshiftMany(by[t]);
     for (;;) {
       if (this.size() <= this.cfg.bufferMax) break;
       const lowest = this.lowestNonEmpty();
@@ -414,7 +432,13 @@ export class UsageLogBuffer implements OnModuleInit, OnModuleDestroy {
     return {
       buffered: this.size(),
       droppedSinceBoot: this.droppedTotal,
-      droppedLowPrioritySinceBoot: this.droppedLow,
+      droppedLowPrioritySinceBoot: this.droppedBy[0],
+      droppedByTier: {
+        anonymous404: this.droppedBy[0],
+        ordinary: this.droppedBy[1],
+        refusedOrFailed: this.droppedBy[2],
+        admin: this.droppedBy[3],
+      },
       lastDropAt:
         this.lastDropAt === null
           ? null

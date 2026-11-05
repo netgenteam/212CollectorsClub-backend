@@ -322,3 +322,57 @@ describe('createUsageLogMiddleware', () => {
     expect(() => res.emit('finish')).not.toThrow();
   });
 });
+
+/** Story 20.7 round 3 (D1): requests queued on a pipelined connection have no socket and never emit `close`. */
+describe('createUsageLogMiddleware: pipelined requests (round 3)', () => {
+  function pipelined(n: number) {
+    const socket = Object.assign(new EventEmitter(), { destroyed: false });
+    const rows: UsageLogRow[] = [];
+    const buffer = { push: (r: UsageLogRow) => rows.push(r) };
+    const mw = createUsageLogMiddleware(buffer as never);
+    const pairs = Array.from({ length: n }, () => {
+      const { req, res } = fake({ socket });
+      Object.assign(res, { writableFinished: false });
+      mw(req as never, res as never, () => undefined);
+      return { req, res };
+    });
+    return { socket, rows, pairs };
+  }
+
+  it('the socket closing with 3 requests pending (none got its own close) leaves exactly 3 rows with 499', () => {
+    const { socket, rows } = pipelined(3);
+    socket.emit('close');
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.status === 499)).toBe(true);
+  });
+
+  it('a request that already finished or closed is not written again by the socket', () => {
+    const { socket, rows, pairs } = pipelined(3);
+    Object.assign(pairs[0].res, { writableFinished: true });
+    pairs[0].res.emit('finish');
+    pairs[1].res.emit('close'); // the handler that was running when the client cut
+    expect(rows).toHaveLength(2);
+    socket.emit('close');
+    pairs[1].res.emit('close');
+    expect(rows).toHaveLength(3);
+    expect(rows.map((r) => r.status)).toEqual([200, 499, 499]);
+  });
+
+  it('keep-alive: many requests on one socket keep ONE listener and no pending entries', () => {
+    const socket = Object.assign(new EventEmitter(), { destroyed: false });
+    const rows: UsageLogRow[] = [];
+    const mw = createUsageLogMiddleware({
+      push: (r: UsageLogRow) => rows.push(r),
+    } as never);
+    for (let i = 0; i < 5_000; i++) {
+      const { req, res } = fake({ socket });
+      Object.assign(res, { writableFinished: true });
+      mw(req as never, res as never, () => undefined);
+      res.emit('finish');
+      res.emit('close');
+    }
+    expect(socket.listenerCount('close')).toBe(1);
+    socket.emit('close');
+    expect(rows).toHaveLength(5_000);
+  });
+});

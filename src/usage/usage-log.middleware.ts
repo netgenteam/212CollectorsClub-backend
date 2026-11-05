@@ -172,9 +172,11 @@ export function createUsageLogMiddleware(
   return (req: Request, res: Response, next: NextFunction): void => {
     const startNs = process.hrtime.bigint();
     let recorded = false;
+    let pending: Set<() => void> | undefined;
     const record = (aborted: boolean): void => {
       if (recorded) return;
       recorded = true;
+      pending?.delete(sweep);
       try {
         const row = buildUsageRow(req, res, startNs, Date.now(), aborted);
         if (row !== null) buffer.push(row);
@@ -182,12 +184,61 @@ export function createUsageLogMiddleware(
         /* never reaches the client */
       }
     };
+    // called by the socket's `close` for a response that never had its own `close`
+    const sweep = (): void => record(!res.writableFinished);
     res.once('finish', () => record(false));
     // `close` after a completed response is a no-op (`finish` already recorded); without `finish` the
     // connection died first.
     res.once('close', () => record(!res.writableFinished));
+    try {
+      pending = trackOnSocket(req, sweep);
+    } catch {
+      /* the response's own events still record it */
+    }
     next();
   };
+}
+
+/**
+ * Story 20.7 round 3 (D1): pipelined requests. Node gives a `ServerResponse` its socket only when the
+ * responses before it on the same connection are done; a response still queued has none, and a socket that
+ * dies with it queued never emits `close` on that response, although its handler runs (QA: login + two
+ * `forgot-password` in a pipeline, `destroy()` at 700 ms: the two `forgot` ran, one mail went out, no row).
+ * So the SOCKET is what is watched: each connection keeps the set of its unfinished requests' `record`
+ * functions (state: one `Set` in a `WeakMap` keyed by the socket, plus ONE `close` listener per socket, not
+ * per request, so a keep-alive connection with thousands of requests never grows listeners). A request
+ * leaves the set when it records (`finish` / its own `close`), so the set holds only requests in flight
+ * (normally 0 or 1, as many as the client pipelined at worst) and the entry dies with the socket (a
+ * `WeakMap`). When the socket closes, whatever is left is recorded once as a cut request (499). The
+ * `recorded` flag of each request keeps a request that is recorded by both paths from writing two rows.
+ */
+const SOCKET_PENDING = new WeakMap<object, Set<() => void>>();
+
+function trackOnSocket(
+  req: Request,
+  sweep: () => void,
+): Set<() => void> | undefined {
+  const socket = req.socket as
+    (Request['socket'] & { once?: unknown }) | undefined;
+  if (!socket || typeof socket.once !== 'function') return undefined;
+  if (socket.destroyed) {
+    // the connection is already gone: nothing else will tell us
+    queueMicrotask(sweep);
+    return undefined;
+  }
+  let set = SOCKET_PENDING.get(socket);
+  if (!set) {
+    const created = new Set<() => void>();
+    set = created;
+    SOCKET_PENDING.set(socket, created);
+    socket.once('close', () => {
+      const todo = Array.from(created);
+      created.clear();
+      for (const fn of todo) fn();
+    });
+  }
+  set.add(sweep);
+  return set;
 }
 
 /** `main.ts` mounts it right after the request-id middleware and before `cookie-parser`; e2e apps that want it call it too. */

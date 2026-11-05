@@ -113,7 +113,8 @@ describe(
       out(
         `[20.8 perf] seeded ${USAGE} usage rows, ${SESSIONS} sessions, ${CARTS} carts (+lines), ${CONTACTS} contacts in ${((now() - t0) / 1000).toFixed(1)} s`,
       );
-    });
+      // seeding ~500k rows under a loaded machine took more than the default 10 s hook timeout
+    }, 900_000);
 
     afterAll(async () => {
       await x(`DELETE FROM "Usage_Logs" WHERE "route" = '/' || $1`, TAG).catch(

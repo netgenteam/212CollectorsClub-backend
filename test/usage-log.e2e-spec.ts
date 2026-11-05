@@ -671,7 +671,7 @@ describe('Usage log (e2e, Story 20.7)', { timeout: 120_000 }, () => {
       expect(fromRoute[0].n).toBe(0);
     });
 
-    it('/stats is {buffered, droppedSinceBoot (+ droppedLowPrioritySinceBoot, lastDropAt), lastFlushAt, lastFlushError, writtenSinceBoot}', async () => {
+    it('/stats is {buffered, droppedSinceBoot (+ droppedLowPrioritySinceBoot, droppedByTier, lastDropAt), lastFlushAt, lastFlushError, writtenSinceBoot}', async () => {
       const s = await t
         .server()
         .get(`${BASE}/admin/audit/usage/stats`)
@@ -680,6 +680,7 @@ describe('Usage log (e2e, Story 20.7)', { timeout: 120_000 }, () => {
       expect(Object.keys(s.body as object).sort()).toEqual(
         [
           'buffered',
+          'droppedByTier',
           'droppedLowPrioritySinceBoot',
           'droppedSinceBoot',
           'lastDropAt',

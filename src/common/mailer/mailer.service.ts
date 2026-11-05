@@ -8,6 +8,36 @@ import { ConfigService } from '@nestjs/config';
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 
+const EMAIL_RE = /[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+
+/** `c4@qa.test` -> `c***@qa.test`: the log still says which domain refused, not who. */
+export function maskEmails(text: string): string {
+  return text.replace(EMAIL_RE, (m) => `${m[0]}***${m.slice(m.indexOf('@'))}`);
+}
+
+/**
+ * A rejected recipient comes back from the SMTP server as `550 5.1.1 <c4@qa.test>` in the error's message,
+ * `response`, `command` and `rejected` list: the redactor of the logs does not mask email addresses, so
+ * the address of a customer went to the log in clear (Story 20.7 round 3). The error that leaves the mailer
+ * is the same one with every address masked and without the raw `rejected`/`rejectedErrors` lists.
+ */
+export function sanitizeMailError(err: unknown): unknown {
+  if (!(err instanceof Error)) return err;
+  const e = err as Error & Record<string, unknown>;
+  try {
+    e.message = maskEmails(e.message);
+    if (typeof e.stack === 'string') e.stack = maskEmails(e.stack);
+    for (const k of ['response', 'command']) {
+      if (typeof e[k] === 'string') e[k] = maskEmails(e[k]);
+    }
+    delete e.rejected;
+    delete e.rejectedErrors;
+  } catch {
+    /* a frozen error: leave it */
+  }
+  return e;
+}
+
 export interface SendMailOptions {
   to: string;
   subject: string;
@@ -82,12 +112,16 @@ export class MailerService implements OnModuleInit, OnModuleDestroy {
       throw new Error('MailerService.sendMail called before onModuleInit');
     }
     const from = this.configService.getOrThrow<string>('SMTP_FROM');
-    await this.transporter.sendMail({
-      from,
-      to: options.to,
-      subject: options.subject,
-      text: options.text,
-    });
+    try {
+      await this.transporter.sendMail({
+        from,
+        to: options.to,
+        subject: options.subject,
+        text: options.text,
+      });
+    } catch (err) {
+      throw sanitizeMailError(err);
+    }
   }
 
   onModuleDestroy(): void {

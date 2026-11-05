@@ -28,6 +28,13 @@ export interface UsageLogStats {
   droppedSinceBoot: number;
   /** Of `droppedSinceBoot`, the anonymous 404s (the first rows to go when the queue is full). */
   droppedLowPrioritySinceBoot: number;
+  /** Discards by priority (first to go first): the sum is `droppedSinceBoot`. */
+  droppedByTier: {
+    anonymous404: number;
+    ordinary: number;
+    refusedOrFailed: number;
+    admin: number;
+  };
   /** When the last row was discarded, or null. */
   lastDropAt: string | null;
   lastFlushAt: string | null;

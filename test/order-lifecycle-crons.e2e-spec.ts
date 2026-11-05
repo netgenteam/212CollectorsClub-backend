@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { AppModule } from './../src/app.module.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { stopAllCrons } from './helpers/stop-crons.js';
 import { StockHoldExpiryCronService } from './../src/orders/cron/stock-hold-expiry-cron.service.js';
 import { PaymentProcessingTimeoutCronService } from './../src/orders/cron/payment-processing-timeout-cron.service.js';
 import { Prisma } from './../src/generated/prisma/client.js';
@@ -57,6 +58,8 @@ describe('Order-lifecycle crons: StockHold expiry + payment_processing timeout (
 
     app = moduleFixture.createNestApplication();
     await app.init();
+    // the real @Cron must not tick on the rows this suite builds (it calls the methods itself)
+    stopAllCrons(app);
 
     prisma = app.get(PrismaService);
     stockHoldExpiryCron = app.get(StockHoldExpiryCronService);

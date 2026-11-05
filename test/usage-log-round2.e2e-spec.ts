@@ -766,7 +766,8 @@ describe(
               tiers: { size: number }[];
             }
           ).tiers.map((q) => q.size);
-          expect(queued[2]).toBe(6); // 5 admin + the 401: all still there after 2 000 more 404s
+          expect(queued[3]).toBe(5); // the 5 admin rows ...
+          expect(queued[2]).toBe(1); // ... and the 401: all still there after 2 000 more 404s
           expect(s.lastDropAt).not.toBeNull();
         } finally {
           await t4.close().catch(() => undefined);
