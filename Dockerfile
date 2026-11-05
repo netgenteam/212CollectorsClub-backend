@@ -34,5 +34,13 @@ ENV PORT=3000
 EXPOSE 3000
 
 # Migrations run as a separate command right before the app starts (single
-# replica, so no concurrent migrators).
-CMD ["sh", "-c", "pnpm prisma:deploy && node dist/main"]
+# replica, so no concurrent migrators). `&&`: if `prisma migrate deploy` fails the
+# container exits non-zero WITHOUT starting the app (the error is in the log; a restart
+# policy retries visibly, it never serves on an unmigrated schema).
+#
+# `exec` is load-bearing (Story 20.7): in node:24-slim `sh` stays PID 1 and does NOT forward SIGTERM, so
+# `docker stop` waited its 10 s, killed the container with SIGKILL (exit 137) and the app never ran its
+# shutdown (usage-log flush, HTTP drain, pool close). With `exec` node replaces the shell and receives the
+# signal: it stops in well under a second with the database up (exit 0). Also run the container with an init
+# (`init: true` in compose, `docker run --init`) so zombies are reaped (docs/deployment.md 17.8 and 22).
+CMD ["sh", "-c", "pnpm prisma:deploy && exec node dist/main"]

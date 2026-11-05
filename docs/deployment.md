@@ -753,7 +753,7 @@ The rate source, thresholds (`maxAgeHours`, `maxVariationPct`) and the manual ra
 The view signal and its rate limit are per client IP, so the whole chain must deliver the real address:
 
 - **Nginx must be the only access** to the backend and to the Next server (both on loopback, ports 3000/3001 closed in the firewall; section 1.8). `main.ts` sets `trust proxy loopback` (9.4): Express uses the first non-loopback address of `X-Forwarded-For` from the right, i.e. the one Nginx appended (or the single one Next forwards).
-- Nginx must set `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` on every `location` that proxies to Next and to the backend (already in both backend templates, `deploy/nginx/api.conf.template` and `staging-api.conf.template`, which only proxy the **backend**; there is **no template for the Next server**, so the operator must write that server block/`location` for the storefront with at least `proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto $scheme; proxy_read_timeout 60s;`; with a CDN in front of Nginx set `TRUSTED_PROXY_HOPS=2` for Next). Never replace it with `$remote_addr` alone and never pass a client-supplied header through. Same rule as 9.4.
+- Nginx must set `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` on every `location` that proxies to Next and to the backend (already in both backend templates, `deploy/nginx/api.conf.template` and `staging-api.conf.template`, which only proxy the **backend**; there is **no template for the Next server**, so the operator must write that server block/`location` for the storefront with at least `proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto $scheme; proxy_read_timeout 60s;`; with a CDN in front of Nginx set `TRUSTED_PROXY_HOPS=2` for Next). Never replace it with `$remote_addr` alone and never pass a client-supplied header through. Same rule as 9.4. The BFF's CSRF guard (Story 20.9) also reads this `Host` (or `X-Forwarded-Host`): see the «Defensa CSRF del BFF» paragraph of 17.8 (`PUBLIC_ORIGIN` when a proxy rewrites it).
 - The frontend (`212CollectorsClub-frontend`) must have `BACKEND_API_URL` pointing at the backend on **loopback** (e.g. `http://127.0.0.1:3000/api/v1` for production). If it points at the public URL (`https://api.<domain>/...`) the Next server calls the backend through Nginx and every view arrives with the IP of the Next server: all visits collapse into one IP, the dedupe and the rate limit swallow almost everything and the "interest" signal is under-counted without any error. Every frontend BFF route forwards the visitor's address (9.4: the last trusted hop, one entry).
 - Time budgets: Nginx cuts at `proxy_read_timeout 60s` (both templates). `PUT /admin/vitrina/algorithm` waits for the settings lock at most **25 s** (constant `PUT_LOCK_BUDGET_MS`, enforced by the database with `SET LOCAL lock_timeout` **and** `statement_timeout` (both set to the time left until one shared deadline, so a queue of waiters cannot add up to n x 25 s; both are lifted again after the last lock so the write phase is never cut short), so a blocked connection cannot overrun it; Postgres SQLSTATE `55P03` is mapped to the error) and then answers 409 `VITRINA_BUSY`, so the admin gets the application error and never an Nginx 504. The recompute keeps its own 60 s transaction budget (`TX_TIMEOUT_MS`); a 10 000-product catalog recomputes in well under 5 s. With `recompute: true` the PUT recomputes after saving, so its total time is the save plus one recompute.
 
@@ -1681,6 +1681,8 @@ Una acción de admin o de sistema se audita si cumple **al menos uno**:
      backend:
        image: ${BACKEND_IMAGE:?}      # o `build:` con el Dockerfile del repo del backend
        restart: unless-stopped
+       init: true                     # tini como PID 1: reenvía SIGTERM y recoge zombis (ver «Cierre ordenado»)
+       stop_grace_period: 30s         # el cierre de la app tarda hasta 13 s con la base caída; el valor por omisión (10 s) la mataría con SIGKILL
        # sin `ports:`
        networks:
          cc-app:
@@ -1705,6 +1707,8 @@ Una acción de admin o de sistema se audita si cumple **al menos uno**:
      frontend:
        image: ${FRONTEND_IMAGE:?}     # construida con los build args de abajo
        restart: unless-stopped
+       init: true
+       stop_grace_period: 30s
        networks:
          cc-app: {}
          dokploy-network:
@@ -1713,6 +1717,7 @@ Una acción de admin o de sistema se audita si cumple **al menos uno**:
          BACKEND_URL: http://cc-backend:3000
          BACKEND_API_URL: http://cc-backend:3000/api/v1
          TRUSTED_PROXY_HOPS: '1'      # Traefik delante de Next
+         # PUBLIC_ORIGIN: https://${DOMAIN}   # solo si un proxy reescribe el Host (ver «Defensa CSRF del BFF»); con Traefik, que conserva el Host, no hace falta
          NEXT_PUBLIC_BASE_URL: ${NEXT_PUBLIC_BASE_URL:?}
    ```
 
@@ -1732,6 +1737,24 @@ Una acción de admin o de sistema se audita si cumple **al menos uno**:
 - **Cómo comprobarlo**: lista de verificación de 9.4, punto 4, y un `curl -H 'X-Forwarded-For: 1.2.3.4' https://<DOMAIN>/api/...` desde fuera: la IP del evento no puede ser `1.2.3.4`, ni la de Traefik, ni la del CDN.
 
 **Next no debe exponerse sin el proxy delante.** El `Dockerfile` del frontend fija `HOSTNAME=0.0.0.0` (necesario para que el proxy lo alcance en la red de contenedores). Con `TRUSTED_PROXY_HOPS=1`, quien llegue **directo** a Next (puerto publicado por error, red compartida con un contenedor hostil) escribe el último `X-Forwarded-For`, y por tanto **elige la IP** que Next reenvía al backend, que `TRUST_PROXY` cree. Reglas: ni `ports:` en el servicio de Next ni un puerto abierto en el cortafuegos del host; solo Traefik lo alcanza. **Defensa propuesta, no implementada** (es invasiva: toca el proxy, Next y el despliegue a la vez): una cabecera secreta compartida. Traefik la añade con un middleware (`headers.customRequestHeaders.X-Edge-Secret`), Next (`lib/utils/client-ip.ts`) solo reenvía una IP si la cabecera coincide (comparación en tiempo constante, secreto en las variables de Dokploy) y, si no coincide, no reenvía nada (el backend verá la IP de Next: degrada, no se deja engañar). Alternativa: lista de pares permitidos en el propio Next, que desde una ruta de Route Handler no se ve (`request` no expone el socket), así que haría falta un servidor propio delante. Con el secreto, el CDN/Traefik debe poder fijar la cabecera; hay que valorarlo cuando Angel confirme el destino.
+
+**Defensa CSRF del BFF (frontend Next, Story 20.9).** La cookie de sesión es `SameSite=Lax`, que no protege de sitios hermanos (otro puerto, otro subdominio o un XSS en ellos). El frontend rechaza con 403 `CSRF_BLOCKED`, antes de llegar a este backend, toda petición `POST/PUT/PATCH/DELETE` a `/api/**` cuyo `Origin` no sea el propio, o que lleve cuerpo con `Content-Type` distinto de `application/json` (multipart solo en las subidas de comprobante e imágenes). Requisitos de despliegue: (1) Nginx debe pasar `proxy_set_header Host $host;` o `X-Forwarded-Host $host;` (Traefik conserva el Host por omisión); (2) si un proxy reescribe el Host al del upstream, o se quiere exigir también https, definir en el frontend `PUBLIC_ORIGIN=https://dominio-publico[,https://otro]` (esquema+host+puerto exactos, sin barra final; variable de runtime, no de build); si no, toda escritura dará 403 `ORIGIN_MISMATCH`; (3) el webhook de Stripe va directo al backend y no pasa por Next, así que no se ve afectado; (4) cualquier cliente que llame al BFF fuera de un navegador (scripts, pruebas) debe enviar `Origin` propio y `Content-Type: application/json`. Este backend no cambia: la defensa vive en el frontend.
+
+*Comprobado contra este repo (lectura, no se ejecutó Nginx):* los dos templates `deploy/nginx/api.conf.template` y `staging-api.conf.template` ya fijan `proxy_set_header Host $host;` (y solo proxifican el backend, que no pasa por el BFF); no hay template del servidor de Next, y §11.3 ya exige para él `proxy_set_header Host $host;`. El compose de arriba pone Traefik delante de Next: conserva el `Host`, así que no hace falta `PUBLIC_ORIGIN` (queda como línea comentada para el caso de un proxy que lo reescriba).
+
+**Cierre ordenado en Docker y systemd (Story 20.7, ronda 5).** El `CMD` de la imagen del backend era `sh -c "pnpm prisma:deploy && node dist/main"`: en `node:24-slim` el `sh` queda como PID 1 y **no reenvía `SIGTERM`**. `docker stop` esperaba sus 10 s, mataba con `SIGKILL` (código 137) y la app no ejecutaba su cierre: **0 filas** en `Usage_Logs` y ningún log de cierre. Arreglo: `exec node dist/main` (el `Dockerfile` ya lo lleva). Medido con imágenes construidas de los `Dockerfile` (`docker run` / `docker stop` reales, base PostgreSQL desechable, 5 peticiones 404 sin vaciar el búfer, `USAGE_LOG_FLUSH_MS=60000`):
+
+| Caso | `docker stop` | Código | Filas en `Usage_Logs` |
+|---|---|---|---|
+| Antes (`sh -c "… && node dist/main"`), PID 1 = `sh` | **10,61 s** | **137** (SIGKILL) | **0** de 5 |
+| Después (`exec`), sin `--init` (PID 1 = node) | 0,80 s | 0 | **5** de 5 |
+| Después (`exec`), con `--init` (PID 1 = `docker-init`/tini) | 0,73 s | 143 (SIGTERM propagada, cierre normal) | **5** de 5 |
+| Después, base **pausada** (`docker pause`) y 12 peticiones colgadas | **13,25 s** | 143 | 12 sin escribir (no hay base: `shutdown flush incomplete`, logueado) |
+
+- **`init: true` (o `docker run --init`)**: tini como PID 1 recoge procesos zombi y reenvía señales; el código de salida pasa a ser 143 en lugar de 0, ambos son un cierre ordenado (lo que no es es 137). Con la base caída el cierre de la app tarda **12-13 s** (tope de peticiones en vuelo 7 s + volcado del búfer + cierre del pool 3 s): por eso **`stop_grace_period: 30s`** en los dos servicios del compose (el valor por omisión, 10 s, mata ese caso con `SIGKILL`). Con `docker run`: `--init --stop-timeout 30`.
+- **`pnpm prisma:deploy` sigue fallando antes de arrancar**: con credenciales de migración inválidas el contenedor sale con código 1 **sin arrancar la app** (0 mensajes «Nest application successfully started») y el error `P1000` queda en el log de cada intento; con `restart: unless-stopped` Docker lo reintenta con espera creciente (no es silencioso: cada intento deja el error en el log; para que no reintente sin fin, `restart: on-failure:5`, medido: 3 reintentos, estado `exited`, código 1).
+- **Next (`Dockerfile` del frontend)**: `CMD ["node","server.js"]` ya lanza node como PID 1 (no hay `sh`), así que `SIGTERM` le llega. Medido con la imagen construida del `Dockerfile` (HEAD `e6fd543`): `docker stop` en **1,10 s** sin `--init` (PID 1 = `next-server`) y **1,18 s** con `--init`, código 143 en ambos; no hizo falta tocar ese `Dockerfile`. Mismo `init: true` y `stop_grace_period` en el compose.
+- **systemd (`deploy/systemd/212cc-backend-*.service`)**: `ExecStart=/usr/bin/node dist/main` ya lanza node directamente (sin shell), así que recibe `SIGTERM`. Se hizo explícito: `KillSignal=SIGTERM`, `KillMode=mixed` (`SIGTERM` solo al proceso principal; `SIGKILL` al grupo si agota el plazo) y `TimeoutStopSec=30` (el cierre llega a 13 s con la base caída; el valor por omisión de systemd, 90 s, dejaba un cuelgue de minuto y medio sin necesidad). **No verificado**: no hay systemd en este entorno; la unidad no se ejecutó (la sintaxis es la estándar de `systemd.kill(5)`/`systemd.service(5)`).
 
 **Avisos que da el backend (sin PII).**
 

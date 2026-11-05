@@ -50,6 +50,14 @@ EnvironmentFile=/opt/212cc/staging/shared/.env
 Restart=on-failure
 RestartSec=5
 
+# Graceful stop (Story 20.7): `systemctl stop`/restart sends SIGTERM to node (ExecStart runs it directly,
+# no shell in between) and the app flushes the usage log, drains HTTP and closes the pool. With the database
+# down that takes up to ~13 s (docs/deployment.md 17.8), so 30 s is generous but bounded (systemd's default is
+# 90 s). KillMode=mixed: SIGTERM only to the main process, SIGKILL to the whole group if the time runs out.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=30
+
 # --- Hardening (least-privilege; loosen only if a later story genuinely
 # needs it, e.g. wider filesystem access for uploads) ---
 NoNewPrivileges=true
