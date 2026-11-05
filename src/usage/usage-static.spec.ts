@@ -66,10 +66,50 @@ describe('Usage_Logs stays where it belongs (Story 20.7)', () => {
     }
   });
 
-  it('the usage module never writes or reads the immutable audit log', () => {
+  it('the usage module never writes or reads the immutable audit log itself; the one thing it records there (the admin READING the log) goes through AdminReadTrailService, strict, before any row is read', () => {
     for (const f of sources.filter((x) => x.rel.startsWith('src/usage/'))) {
       expect(f.text, f.rel).not.toMatch(/Audit_Events/);
       expect(f.text, f.rel).not.toMatch(/AuditService|\.audit\b/);
+    }
+    const ctl = sources.find(
+      (x) => x.rel === 'src/usage/usage-admin.controller.ts',
+    )!;
+    const noteAt = ctl.text.indexOf("'USAGE_LOG_QUERIED', { strict: true }");
+    const readAt = ctl.text.indexOf('this.reader.list(filter)');
+    expect(noteAt).toBeGreaterThan(0);
+    expect(readAt).toBeGreaterThan(noteAt);
+    // the stats route shows counters only (no IP): it is neither audited nor needs to be
+    expect(ctl.text).toMatch(/stats\(\): UsageStatsDto/);
+  });
+
+  it('the writer is idempotent (ON CONFLICT on the request id) and the migration that makes that possible exists', () => {
+    const writer = sources.find(
+      (x) => x.rel === 'src/usage/usage-log.writer.ts',
+    )!;
+    expect(writer.text).toMatch(/ON CONFLICT \("requestId"\) DO NOTHING/);
+    const dir = join(ROOT, 'prisma', 'migrations');
+    const mig = readdirSync(dir).find((d) =>
+      d.endsWith('usage_logs_request_id_unique'),
+    );
+    expect(mig).toBeDefined();
+    const sql = read(join(dir, mig!, 'migration.sql'));
+    expect(sql.split('\n')[0]).toBe('BEGIN;');
+    expect(sql).toMatch(
+      /CREATE UNIQUE INDEX "Usage_Logs_requestId_key" ON "Usage_Logs" \("requestId"\)/,
+    );
+    expect(stripComments(sql)).not.toMatch(/lock_timeout/i);
+  });
+
+  it('the cron expressions of the usage purge and the retention job see .env (env-at-import first)', () => {
+    for (const rel of [
+      'src/usage/usage-purge.service.ts',
+      'src/retention/retention.service.ts',
+    ]) {
+      const f = sources.find((x) => x.rel === rel)!;
+      const firstImport = f.text
+        .split('\n')
+        .find((l) => l.startsWith('import '));
+      expect(firstImport, rel).toContain('env-at-import');
     }
   });
 

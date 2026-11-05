@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  DROP_WARN_INTERVAL_MS,
   MAX_BACKOFF_MS,
   SHUTDOWN_FLUSH_MS,
   UsageLogBuffer,
   sqlStateOf,
+  usageTier,
 } from './usage-log.buffer.js';
 import type { UsageLogConfig } from './usage-config.js';
 import type { UsageLogRow, UsageLogWriter } from './usage-log.types.js';
@@ -316,5 +318,140 @@ describe('UsageLogBuffer (Story 20.7, AC4)', () => {
       await vi.advanceTimersByTimeAsync(5);
       expect(settled).toBe(true);
     });
+  });
+});
+
+/** Story 20.7 round 2: what goes first when the queue is full, and the notice about discarded rows. */
+describe('UsageLogBuffer priorities and drop notices (Story 20.7 round 2)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  const notFound = () =>
+    row({ status: 404, route: '__unmatched__', actorType: 'ANON' });
+  const admin = () =>
+    row({
+      actorType: 'ADMIN',
+      actorId: '44444444-4444-4444-8444-444444444444',
+      route: '/api/v1/admin/orders',
+    });
+
+  it('tiers: admin / admin route / 401 / 403 / 429 / 5xx / 499 are kept longest, anonymous 404 goes first', () => {
+    expect(usageTier(admin())).toBe(2);
+    expect(
+      usageTier(row({ route: '/api/v1/admin/x', actorType: 'ANON' })),
+    ).toBe(2);
+    for (const status of [401, 403, 429, 499, 500, 503]) {
+      expect(usageTier(row({ status }))).toBe(2);
+    }
+    expect(usageTier(row())).toBe(1);
+    expect(
+      usageTier(
+        row({
+          status: 404,
+          actorType: 'CUSTOMER',
+          actorId: '55555555-5555-4555-8555-555555555555',
+        }),
+      ),
+    ).toBe(1);
+    expect(usageTier(notFound())).toBe(0);
+  });
+
+  it('a flood of anonymous 404s does not push out the admin rows, the 401/403 or the ordinary traffic', () => {
+    const { w } = writerOf();
+    const b = new UsageLogBuffer({ ...CFG, bufferMax: 20, flushBatch: 20 }, w);
+    const keep = [
+      admin(),
+      admin(),
+      row({ status: 401 }),
+      row({ status: 403 }),
+      row(),
+    ];
+    for (const r of keep) b.push(r);
+    for (let i = 0; i < 500; i++) b.push(notFound());
+    const s = b.stats();
+    expect(s.buffered).toBe(20);
+    expect(s.droppedSinceBoot).toBe(485);
+    expect(s.droppedLowPrioritySinceBoot).toBe(485);
+    // every important row is still queued: a full write returns them first
+    const got: UsageLogRow[][] = [];
+    const taker = new UsageLogBuffer(
+      { ...CFG, bufferMax: 20, flushBatch: 20 },
+      {
+        insert: (rows) => {
+          got.push([...rows]);
+          return Promise.resolve();
+        },
+      },
+    );
+    for (const r of keep) taker.push(r);
+    for (let i = 0; i < 500; i++) taker.push(notFound());
+    return taker.flush(true).then(() => {
+      expect(got[0].slice(0, 5)).toEqual(expect.arrayContaining(keep));
+    });
+  });
+
+  it('when only important rows remain, the OLDEST important one goes (and is counted as not low priority)', () => {
+    const { w } = writerOf();
+    const b = new UsageLogBuffer({ ...CFG, bufferMax: 5, flushBatch: 5 }, w);
+    const first = admin();
+    b.push(first);
+    for (let i = 0; i < 9; i++) b.push(admin());
+    const s = b.stats();
+    expect(s.buffered).toBe(5);
+    expect(s.droppedSinceBoot).toBe(5);
+    expect(s.droppedLowPrioritySinceBoot).toBe(0);
+  });
+
+  it('an incoming low-priority row is the one dropped when only more important rows are queued', () => {
+    const { w } = writerOf();
+    const b = new UsageLogBuffer({ ...CFG, bufferMax: 3, flushBatch: 3 }, w);
+    for (let i = 0; i < 3; i++) b.push(admin());
+    b.push(notFound());
+    expect(b.stats()).toMatchObject({
+      buffered: 3,
+      droppedSinceBoot: 1,
+      droppedLowPrioritySinceBoot: 1,
+    });
+  });
+
+  it('a WARN with the count, at most once per interval, never one line per row; stats carry lastDropAt', () => {
+    const { w } = writerOf();
+    const b = new UsageLogBuffer({ ...CFG, bufferMax: 5, flushBatch: 5 }, w);
+    const warn = vi
+      .spyOn((b as unknown as { logger: { warn: () => void } }).logger, 'warn')
+      .mockImplementation(() => undefined);
+    for (let i = 0; i < 100; i++) b.push(notFound());
+    expect(warn).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(DROP_WARN_INTERVAL_MS - 1_000);
+    for (let i = 0; i < 100; i++) b.push(notFound());
+    expect(warn).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(2_000);
+    b.push(notFound());
+    expect(warn).toHaveBeenCalledTimes(2);
+    // every discarded row is in exactly one notice: the counts add up to the total
+    const said = (warn.mock.calls as unknown[][]).map((c) =>
+      Number(/(\d+) rows discarded/.exec(String(c[0]))?.[1]),
+    );
+    expect(said[0]).toBe(1);
+    expect(said[0] + said[1]).toBe(b.stats().droppedSinceBoot);
+    expect(b.stats().lastDropAt).not.toBeNull();
+  });
+
+  it('the timer reports a flood that has already stopped', () => {
+    const { w } = writerOf();
+    const b = new UsageLogBuffer({ ...CFG, bufferMax: 5, flushBatch: 5 }, w);
+    const warn = vi
+      .spyOn((b as unknown as { logger: { warn: () => void } }).logger, 'warn')
+      .mockImplementation(() => undefined);
+    b.start();
+    for (let i = 0; i < 50; i++) b.push(notFound());
+    expect(warn).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 30; i++) b.push(notFound());
+    vi.advanceTimersByTime(DROP_WARN_INTERVAL_MS + 1_000);
+    expect(warn).toHaveBeenCalledTimes(2);
+    b.onModuleDestroy().catch(() => undefined);
   });
 });

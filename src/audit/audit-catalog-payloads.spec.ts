@@ -115,6 +115,8 @@ const SAMPLES: Record<AuditAction, AuditPayload[]> = {
   ID_DOC_REVEALED: [
     { field: 'buyer', orderId: uuid(), idDocType: 'V', revealedInHour: 7 },
   ],
+  USAGE_LOG_QUERIED: [{ windowMinutes: 15 }],
+  AUDIT_EVENTS_QUERIED: [{ windowMinutes: 15 }],
   ID_DOC_INTEGRITY_FAILED: [
     { field: 'buyer', reason: 'BLIND_MISMATCH' },
     { field: 'recipient', reason: 'DECRYPT_FAILED' },

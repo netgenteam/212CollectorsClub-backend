@@ -18,6 +18,7 @@ import { UsageLogBuffer } from './usage/usage-log.buffer.js';
 import { applyUsageLog } from './usage/usage-log.middleware.js';
 import { applyJsonBodyLimit } from './common/json-body-limit.js';
 import { createGlobalValidationPipe } from './common/global-validation-pipe.js';
+import { installShutdownDeadline } from './common/shutdown-deadline.js';
 import { RedactingLogger } from './common/redacting-logger.js';
 import {
   PUBLIC_STATIC_PREFIX,
@@ -156,6 +157,8 @@ async function bootstrap() {
   // such as the discarded failed-login counts (`AdminLoginFailureSummary`), and (Story 20.7) the usage
   // rows still in memory (`UsageLogBuffer.onModuleDestroy`, 2 s at most, before Prisma disconnects).
   app.enableShutdownHooks();
+  // Story 20.7 round 2: a database that does not answer can no longer keep the process alive for minutes.
+  installShutdownDeadline(app);
 
   if (host && host.trim() !== '') await app.listen(port, host.trim());
   else await app.listen(port);

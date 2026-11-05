@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import { PassportModule } from '@nestjs/passport';
 import { MailerModule } from '../common/mailer/mailer.module.js';
+import { AdminReadTrailService } from './admin-read-trail.service.js';
 import { AuditAdminController } from './audit-admin.controller.js';
 import { AuditChainVerifier } from './audit-chain-verifier.js';
 import { AuditReadService } from './audit-read.service.js';
@@ -18,11 +19,17 @@ import { AuditService } from './audit.service.js';
   controllers: [AuditAdminController],
   providers: [
     AuditService,
+    AdminReadTrailService,
     AuditChainVerifier,
     AuditReadService,
     AuditVerifyService,
     AuditVerifyCron,
   ],
-  exports: [AuditService, AuditReadService, AuditVerifyService],
+  exports: [
+    AuditService,
+    AdminReadTrailService,
+    AuditReadService,
+    AuditVerifyService,
+  ],
 })
 export class AuditModule {}

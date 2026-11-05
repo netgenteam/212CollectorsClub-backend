@@ -242,15 +242,73 @@ describe('createUsageLogMiddleware', () => {
     expect(rows).toHaveLength(1);
   });
 
-  it('a connection that closes without finishing is not recorded', () => {
+  it('Story 20.7 round 2: a connection that closes WITHOUT finishing is recorded once, as 499, with the route if the router got there', () => {
+    const rows: UsageLogRow[] = [];
+    const mw = createUsageLogMiddleware({
+      push: (r: UsageLogRow) => rows.push(r),
+    } as never);
+    const { req, res } = fake({ user: { id: USER } });
+    Object.assign(res, { writableFinished: false });
+    mw(req as never, res as never, () => undefined);
+    res.emit('close');
+    res.emit('close');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      status: 499,
+      route: '/api/v1/orders/lookup/:token',
+      actorType: 'ADMIN',
+      actorId: USER,
+    });
+    expect(rows[0].durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('cut before the router matched anything (still reading the body): __unmatched__ + 499, anonymous', () => {
+    const rows: UsageLogRow[] = [];
+    const mw = createUsageLogMiddleware({
+      push: (r: UsageLogRow) => rows.push(r),
+    } as never);
+    const { req, res } = fake({
+      route: undefined,
+      originalUrl: '/api/v1/auth/login',
+    });
+    Object.assign(res, { writableFinished: false });
+    mw(req as never, res as never, () => undefined);
+    res.emit('close');
+    expect(rows).toEqual([
+      expect.objectContaining({
+        status: 499,
+        route: '__unmatched__',
+        actorType: 'ANON',
+      }),
+    ]);
+  });
+
+  it('finish then close (every normal response, and every keep-alive request) is ONE row with the real status', () => {
     const rows: UsageLogRow[] = [];
     const mw = createUsageLogMiddleware({
       push: (r: UsageLogRow) => rows.push(r),
     } as never);
     const { req, res } = fake();
+    res.statusCode = 201;
+    Object.assign(res, { writableFinished: true });
     mw(req as never, res as never, () => undefined);
+    res.emit('finish');
     res.emit('close');
-    expect(rows).toHaveLength(0);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe(201);
+  });
+
+  it('a close after a completed response never turns into a 499 (writableFinished)', () => {
+    const rows: UsageLogRow[] = [];
+    const mw = createUsageLogMiddleware({
+      push: (r: UsageLogRow) => rows.push(r),
+    } as never);
+    const { req, res } = fake();
+    Object.assign(res, { writableFinished: true });
+    mw(req as never, res as never, () => undefined);
+    res.emit('close'); // without a preceding `finish` event in this double
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe(200);
   });
 
   it('an error inside never reaches the response', () => {

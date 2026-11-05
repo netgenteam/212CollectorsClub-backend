@@ -1,3 +1,4 @@
+import '../common/env-at-import.js';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
@@ -133,12 +134,15 @@ export class UsageLogPurgeService {
                 { ok: boolean }[]
               >`SELECT pg_try_advisory_xact_lock(${PURGE_ADVISORY_KEY}::int) AS ok`;
               if (!got[0]?.ok) return -1;
+              // Story 20.7 round 2: the cut-off is computed on the UTC wall clock and converted back, never
+              // as `timestamptz - interval 'N days'`: that subtraction runs in the SESSION's TimeZone, and across a
+              // DST change `7 days` is 167 or 169 hours (rows were purged up to an hour early, or kept an hour late).
               // No `FOR UPDATE SKIP LOCKED`: a row-locking clause needs the UPDATE privilege, which the
               // application role does not have on this table. The DELETE takes its own row locks.
               return tx.$executeRaw`
                 DELETE FROM "Usage_Logs"
                  WHERE "id" IN (SELECT "id" FROM "Usage_Logs"
-                                 WHERE "ts" < coalesce(${asOfIso}::timestamptz, now()) - make_interval(days => ${days}::int)
+                                 WHERE "ts" < ((coalesce(${asOfIso}::timestamptz, now()) AT TIME ZONE 'UTC') - make_interval(days => ${days}::int)) AT TIME ZONE 'UTC'
                                  ORDER BY "ts" LIMIT ${batch}::int)`;
             },
             { maxWait: 2_000, timeout: 30_000 },

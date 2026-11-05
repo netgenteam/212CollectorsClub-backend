@@ -77,6 +77,10 @@ export const AUDIT_ACTIONS = {
   // Privacy
   CUSTOMER_ANONYMIZED: { emittedBy: '20.6' },
   ID_DOC_REVEALED: { emittedBy: '20.4' },
+  // An admin read the usage log / the audit events (both show the IP of customers). One event per admin and
+  // 15-minute window, with no filter and no data: `AdminReadTrailService`.
+  USAGE_LOG_QUERIED: { emittedBy: '20.7' },
+  AUDIT_EVENTS_QUERIED: { emittedBy: '20.7' },
   // A reveal whose stored value failed the integrity check (moved ciphertext, tampering, bad key).
   ID_DOC_INTEGRITY_FAILED: { emittedBy: '20.4' },
   // Payments and orders

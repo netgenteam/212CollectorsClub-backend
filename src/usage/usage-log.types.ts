@@ -26,6 +26,10 @@ export const USAGE_LOG_CONFIG = Symbol('USAGE_LOG_CONFIG');
 export interface UsageLogStats {
   buffered: number;
   droppedSinceBoot: number;
+  /** Of `droppedSinceBoot`, the anonymous 404s (the first rows to go when the queue is full). */
+  droppedLowPrioritySinceBoot: number;
+  /** When the last row was discarded, or null. */
+  lastDropAt: string | null;
   lastFlushAt: string | null;
   lastFlushError: string | null;
   writtenSinceBoot: number;

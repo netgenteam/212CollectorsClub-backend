@@ -34,6 +34,7 @@ import {
   VerifyAuditDto,
   VerifyResponseDto,
 } from './audit-admin.dto.js';
+import { AdminReadTrailService } from './admin-read-trail.service.js';
 import {
   AUDIT_PAGE_SIZE,
   AuditReadService,
@@ -60,6 +61,7 @@ export class AuditAdminController {
   constructor(
     private readonly reader: AuditReadService,
     private readonly verifier: AuditVerifyService,
+    private readonly trail: AdminReadTrailService,
   ) {}
 
   @Get('events')
@@ -100,9 +102,19 @@ export class AuditAdminController {
     description: 'AUDIT_FILTER_INVALID',
   })
   @ApiResponse(UNAUTH)
-  events(@Query() query: Record<string, unknown>): Promise<AuditEventsPageDto> {
+  async events(
+    @Req() req: RequestWithAdminUser,
+    @Query() query: Record<string, unknown>,
+  ): Promise<AuditEventsPageDto> {
     void AUDIT_PAGE_SIZE;
-    return this.reader.list(parseAuditEventsQuery(query));
+    const filter = parseAuditEventsQuery(query);
+    // Story 20.7 round 2: the list shows the IP of customers; reading it leaves an `AUDIT_EVENTS_QUERIED`
+    // event (once per admin and 15 minutes, no data). Not strict: this view is how an admin finds out why
+    // the audit log is failing.
+    await this.trail.note(req.user.id, 'AUDIT_EVENTS_QUERIED', {
+      strict: false,
+    });
+    return this.reader.list(filter);
   }
 
   @Get('events/:seq')
@@ -120,7 +132,10 @@ export class AuditAdminController {
     description: 'AUDIT_EVENT_NOT_FOUND',
   })
   @ApiResponse(UNAUTH)
-  async event(@Param('seq') seq: string): Promise<AuditEventDetailDto> {
+  async event(
+    @Req() req: RequestWithAdminUser,
+    @Param('seq') seq: string,
+  ): Promise<AuditEventDetailDto> {
     if (!/^[1-9]\d{0,15}$/.test(seq) || Number(seq) > Number.MAX_SAFE_INTEGER) {
       throw new ApiException(
         HttpStatus.BAD_REQUEST,
@@ -128,6 +143,10 @@ export class AuditAdminController {
         'seq must be a positive integer.',
       );
     }
+    // one event, with its IP: the same trail as the list (same 15-minute window per admin)
+    await this.trail.note(req.user.id, 'AUDIT_EVENTS_QUERIED', {
+      strict: false,
+    });
     const ev = await this.reader.bySeq(Number(seq));
     if (!ev) {
       throw new ApiException(

@@ -59,8 +59,11 @@ describe('isExcludedRequest (AC2)', () => {
     '/api/v1/admin/audit/usage/stats?x=1',
     // Express routes case-insensitively and collapses nothing: the exclusion must not depend on either
     '/API/V1/HEALTH',
-    '/Uploads/x',
+    '/Uploads/Public/x',
     '//api//v1//admin//audit//usage',
+    '/api/v1/health/',
+    '/api/%76%31/health',
+    '/api/docs-yaml',
   ])('%s is not recorded', (url) => {
     expect(isExcludedRequest(none, url)).toBe(true);
   });
@@ -80,6 +83,19 @@ describe('isExcludedRequest (AC2)', () => {
     '/api/v1/catalog/products?next=/api/v1/health',
     '/api/v1/auth/login',
     '/uploads',
+    // Story 20.7 round 2: a string prefix over-excluded these; whole segments do not
+    '/uploads/private/payments/proof.png',
+    '/uploads/privatex',
+    '/Uploads/x',
+    '/api/docsXYZ',
+    '/api/docs2',
+    '/api/v1/admin/audit/usagexyz',
+    '/api/v1/admin/audit/usage-other',
+    '/api/v1/healthz',
+    '/api/v1/health-check',
+    '/api/v1/admin/audit',
+    '/x/api/v1/health',
+    '/api/v1%2Fhealth',
   ])('%s is recorded', (url) => {
     expect(isExcludedRequest(none, url)).toBe(false);
   });

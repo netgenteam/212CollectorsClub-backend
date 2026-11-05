@@ -1,13 +1,22 @@
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
 import { assertNoIdDocInQuery } from '../common/id-doc-not-in-url.js';
-import { isLockTimeout } from '../common/lock-timeout.js';
+import { ConcurrencyGate, GateRejected } from '../common/concurrency-gate.js';
+import { isLockWaitExpired } from '../common/lock-timeout.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { parseFilterDate } from '../audit/audit-read.service.js';
 
 export const USAGE_PAGE_SIZE = 50;
 /** A query that takes longer is cut by the database: the view never holds a pooled connection for long. */
 const QUERY_TIMEOUT = '5000ms';
+/**
+ * Story 20.7 round 2: at most 3 queries of the log run at once, 6 more wait up to 4 s for a turn, the rest
+ * are refused. 30 concurrent heavy queries used to take the ten pooled connections for seconds
+ * (`GET /categories` ~3 s, and Prisma's own `P2028` answered 500 to the ones that could not even start).
+ */
+export const USAGE_QUERY_CONCURRENCY = 3;
+export const USAGE_QUERY_MAX_WAITING = 6;
+export const USAGE_QUERY_WAIT_MS = 4_000;
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -161,9 +170,37 @@ export interface UsageLogView {
  */
 @Injectable()
 export class UsageReadService {
+  private readonly gate = new ConcurrencyGate(
+    USAGE_QUERY_CONCURRENCY,
+    USAGE_QUERY_MAX_WAITING,
+    USAGE_QUERY_WAIT_MS,
+  );
+
   constructor(private readonly prisma: PrismaService) {}
 
   async list(
+    f: UsageFilter,
+  ): Promise<{ items: UsageLogView[]; nextCursor: string | null }> {
+    try {
+      return await this.gate.run(() => this.query(f));
+    } catch (err) {
+      // 503 USAGE_QUERY_TIMEOUT for everything that means "the database could not answer in time":
+      // the 5 s `statement_timeout`, a lock wait, Prisma's `P2028` (the transaction could not start
+      // or expired, which used to be a 500), or no turn left in the gate.
+      if (err instanceof GateRejected || isLockWaitExpired(err)) {
+        throw new ApiException(
+          HttpStatus.SERVICE_UNAVAILABLE,
+          'USAGE_QUERY_TIMEOUT',
+          err instanceof GateRejected
+            ? 'Too many log queries are running. Wait a few seconds and try again.'
+            : 'The query took too long. Narrow the date range or add a filter (actor, route, status, ip) and try again.',
+        );
+      }
+      throw err;
+    }
+  }
+
+  private async query(
     f: UsageFilter,
   ): Promise<{ items: UsageLogView[]; nextCursor: string | null }> {
     const where: string[] = [];
@@ -198,25 +235,13 @@ export class UsageReadService {
          FROM "Usage_Logs"
          ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
         ORDER BY "id" DESC LIMIT $${params.length}`;
-    let rows: Record<string, unknown>[];
-    try {
-      rows = await this.prisma.$transaction(
-        async (tx) => {
-          await tx.$executeRaw`SELECT set_config('statement_timeout', ${QUERY_TIMEOUT}, true), set_config('lock_timeout', '1000ms', true)`;
-          return tx.$queryRawUnsafe<Record<string, unknown>[]>(sql, ...params);
-        },
-        { maxWait: 3_000, timeout: 9_000 },
-      );
-    } catch (err) {
-      if (isLockTimeout(err)) {
-        throw new ApiException(
-          HttpStatus.SERVICE_UNAVAILABLE,
-          'USAGE_QUERY_TIMEOUT',
-          'The query took too long. Narrow the date range or add a filter (actor, route, status, ip) and try again.',
-        );
-      }
-      throw err;
-    }
+    const rows = await this.prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT set_config('statement_timeout', ${QUERY_TIMEOUT}, true), set_config('lock_timeout', '1000ms', true)`;
+        return tx.$queryRawUnsafe<Record<string, unknown>[]>(sql, ...params);
+      },
+      { maxWait: 3_000, timeout: 9_000 },
+    );
     const page = rows.slice(0, USAGE_PAGE_SIZE).map((r): UsageLogView => ({
       id: r.id as string,
       ts: (r.ts as Date).toISOString(),

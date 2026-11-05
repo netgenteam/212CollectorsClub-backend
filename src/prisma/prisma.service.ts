@@ -8,6 +8,9 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client.js';
 
+/** Closing the pool never waits longer than this for a database that does not answer. */
+export const DISCONNECT_TIMEOUT_MS = 3_000;
+
 /**
  * Thin wrapper around the generated Prisma client, exposed as an injectable
  * Nest provider so every module talks to Postgres through one connection
@@ -35,7 +38,28 @@ export class PrismaService
     this.logger.log('Connected to PostgreSQL via Prisma');
   }
 
+  /**
+   * Story 20.7 round 2: `$disconnect` waits for the pool to hand back every connection; one that is stuck on
+   * a database that does not answer never does (the process took 136 s to exit). Bounded: after
+   * `DISCONNECT_TIMEOUT_MS` the close is given up and logged; the sockets die with the process
+   * (`installShutdownDeadline` makes sure it exits).
+   */
   async onModuleDestroy(): Promise<void> {
-    await this.$disconnect();
+    let stop: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        this.$disconnect(),
+        new Promise<void>((resolve) => {
+          stop = setTimeout(() => {
+            this.logger.error(
+              `the connection pool did not close within ${DISCONNECT_TIMEOUT_MS} ms (the database is not answering); giving up on it`,
+            );
+            resolve();
+          }, DISCONNECT_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      clearTimeout(stop);
+    }
   }
 }

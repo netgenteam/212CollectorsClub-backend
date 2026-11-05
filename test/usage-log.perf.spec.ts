@@ -164,7 +164,7 @@ describe('usage log at volume (perf, Story 20.7)', { timeout: 900_000 }, () => {
     out(
       `[20.7 plans] ip: ${byIp.split('\n')[0]} | actor: ${byActor.split('\n')[0]} | requestId: ${byReq.split('\n')[0]} | route: ${byRoute.split('\n')[0]}`,
     );
-    expect(byReq).toMatch(/Usage_Logs_requestId_idx/);
+    expect(byReq).toMatch(/Usage_Logs_requestId_key/);
     expect(byActor).toMatch(/Usage_Logs_actorId_ts_idx|Usage_Logs_pkey/);
     expect(byRoute).toMatch(/Usage_Logs_route_ts_idx|Usage_Logs_ts_idx/);
   });

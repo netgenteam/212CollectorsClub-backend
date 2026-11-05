@@ -1,3 +1,4 @@
+import '../common/env-at-import.js';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { OnApplicationShutdown } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';

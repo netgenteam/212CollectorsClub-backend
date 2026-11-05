@@ -1623,7 +1623,8 @@ model UsageLog {
   @@index([route(ops: raw("varchar_pattern_ops")), ts])
   @@index([status, ts])
   @@index([ip, ts])
-  @@index([requestId])
+  /// Story 20.7 round 2: unique, so the writer can be idempotent (`ON CONFLICT ("requestId") DO NOTHING`).
+  @@unique([requestId])
   @@map("Usage_Logs")
 }
 

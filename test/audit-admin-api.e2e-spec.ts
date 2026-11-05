@@ -10,6 +10,7 @@ import request from 'supertest';
 import * as argon2 from 'argon2';
 import pg from 'pg';
 import { AppModule } from './../src/app.module.js';
+import { AdminReadTrailService } from './../src/audit/admin-read-trail.service.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { applyRequestContext } from './../src/common/request-id.middleware.js';
 import { MailerService } from './../src/common/mailer/mailer.service.js';
@@ -55,9 +56,15 @@ async function boot(opts: { noTriggers?: boolean }): Promise<Ctx> {
   const sb = await createAuditSandbox(opts);
   const savedUrl = process.env.DATABASE_URL;
   process.env.DATABASE_URL = sb.url;
+  // Story 20.7 round 2: reading the events view leaves an `AUDIT_EVENTS_QUERIED` event (usage-log-round2
+  // e2e proves it). This suite's subject is the chain and its view on a hand-built, EMPTY chain, so the
+  // trail is stubbed here: it would make the "empty" chain non-empty with its own event.
   const moduleFixture = await Test.createTestingModule({
     imports: [AppModule],
-  }).compile();
+  })
+    .overrideProvider(AdminReadTrailService)
+    .useValue({ note: () => Promise.resolve() })
+    .compile();
   const app = moduleFixture.createNestApplication<NestExpressApplication>();
   app.set('trust proxy', 1);
   applyRequestContext(app);

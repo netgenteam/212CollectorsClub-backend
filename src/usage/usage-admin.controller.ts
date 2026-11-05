@@ -1,4 +1,11 @@
-import { Controller, Get, HttpStatus, Query, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  HttpStatus,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -6,7 +13,9 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { AdminReadTrailService } from '../audit/admin-read-trail.service.js';
 import { AdminAuthGuard } from '../common/admin-auth.guard.js';
+import type { RequestWithAdminUser } from '../common/admin-auth.guard.js';
 import { UsagePageDto, UsageStatsDto } from './usage-admin.dto.js';
 import { UsageLogBuffer } from './usage-log.buffer.js';
 import { parseUsageQuery, UsageReadService } from './usage-read.service.js';
@@ -29,13 +38,14 @@ export class UsageAdminController {
   constructor(
     private readonly reader: UsageReadService,
     private readonly buffer: UsageLogBuffer,
+    private readonly trail: AdminReadTrailService,
   ) {}
 
   @Get()
   @ApiOperation({
     summary: 'Usage log, newest first (cursor by id, 50 per page)',
     description:
-      'Every HTTP request of the last 7 days (health checks, static files and this view excluded). Filters combine with AND. Never a body, a query string, a cookie, an `Authorization` header or a cedula. The URL must not carry an ID document (400 ID_DOC_IN_URL_NOT_ALLOWED). A query cut by its 5 s limit is 503 USAGE_QUERY_TIMEOUT.',
+      'Every HTTP request of the last 7 days (health checks, static files and this view excluded). Filters combine with AND. Never a body, a query string, a cookie, an `Authorization` header or a cedula. The URL must not carry an ID document (400 ID_DOC_IN_URL_NOT_ALLOWED). A query cut by its 5 s limit, or one that waits too long for its turn (at most 3 run at once), is 503 USAGE_QUERY_TIMEOUT. The first query of an admin in 15 minutes leaves a USAGE_LOG_QUERIED event in the audit log (no filter, no data); if that event cannot be written the answer is 503 AUDIT_UNAVAILABLE.',
   })
   @ApiQuery({
     name: 'from',
@@ -91,10 +101,18 @@ export class UsageAdminController {
   @ApiResponse(UNAUTH)
   @ApiResponse({
     status: HttpStatus.SERVICE_UNAVAILABLE,
-    description: 'USAGE_QUERY_TIMEOUT',
+    description: 'USAGE_QUERY_TIMEOUT | AUDIT_UNAVAILABLE',
   })
-  list(@Query() query: Record<string, unknown>): Promise<UsagePageDto> {
-    return this.reader.list(parseUsageQuery(query));
+  async list(
+    @Req() req: RequestWithAdminUser,
+    @Query() query: Record<string, unknown>,
+  ): Promise<UsagePageDto> {
+    const filter = parseUsageQuery(query);
+    // Story 20.7 round 2: this query is not in `Usage_Logs` (it would feed itself) but it shows the IP of
+    // customers, so it leaves a `USAGE_LOG_QUERIED` event in the immutable chain, committed BEFORE any row
+    // is read (once per admin and 15 minutes, no filter, no data): no trace, no data (503 AUDIT_UNAVAILABLE).
+    await this.trail.note(req.user.id, 'USAGE_LOG_QUERIED', { strict: true });
+    return this.reader.list(filter);
   }
 
   @Get('stats')

@@ -43,6 +43,18 @@ export class UsageStatsDto {
       'Rows discarded since this process started because the database could not take them (oldest first) or refused them.',
   })
   droppedSinceBoot: number;
+  @ApiProperty({
+    description:
+      'Of `droppedSinceBoot`, the anonymous 404s: when the queue is full they are discarded FIRST, so a flood of them does not push out admin requests, 401/403 or failures.',
+  })
+  droppedLowPrioritySinceBoot: number;
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description: 'When the last row was discarded (null: none since boot).',
+  })
+  lastDropAt: string | null;
   @ApiProperty({ type: String, format: 'date-time', nullable: true })
   lastFlushAt: string | null;
   @ApiProperty({

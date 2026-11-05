@@ -671,7 +671,7 @@ describe('Usage log (e2e, Story 20.7)', { timeout: 120_000 }, () => {
       expect(fromRoute[0].n).toBe(0);
     });
 
-    it('/stats is {buffered, droppedSinceBoot, lastFlushAt, lastFlushError} (+ writtenSinceBoot)', async () => {
+    it('/stats is {buffered, droppedSinceBoot (+ droppedLowPrioritySinceBoot, lastDropAt), lastFlushAt, lastFlushError, writtenSinceBoot}', async () => {
       const s = await t
         .server()
         .get(`${BASE}/admin/audit/usage/stats`)
@@ -680,7 +680,9 @@ describe('Usage log (e2e, Story 20.7)', { timeout: 120_000 }, () => {
       expect(Object.keys(s.body as object).sort()).toEqual(
         [
           'buffered',
+          'droppedLowPrioritySinceBoot',
           'droppedSinceBoot',
+          'lastDropAt',
           'lastFlushAt',
           'lastFlushError',
           'writtenSinceBoot',
@@ -747,7 +749,9 @@ describe('Usage log (e2e, Story 20.7)', { timeout: 120_000 }, () => {
         'ID_DOC_IN_URL_NOT_ALLOWED',
       );
       expect(list.responses['401'].description).toBe('INVALID_ADMIN_TOKEN');
-      expect(list.responses['503'].description).toBe('USAGE_QUERY_TIMEOUT');
+      expect(list.responses['503'].description).toBe(
+        'USAGE_QUERY_TIMEOUT | AUDIT_UNAVAILABLE',
+      );
       const stats = doc.paths[`${BASE}/admin/audit/usage/stats`].get;
       expect(Object.keys(stats.responses)).toEqual(
         expect.arrayContaining(['200', '401']),
