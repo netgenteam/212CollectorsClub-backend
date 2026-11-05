@@ -594,7 +594,11 @@ export class CustomerAuthService {
     // The only login that reaches a lock wait is one with CORRECT credentials, so a 409 reveals nothing
     // an attacker could not learn from the 200 of the same request, and the unknown-email and
     // wrong-password answers (401, same cost, no lock) never differ with the state of any account.
-    const { ok: verdict, userId } = await this.checkCredential(email, password);
+    const {
+      ok: verdict,
+      userId,
+      hash: checkedHash,
+    } = await this.checkCredential(email, password);
     // A held account row makes every login of that account wait the cap holding a pooled connection:
     // the first LOGIN_TX_PER_ACCOUNT of them wait the full 2.5 s, the ones beyond wait only
     // LOGIN_EXTRA_WAIT_MS (with no lock held they all go through, as six simultaneous logins always did).
@@ -612,8 +616,8 @@ export class CustomerAuthService {
         (tx) =>
           withAccountLockWait(
             tx,
-            () =>
-              this.authInTx(tx, {
+            async () => {
+              const signedIn = await this.authInTx(tx, {
                 password: {
                   verify: () => Promise.resolve(verdict),
                   hash: () => Promise.resolve('unused'),
@@ -621,7 +625,23 @@ export class CustomerAuthService {
               }).api.signInEmail({
                 body: { email, password },
                 returnHeaders: true,
-              }),
+              });
+              // Story 20.6a (round 3): the password was verified OUTSIDE this transaction, and the session
+              // was inserted after a lock wait of up to 2.5 s: a password changed in between left a live
+              // session opened with the OLD password (200 with the row held 2 s). Re-read the credential
+              // now, in this transaction and `FOR SHARE` (a change that has not committed yet waits for us),
+              // and refuse if it is not the one that was verified: the transaction rolls back, no session.
+              if (verdict && userId !== null) {
+                const cur = await tx.$queryRaw<{ password: string | null }[]>`
+                  SELECT "password" FROM "Customer_Accounts"
+                  WHERE "userId" = ${userId}::uuid AND "providerId" = 'credential'
+                  FOR SHARE`;
+                if (cur.length === 0 || cur[0].password !== checkedHash) {
+                  throw invalidCredentialsException();
+                }
+              }
+              return signedIn;
+            },
             waitMs,
           ),
         { maxWait: 3_000, timeout: 8_000 },
@@ -677,7 +697,7 @@ export class CustomerAuthService {
   private async checkCredential(
     email: string,
     password: string,
-  ): Promise<{ ok: boolean; userId: string | null }> {
+  ): Promise<{ ok: boolean; userId: string | null; hash: string | null }> {
     // A database error here is a 500, like any other: it must not read as "wrong password".
     const ctx = await this.customerAuth.$context;
     const found = await ctx.internalAdapter.findUserByEmail(email, {
@@ -689,12 +709,12 @@ export class CustomerAuthService {
     const userId = found?.user.id ?? null;
     if (hash === null) {
       await argon2.hash(password, { type: argon2.argon2id });
-      return { ok: false, userId };
+      return { ok: false, userId, hash };
     }
     try {
-      return { ok: await argon2.verify(hash, password), userId };
+      return { ok: await argon2.verify(hash, password), userId, hash };
     } catch {
-      return { ok: false, userId };
+      return { ok: false, userId, hash };
     }
   }
 
