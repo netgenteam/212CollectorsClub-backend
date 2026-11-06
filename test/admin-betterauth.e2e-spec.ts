@@ -312,24 +312,39 @@ describe('Admin auth on BetterAuth (Story 12.2, e2e)', () => {
       auth: AdminAuth;
       close: () => Promise<void>;
     }> {
-      const moduleRef = await Test.createTestingModule({
-        imports: [
-          ConfigModule.forRoot({
-            isGlobal: true,
-            ignoreEnvFile: true,
-            ignoreEnvVars: true,
-            load: [() => ({ DATABASE_URL: process.env.DATABASE_URL, ...env })],
-          }),
-          PrismaModule,
-          AuthCoreModule,
-        ],
-      }).compile();
-      const nestApp = moduleRef.createNestApplication();
-      await nestApp.init();
-      return {
-        auth: nestApp.get<AdminAuth>(ADMIN_AUTH),
-        close: () => nestApp.close(),
-      };
+      // ConfigService.get falls back to process.env when the loaded config lacks a key, so an environment that
+      // exports ADMIN_AUTH_SECRET (the name .env.example prescribes) used to defeat the "only ADMIN_JWT_SECRET" case.
+      // Hermetic: both names are removed from process.env while the module is built, and restored afterwards.
+      const names = ['ADMIN_AUTH_SECRET', 'ADMIN_JWT_SECRET'];
+      const saved = names.map((n) => [n, process.env[n]] as const);
+      for (const n of names) delete process.env[n];
+      try {
+        const moduleRef = await Test.createTestingModule({
+          imports: [
+            ConfigModule.forRoot({
+              isGlobal: true,
+              ignoreEnvFile: true,
+              ignoreEnvVars: true,
+              load: [
+                () => ({ DATABASE_URL: process.env.DATABASE_URL, ...env }),
+              ],
+            }),
+            PrismaModule,
+            AuthCoreModule,
+          ],
+        }).compile();
+        const nestApp = moduleRef.createNestApplication();
+        await nestApp.init();
+        return {
+          auth: nestApp.get<AdminAuth>(ADMIN_AUTH),
+          close: () => nestApp.close(),
+        };
+      } finally {
+        for (const [n, v] of saved) {
+          if (v === undefined) delete process.env[n];
+          else process.env[n] = v;
+        }
+      }
     }
 
     const bearerOf = async (auth: AdminAuth): Promise<string> => {

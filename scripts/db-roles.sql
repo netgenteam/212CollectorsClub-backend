@@ -1,9 +1,16 @@
 -- Story 20.1 (AC12, A90): least-privilege role for the application.
 --
--- Run it as the OWNER/migrator of the database (`pnpm db:roles`, which reads
--- MIGRATE_DATABASE_URL, falling back to DATABASE_URL). Idempotent: run it again
--- after a restore, after the first `prisma migrate deploy`, or to rotate the
--- password. It never drops anything and never touches other roles.
+-- Two phases, because two different privileges are needed (Story 20.10, QA round 1):
+--   role    CREATE/ALTER ROLE of the application role. Needs a superuser (or a role with CREATEROLE). The plain
+--           owner created by docs/deployment.md 1.2 CANNOT do it ("permission denied to create role").
+--   grants  CONNECT, USAGE, GRANTs and ALTER DEFAULT PRIVILEGES. Run it AS THE REAL OWNER of the tables (the role
+--           that runs `prisma migrate`): default privileges are "for the tables created by that role".
+--   all     both in one go (default; for a superuser that IS the owner, e.g. the docker-compose init script).
+-- `pnpm db:roles` runs 'role' with DB_ROLES_ADMIN_URL and 'grants' with MIGRATE_DATABASE_URL. Idempotent: run it again
+-- after a restore or after the first `prisma migrate deploy`; 'role' is a no-op when the role already has the
+-- right attributes and no password is given (so a CREATEROLE admin never hits "permission denied to alter role",
+-- which PostgreSQL 16+ raises when REPLICATION/BYPASSRLS are re-specified by a non-superuser). It never drops
+-- anything and never touches other roles.
 --
 -- Parameters, as session settings (scripts/db-roles.mjs and deploy/db/init-roles.sql set them):
 --   dbroles.env        environment name; the role is collectorsclub_<env>_app
@@ -12,7 +19,9 @@
 --                      (`CONTEXT: SQL statement "CREATE ROLE ... PASSWORD ..."`), and a clear
 --                      password would end up in the server log. `pnpm db:roles` converts
 --                      APP_DB_PASSWORD (scripts/scram-verifier.mjs); this file refuses clear text.
---   dbroles.owner      role whose FUTURE tables the app role gets privileges on (default: the current user)
+--   dbroles.owner      role whose FUTURE tables the app role gets privileges on (default: the current user; the
+--                      script `pnpm db:roles` does SET ROLE to it when DB_ROLES_OWNER is given)
+--   dbroles.phase      role | grants | all (default all)
 --   dbroles.revoke_temp  'off' to keep the TEMPORARY privilege that PUBLIC has on the database by default.
 --                      Anything else (the default) revokes it from PUBLIC: see "TEMPORARY" below.
 --
@@ -38,9 +47,9 @@ DO $$
 DECLARE
   env        text := current_setting('dbroles.env', true);
   pw         text := current_setting('dbroles.password', true);
-  owner_name text := coalesce(nullif(current_setting('dbroles.owner', true), ''), current_user);
   app        text;
-  db         text := current_database();
+  phase      text := coalesce(nullif(current_setting('dbroles.phase', true), ''), 'all');
+  r          pg_roles%ROWTYPE;
 BEGIN
   IF env IS NULL OR env !~ '^[a-z0-9_]{1,30}$' THEN
     RAISE EXCEPTION 'dbroles.env must match [a-z0-9_]{1,30} (e.g. production, staging, dev)';
@@ -50,7 +59,18 @@ BEGIN
     RAISE EXCEPTION 'dbroles.password must be a SCRAM-SHA-256 verifier, not a clear-text password (use pnpm db:roles)';
   END IF;
 
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = app) THEN
+  IF phase NOT IN ('role', 'grants', 'all') THEN
+    RAISE EXCEPTION 'dbroles.phase must be role, grants or all';
+  END IF;
+  IF phase = 'grants' THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = app) THEN
+      RAISE EXCEPTION 'the role % does not exist yet: a superuser (or a role with CREATEROLE) must create it first (DB_ROLES_ADMIN_URL=... pnpm db:roles, or docs/deployment.md 13.3, step A)', app;
+    END IF;
+    RETURN;
+  END IF;
+
+  SELECT * INTO r FROM pg_roles WHERE rolname = app;
+  IF NOT FOUND THEN
     IF pw IS NULL OR pw = '' THEN
       RAISE EXCEPTION 'dbroles.password is required to create the role % (a new server or database does not have it yet: set APP_DB_PASSWORD; omit it only to re-run on a role that already exists)', app;
     END IF;
@@ -59,14 +79,43 @@ BEGIN
       app, pw);
     RAISE NOTICE 'role % created', app;
   ELSE
-    EXECUTE format(
-      'ALTER ROLE %I WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', app);
+    IF r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole AND NOT r.rolreplication AND NOT r.rolbypassrls THEN
+      RAISE NOTICE 'role % exists with the right attributes', app;
+    ELSE
+      EXECUTE format(
+        'ALTER ROLE %I WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', app);
+      RAISE NOTICE 'role % exists: attributes reset', app;
+    END IF;
     IF pw IS NOT NULL AND pw <> '' THEN
       EXECUTE format('ALTER ROLE %I WITH PASSWORD %L', app, pw);
-      RAISE NOTICE 'role % exists: attributes reset, password rotated', app;
+      RAISE NOTICE 'role % password rotated', app;
     ELSE
-      RAISE NOTICE 'role % exists: attributes reset, password unchanged', app;
+      RAISE NOTICE 'role % password unchanged', app;
     END IF;
+  END IF;
+END
+$$;
+
+DO $$
+DECLARE
+  env        text := current_setting('dbroles.env', true);
+  owner_name text := coalesce(nullif(current_setting('dbroles.owner', true), ''), current_user);
+  phase      text := coalesce(nullif(current_setting('dbroles.phase', true), ''), 'all');
+  app        text;
+  db         text := current_database();
+BEGIN
+  IF phase = 'role' THEN
+    RETURN;
+  END IF;
+  IF env IS NULL OR env !~ '^[a-z0-9_]{1,30}$' THEN
+    RAISE EXCEPTION 'dbroles.env must match [a-z0-9_]{1,30} (e.g. production, staging, dev)';
+  END IF;
+  app := format('collectorsclub_%s_app', env);
+  IF owner_name <> current_user THEN
+    RAISE EXCEPTION 'dbroles.owner (%) is not the current user (%): run the grants phase as the owner of the tables (pnpm db:roles does SET ROLE with DB_ROLES_OWNER)', owner_name, current_user;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = app) THEN
+    RAISE EXCEPTION 'the role % does not exist', app;
   END IF;
 
   EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', db, app);

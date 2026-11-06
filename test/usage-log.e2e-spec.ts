@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access -- supertest bodies are untyped JSON */
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Test, TestingModule } from '@nestjs/testing';
 import { VersioningType } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -581,6 +583,51 @@ describe('Usage log (e2e, Story 20.7)', { timeout: 120_000 }, () => {
       expect(nums.every((n, i) => i === 0 || n < nums[i - 1])).toBe(true);
     });
 
+    it('paginates correctly ACROSS a power of ten (ids 9 999 999 950..10 000 000 079): none skipped, none repeated (20.10 D5: the text alias used to sort "99" after "100")', async () => {
+      // Explicit ids in a range the real sequence will never reach: deterministic, no sequence is touched.
+      const FIRST = 9_999_999_950n;
+      const N = 130;
+      const rids2010: string[] = [];
+      const mine: string[] = [];
+      try {
+        for (let i = 0; i < N; i++) {
+          const id = FIRST + BigInt(i);
+          mine.push(id.toString());
+          const rid = randomUUID(); // "requestId" is unique per row
+          rids2010.push(rid);
+          await t.prisma.$executeRawUnsafe(
+            `INSERT INTO "Usage_Logs" ("id","ts","method","route","status","durationMs","actorType","ip","userAgent","requestId")
+             VALUES ($1::bigint, now(), 'GET', '/zz2010/pow10/:id', 200, 1, 'ANON', '198.51.100.9'::inet, 'seed-2010', $2::uuid)`,
+            id.toString(),
+            rid,
+          );
+        }
+        const all: string[] = [];
+        let cursor: string | null = null;
+        let pages = 0;
+        do {
+          const p: {
+            items: Record<string, unknown>[];
+            nextCursor: string | null;
+          } = await page(
+            `?route=/zz2010/pow10/${cursor ? `&cursor=${cursor}` : ''}`,
+          );
+          all.push(...p.items.map((i) => i.id as string));
+          cursor = p.nextCursor;
+          pages += 1;
+        } while (cursor && pages < 10);
+        expect(pages).toBe(3);
+        expect(all).toHaveLength(N);
+        expect(new Set(all).size).toBe(N);
+        expect(all).toEqual([...mine].reverse());
+      } finally {
+        await t.prisma.$executeRawUnsafe(
+          `DELETE FROM "Usage_Logs" WHERE "requestId" = ANY($1::uuid[])`,
+          rids2010,
+        );
+      }
+    });
+
     it('filters: route prefix, status, statusClass, actorType, actorId, ip (and CIDR), requestId, from/to', async () => {
       const alpha = await page('?route=/zz207/alpha');
       expect(
@@ -1044,10 +1091,22 @@ describe('Usage log (e2e, Story 20.7)', { timeout: 120_000 }, () => {
       const owner = new pg.Client({ connectionString: u.toString() });
       await owner.connect();
       try {
-        const roles = await owner.query<{ rolname: string }>(
-          `SELECT rolname FROM pg_roles WHERE rolname ~ '^collectorsclub_[a-z0-9_]{1,30}_app$'`,
+        // Hermetic: the role is the test's own, built by scripts/db-roles.sql (the script under test) in the
+        // throw-away clone; no role of the cluster is looked at, and the role is dropped afterwards.
+        const rolname = `collectorsclub_u${TAG}_app`;
+        await owner.query(
+          `SELECT set_config('dbroles.env', $1, false), set_config('dbroles.password', $2, false),
+                  set_config('dbroles.owner', '', false), set_config('dbroles.revoke_temp', 'off', false),
+                  set_config('dbroles.phase', 'all', false)`,
+          [
+            `u${TAG}`,
+            'SCRAM-SHA-256$4096:+jNDw01gRy048jfgnqWpfg==$Jj5HQJRnk/rFNXbNb4C9jWWeaMTPg88FWGTcwK3yc3g=:vUMP8Tvdz7i4zOw4jHm1ffvy5vTgBZnGcR30S1S1wps=',
+          ],
         );
-        for (const { rolname } of roles.rows) {
+        await owner.query(
+          readFileSync(join(process.cwd(), 'scripts', 'db-roles.sql'), 'utf8'),
+        );
+        try {
           const p = await owner.query<{
             u: boolean;
             t: boolean;
@@ -1069,6 +1128,9 @@ describe('Usage log (e2e, Story 20.7)', { timeout: 120_000 }, () => {
             d: true,
             s: true,
           });
+        } finally {
+          await owner.query(`DROP OWNED BY "${rolname}"`);
+          await owner.query(`DROP ROLE "${rolname}"`);
         }
         // the shape the story asks for
         const idx = await owner.query<{ indexdef: string }>(

@@ -16,7 +16,7 @@ Necesarias para que el sitio funcione: mantener tu sesión, tu carrito y tu list
 
 | Cookie | Finalidad | Duración |
 |---|---|---|
-| `cc_session` | Sesión de cliente iniciada (httpOnly) | 7 días con renovación diaria |
+| `cc_session` | Sesión de cliente iniciada (httpOnly). En producción, con HTTPS, tu navegador la guarda con el prefijo de seguridad `__Secure-` (`__Secure-cc_session`) | 7 días con renovación diaria |
 | `cartId` | Identifica tu carrito (firmada) | 30 días |
 | `wishlistId` | Identifica tu lista de deseos (firmada) | 30 días |
 | `212_cookie_prefs` | Guarda tu elección sobre cookies y la versión de esta política | 1 año |

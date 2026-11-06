@@ -232,9 +232,11 @@ export class UsageReadService {
     params.push(USAGE_PAGE_SIZE + 1);
     const sql = `SELECT "id"::text AS "id", "ts", "method", "route", "status", "durationMs", "actorType",
               "actorId", host("ip") AS "ip", "userAgent", "requestId"
-         FROM "Usage_Logs"
+         FROM "Usage_Logs" u
          ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-        ORDER BY "id" DESC LIMIT $${params.length}`;
+        -- u."id" is the bigint column. A bare ORDER BY "id" would resolve to the OUTPUT column "id" (text, because
+        -- of the ::text cast above) and sort '99' after '100': the numeric cursor would then skip rows (20.10 QA).
+        ORDER BY u."id" DESC LIMIT $${params.length}`;
     const rows = await this.prisma.$transaction(
       async (tx) => {
         await tx.$executeRaw`SELECT set_config('statement_timeout', ${QUERY_TIMEOUT}, true), set_config('lock_timeout', '1000ms', true)`;

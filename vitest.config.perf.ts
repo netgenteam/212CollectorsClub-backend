@@ -11,7 +11,7 @@ export default defineConfig({
     root: './',
     include: ['**/*.perf.spec.ts'],
     // Story 20.2: run-time generated, throw-away ID document keys.
-    env: generateIdDocTestEnv(),
+    env: generateIdDocTestEnv({}),
     // Story 20.5: perf specs also use audit sandboxes / the FX rows: throw-away database.
     globalSetup: [
       './test/helpers/global-test-db.ts',

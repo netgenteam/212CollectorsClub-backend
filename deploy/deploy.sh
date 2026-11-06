@@ -89,8 +89,13 @@ log "fetching and checking out $GIT_REF"
 git fetch --all --prune --quiet
 git checkout --quiet --detach "$GIT_REF"
 
+# `pnpm install` runs the `postinstall` script (`prisma generate`), and prisma.config.ts refuses to load without
+# DATABASE_URL, but this script only sources $ENV_FILE further down (and on a FIRST deploy the shell has no
+# DATABASE_URL at all: PrismaConfigEnvError, Story 20.10 QA round 1). `prisma generate` never connects, so, like
+# the Dockerfile, it gets a throw-away placeholder URL for this one command. It is not exported to the rest of the
+# script and the real URL (a secret) is never involved.
 log "installing dependencies (pnpm install --frozen-lockfile)"
-pnpm install --frozen-lockfile
+DATABASE_URL="postgresql://build:build@localhost:5432/build" MIGRATE_DATABASE_URL="" pnpm install --frozen-lockfile
 
 log "building"
 pnpm build

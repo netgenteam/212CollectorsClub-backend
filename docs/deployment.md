@@ -52,6 +52,7 @@ apt update && apt install -y git nginx postgresql ufw curl
 # lands — confirm with `which node`) exists for every user, including the
 # dedicated service users created below.
 corepack enable   # makes `pnpm` available system-wide once Node is installed
+corepack prepare pnpm@11.5.3 --activate   # the version the repo is built and tested with (pnpm-lock.yaml); without it corepack picks whatever is latest
 ```
 
 Confirm the real Node binary path (`which node`) and update `ExecStart=` in
@@ -1113,11 +1114,13 @@ Si en la BD ya hay roles que no son superusuario (p. ej. `qa_app`), la migració
 
 **Por qué.** Hoy la app corre como `collectorsclub`, que es superusuario y propietario: con ese rol cualquier fallo de la app (o una inyección SQL) podría hacer `ALTER TABLE ... DISABLE TRIGGER` y reescribir el log. Con un rol que no es propietario ni superusuario eso es imposible: no puede ejecutar DDL, ni desactivar triggers, ni `UPDATE/DELETE/TRUNCATE` sobre `Audit_Events`. Las migraciones y `deploy.sh` siguen con el propietario.
 
+**Quién puede ejecutar qué (corregido en la ronda 1 de QA de la 20.10).** Crear el rol exige ser superusuario o tener `CREATEROLE`, y **el propietario normal que crea 1.2 (`CREATE USER` + `CREATE DATABASE ... OWNER`) no tiene ninguno de los dos** (`permission denied to create role`). En cambio los `GRANT` y `ALTER DEFAULT PRIVILEGES` deben ejecutarlos **el propietario real de las tablas** (el que corre `prisma migrate`): los privilegios por defecto valen «para las tablas que cree ese rol». Por eso `pnpm db:roles` tiene **dos fases**: (1) *role*: `CREATE ROLE`/`ALTER ROLE`, con `DB_ROLES_ADMIN_URL` (superusuario o `CREATEROLE`); (2) *grants*: con `MIGRATE_DATABASE_URL` (el propietario). Si no das `DB_ROLES_ADMIN_URL`: la fase 1 la hace la propia conexión del propietario **si** es superusuario/`CREATEROLE` (tu desarrollo local, donde el propietario es superusuario), y si no lo es se **omite** cuando el rol ya existe y no hay contraseña que aplicar (la re-ejecución tras restaurar: no hace falta ningún administrador); si el rol no existe o quieres rotar la contraseña, falla diciendo que falta `DB_ROLES_ADMIN_URL`. `DB_ROLES_OWNER=<rol>` hace `SET ROLE` a ese propietario antes de la fase 2 (para el caso de que `MIGRATE_DATABASE_URL` sea un superusuario que no es quien crea las tablas: sin él los privilegios por defecto serían los del superusuario, no los de las migraciones). La re-ejecución nunca da `permission denied to alter role` (PostgreSQL 16 o posterior lo da a un `CREATEROLE` que repite `REPLICATION`/`BYPASSRLS`): el script solo hace `ALTER ROLE` si los atributos difieren o si le pasas contraseña.
+
 **Qué hace `pnpm db:roles`.** Crea (o actualiza, es idempotente) `collectorsclub_<entorno>_app`: `LOGIN`, sin `SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS`, no propietario de nada. Le da `CONNECT`, `USAGE` sobre `public`, `SELECT/INSERT/UPDATE/DELETE` sobre todas las tablas y `USAGE/SELECT` sobre las secuencias, **y `ALTER DEFAULT PRIVILEGES` para que las tablas que creen las migraciones futuras (las ejecuta el propietario) queden accesibles sin ningún `GRANT` manual**. Después le quita `UPDATE/DELETE/TRUNCATE` sobre `Audit_Events` y todo sobre `_prisma_migrations` (con el `init` del compose en volumen vacío la tabla aún no existe: lo hace la migración `20261105110000`). Si creas la tabla de otra manera que no sea una migración del propietario, vuelve a ejecutarlo.
 
 **En tu máquina de desarrollo (no se ha tocado tu `.env`):**
 
-1. Elige una contraseña para el rol; no la pegues en ningún chat ni commit. En una terminal (el script lee tu `.env` para conectarse como propietario y no imprime ninguna URL ni contraseña):
+1. Elige una contraseña para el rol; no la pegues en ningún chat ni commit. En una terminal (el script lee tu `.env` para conectarse como propietario y no imprime ninguna URL ni contraseña; en desarrollo el propietario es superusuario, así que hace él solo las dos fases):
    ```bash
    DB_ROLES_ENV=dev APP_DB_PASSWORD='<la-contraseña>' pnpm db:roles
    ```
@@ -1139,11 +1142,23 @@ Los pocos specs que necesitan privilegios (crear el esquema sandbox de auditorí
 **En staging y producción (en este orden, fuera de hora punta):**
 
 1. Despliega el código como siempre. Las migraciones corren con la URL que ya existe (`MIGRATE_DATABASE_URL` si la defines, si no `DATABASE_URL`; `deploy.sh` usa esa misma con el `lock_timeout`).
-2. En el servidor, desde `/opt/212cc/<entorno>/app` y con las variables en el entorno de esa sesión (no impresas), como en 12.3:
+2. **Paso A: crear el rol (lo hace el superusuario de PostgreSQL, no el propietario de 1.2).** Una sola vez por servidor (los roles son del clúster). La contraseña llega al servidor solo como verificador SCRAM (`scripts/scram-verifier.mjs`), nunca en claro, así que no queda en el log de Postgres aunque la sentencia falle:
+   ```bash
+   cd /opt/212cc/<entorno>/app
+   APP_VERIFIER="$(printf '%s' '<contraseña nueva>' | node scripts/scram-verifier.mjs)"
+   sudo -u postgres psql -d collectorsclub_<entorno> -v ON_ERROR_STOP=1 -v verifier="$APP_VERIFIER" <<'SQL'
+   CREATE ROLE collectorsclub_<entorno>_app LOGIN PASSWORD :'verifier'
+     NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+   SQL
+   unset APP_VERIFIER
+   ```
+   (Alternativa equivalente si tienes una URL de superusuario o de un rol `CREATEROLE`: `DB_ROLES_ADMIN_URL='postgresql://...' DB_ROLES_ENV=<entorno> APP_DB_PASSWORD='<contraseña nueva>' pnpm db:roles` hace este paso y el siguiente. Rotar la contraseña más adelante es esa misma orden, o `ALTER ROLE ... PASSWORD :'verifier'` como superusuario.)
+   **Paso B: privilegios, como el propietario de las tablas** (el de `MIGRATE_DATABASE_URL`), desde el mismo directorio y con las variables en el entorno de esa sesión (no impresas), como en 12.3:
    ```bash
    set -a; source /opt/212cc/<entorno>/shared/.env; set +a
-   DB_ROLES_ENV=<staging|production> APP_DB_PASSWORD='<contraseña nueva>' pnpm db:roles
+   DB_ROLES_ENV=<staging|production> pnpm db:roles      # sin contraseña: el rol ya existe
    ```
+   Debe terminar con `phase 1 ... skipped` y `done`. Si `MIGRATE_DATABASE_URL` aún no está en el `.env` (paso 3), `pnpm db:roles` usa `DATABASE_URL`, que en ese momento todavía es el propietario: está bien.
 3. Edita `/opt/212cc/<entorno>/shared/.env`: `MIGRATE_DATABASE_URL` = la URL actual (propietario); `DATABASE_URL` = la del rol `collectorsclub_<entorno>_app`. `deploy.sh` ya usa `MIGRATE_DATABASE_URL` para `prisma migrate deploy` (rechaza una URL que ya traiga un parámetro `options`). Verificado sobre el clon (el bloque de migración de `deploy.sh`, extraído y ejecutado): con `MIGRATE_DATABASE_URL` migra como propietario; si pones el rol limitado en `DATABASE_URL` y **olvidas** `MIGRATE_DATABASE_URL`, `prisma migrate deploy` falla (el rol no puede tocar `_prisma_migrations`) y `deploy.sh` se detiene **antes** de reiniciar el servicio.
 4. `sudo systemctl restart 212cc-backend-<entorno>` y comprueba el health check, un registro y una compra de prueba.
 5. Comprueba que el rol es el limitado (como propietario, con `psql` o con el `q` de 12.3):
@@ -1154,21 +1169,24 @@ Los pocos specs que necesitan privilegios (crear el esquema sandbox de auditorí
           has_table_privilege('collectorsclub_<entorno>_app', '"Audit_Events"', 'INSERT')  AS ins;   -- t
    SELECT rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname = 'collectorsclub_<entorno>_app';  -- f f f
    ```
-6. Vuelve a ejecutar `pnpm db:roles` tras restaurar una copia de seguridad o si alguna vez creas tablas sin pasar por una migración del propietario. **Sin contraseña solo sirve si el rol ya existe** (no la rota); en un servidor o clúster nuevo el rol todavía no existe y falla con `dbroles.password is required to create the role collectorsclub_<entorno>_app`: ahí hay que pasar `APP_DB_PASSWORD` (los roles son del clúster, no de la base: una base restaurada en el mismo servidor conserva el rol). Verificado: sin contraseña en un servidor sin el rol falla con ese mensaje; con `APP_DB_PASSWORD` lo crea; y de nuevo sin contraseña con el rol ya existente dice `password unchanged`.
+6. Vuelve a ejecutar el **paso B** (`pnpm db:roles`, como propietario, **sin contraseña y sin administrador**) tras restaurar una copia de seguridad o si alguna vez creas tablas sin pasar por una migración del propietario. Es idempotente y no toca la contraseña. Los roles son del clúster, no de la base: una base restaurada **en el mismo servidor** conserva el rol; en un servidor o clúster **nuevo** el rol no existe y el script falla con `creating the role collectorsclub_<entorno>_app needs a superuser or a role with CREATEROLE ... set DB_ROLES_ADMIN_URL`: repite el paso A y luego el B.
+   **Verificado (ronda 1 de QA de la 20.10, PostgreSQL 17 desechable con un propietario creado exactamente como 1.2, sin `CREATEROLE`):** el propietario solo falla con el mensaje anterior; con superusuario como `DB_ROLES_ADMIN_URL` crea el rol y concede; la segunda ejecución dice `exists with the right attributes` y `password rotated`/`unchanged`; con el paso A manual y el B dos veces seguidas, `has_table_privilege` da `UPDATE` en `Audit_Events` = `f`, `INSERT` = `t`, ninguna orden sobre `_prisma_migrations`, y una tabla creada después por el propietario queda con DML para el rol (privilegios por defecto del propietario real, comprobado en `pg_default_acl`). Con un administrador `CREATEROLE` no superusuario: creación y dos re-ejecuciones sin error. Con `MIGRATE_DATABASE_URL` de superusuario y `DB_ROLES_OWNER=<propietario>`: los privilegios por defecto quedan a nombre del propietario, no del superusuario.
 
-Limitaciones que conviene saber: (a) las migraciones deben ejecutarlas **siempre el mismo propietario** que ejecutó `pnpm db:roles` (los privilegios por defecto son «para las tablas de ese rol»); (b) en PostgreSQL anterior al 15 el esquema `public` deja crear objetos a cualquiera: si tu servidor es antiguo, valora `REVOKE CREATE ON SCHEMA public FROM PUBLIC`; (c) el propietario o un superusuario **sí pueden** desactivar los triggers y reescribir la cadena entera: la defensa es el anclaje externo (13.5); (d) **otra razón para usar el rol limitado:** la opción `audit.allow_unordered_restore` (13.9) la respeta el propietario de la tabla. Si la aplicación corre con el mismo rol que es propietario (desarrollo, o producción sin `MIGRATE_DATABASE_URL`), cualquier SQL que ejecute la aplicación puede hacer `SET audit.allow_unordered_restore = 'on'` e insertar una fila con `occurredAt` anterior a la previa; sigue sin poder saltarse `seq`, `prevHash` ni las cotas de futuro y de 2020, pero la regla de orden de tiempo deja de proteger. Con el rol limitado (que no es propietario) la opción se ignora.
+Limitaciones que conviene saber: (a) las migraciones deben ejecutarlas **siempre el mismo propietario** que ejecutó la fase 2 de `pnpm db:roles` (`MIGRATE_DATABASE_URL`, o `DB_ROLES_OWNER`) (los privilegios por defecto son «para las tablas de ese rol»); (b) en PostgreSQL anterior al 15 el esquema `public` deja crear objetos a cualquiera: si tu servidor es antiguo, valora `REVOKE CREATE ON SCHEMA public FROM PUBLIC`; (c) el propietario o un superusuario **sí pueden** desactivar los triggers y reescribir la cadena entera: la defensa es el anclaje externo (13.5); (d) **otra razón para usar el rol limitado:** la opción `audit.allow_unordered_restore` (13.9) la respeta el propietario de la tabla. Si la aplicación corre con el mismo rol que es propietario (desarrollo, o producción sin `MIGRATE_DATABASE_URL`), cualquier SQL que ejecute la aplicación puede hacer `SET audit.allow_unordered_restore = 'on'` e insertar una fila con `occurredAt` anterior a la previa; sigue sin poder saltarse `seq`, `prevHash` ni las cotas de futuro y de 2020, pero la regla de orden de tiempo deja de proteger. Con el rol limitado (que no es propietario) la opción se ignora.
 
 ### 13.4 Variables de entorno (todas opcionales; ver `.env.example`)
 
 | Variable | Por defecto | Para qué |
 |---|---|---|
-| `MIGRATE_DATABASE_URL` | = `DATABASE_URL` | URL del propietario para `prisma migrate`, `deploy.sh` y `pnpm db:roles`. |
+| `MIGRATE_DATABASE_URL` | = `DATABASE_URL` | URL del propietario para `prisma migrate`, `deploy.sh` y la fase 2 de `pnpm db:roles`. |
 | `AUDIT_VERIFY_CRON` | `0 5 * * 0` (UTC) | Verificación semanal. Como la del FX, se lee del entorno del proceso al arrancar: expórtala (systemd `EnvironmentFile`), no basta con el `.env` de dev. |
 | `AUDIT_VERIFY_CRON_MODE` | `full` | `full` recalcula toda la cadena cada vez; `incremental` solo lo posterior a la última verificación OK. **Deja `full`**: un incremental confía en las filas anteriores a su ancla y no vería que alguien cambió el contenido de una fila vieja sin tocar su hash. Solo si la cadena llega a millones de filas. |
 | `AUDIT_VERIFY_ENABLED` | `true` (`false` con `NODE_ENV=test`) | Apaga el job. |
 | `AUDIT_PAYLOAD_STRICT` | `true` salvo `NODE_ENV=production` | Guard de `before`/`after`: `true` lanza, `false` enmascara y sigue (13.1b). |
 | `AUDIT_ANCHOR_EMAIL` | sin definir (producción avisa al arrancar) | Tras cada ejecución semanal se envía `seq` + `hash` de la cabeza por el `Mailer`. Un fallo de correo solo queda en el log. |
 | `DB_ROLES_ENV`, `APP_DB_PASSWORD` | sin definir | Solo para `pnpm db:roles`; no los dejes en el `.env` del servicio. |
+| `DB_ROLES_ADMIN_URL` | sin definir | URL de un superusuario o de un rol `CREATEROLE`, solo para la fase 1 (crear o rotar el rol) de `pnpm db:roles`. El propietario normal de 1.2 no puede (13.3). Solo para `pnpm db:roles`. |
+| `DB_ROLES_OWNER` | sin definir (= el usuario de `MIGRATE_DATABASE_URL`) | Rol propietario de las tablas, para los privilegios por defecto; `pnpm db:roles` le hace `SET ROLE` antes de la fase 2. Solo para `pnpm db:roles`. |
 | `DB_ROLES_REVOKE_TEMP` | sin definir (= se revoca) | `off` hace que `pnpm db:roles` no quite `TEMPORARY` a `PUBLIC` (13.2). Solo para `pnpm db:roles`. |
 
 ### 13.5 Anclaje externo del hash (el único freno contra un DBA)
@@ -1693,7 +1711,14 @@ Una acción de admin o de sistema se audita si cumple **al menos uno**:
            aliases: [cc-api]          # el nombre por el que Traefik llega al webhook (dominio api.<DOMAIN>)
        environment:
          TRUST_PROXY: 172.30.212.0/28 # solo cc-app: Traefik NO está aquí, no se le cree (ver 2)
-         DATABASE_URL: ${DATABASE_URL:?}
+         DATABASE_URL: ${DATABASE_URL:?}              # con el rol limitado (13.3) en cuanto lo crees
+         MIGRATE_DATABASE_URL: ${MIGRATE_DATABASE_URL:-}  # el PROPIETARIO: lo usa `pnpm prisma:deploy` del CMD. Vacío = DATABASE_URL. Con el rol limitado en DATABASE_URL y esto vacío, el contenedor entra en bucle (`permission denied for table _prisma_migrations`)
+         FRONTEND_URL: ${FRONTEND_URL:?}              # https://<DOMAIN>, sin barra final: los correos (verificación, reinicio de contraseña) enlazan aquí; sin ella apuntan a http://localhost:3000
+         CHECKOUT_REQUIRE_BUYER_ID: ${CHECKOUT_REQUIRE_BUYER_ID:-false}    # `true` en la misma ventana que el frontend de 20.9 (22.2 paso 5)
+         CHECKOUT_REQUIRE_SHIPPING: ${CHECKOUT_REQUIRE_SHIPPING:-false}    # `true` con el frontend desplegado (12.4)
+         LEGAL_REQUIRE_PUBLISHED: ${LEGAL_REQUIRE_PUBLISHED:-false}        # `true` en producción cuando los documentos legales estén publicados (§12)
+         AUDIT_ANCHOR_EMAIL: ${AUDIT_ANCHOR_EMAIL:-}                       # buzón externo del anclaje del head (13.5); vacío = sin anclaje (WARN al arrancar)
+         STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}    # vacío = cliente Stripe FALSO (nunca cobra); con valor, STRIPE_WEBHOOK_SECRET es obligatoria
          COOKIE_SECRET: ${COOKIE_SECRET:?}
          ADMIN_AUTH_SECRET: ${ADMIN_AUTH_SECRET:?}
          CUSTOMER_AUTH_SECRET: ${CUSTOMER_AUTH_SECRET:?}
@@ -1723,7 +1748,7 @@ Una acción de admin o de sistema se audita si cumple **al menos uno**:
          NEXT_PUBLIC_BASE_URL: ${NEXT_PUBLIC_BASE_URL:?}
    ```
 
-   - **Variables (*Environment* de Dokploy; sustituye cada marcador, nunca los guardes en el repo):** `BACKEND_IMAGE`, `FRONTEND_IMAGE`; `DATABASE_URL` (`postgresql://<usuario>:<contraseña>@<host-de-la-base>:5432/<base>?schema=public`; la base de Dokploy es alcanzable desde el backend por `dokploy-network`); `COOKIE_SECRET`, `ADMIN_AUTH_SECRET`, `CUSTOMER_AUTH_SECRET` (tres secretos **distintos**, `openssl rand -hex 24` cada uno); `STRIPE_WEBHOOK_SECRET` (`whsec_...` del panel de Stripe, sección 7.2); `IDDOC_ENC_KEYS` (`1:<openssl rand -base64 32>`), `IDDOC_ENC_ACTIVE_KEY` (`1`), `IDDOC_BLIND_KEY` (`openssl rand -base64 32`): **pierdes `IDDOC_ENC_KEYS` y las cédulas son irrecuperables** (14.2); `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, `ADMIN_CONTACT_EMAIL` (OQ9, sección «Email»); `NEXT_PUBLIC_BASE_URL` (`https://<DOMAIN>`). El resto de variables del backend (`.env.example`) tiene valor por omisión; sin las de arriba el proceso se detiene con `Configuration key ... does not exist`. Con el administrador inicial (`ADMIN_SEED_*`) se ejecuta una vez `pnpm prisma:seed` dentro del contenedor.
+   - **Variables (*Environment* de Dokploy; sustituye cada marcador, nunca los guardes en el repo):** `BACKEND_IMAGE`, `FRONTEND_IMAGE`; `DATABASE_URL` (`postgresql://<usuario>:<contraseña>@<host-de-la-base>:5432/<base>?schema=public`; la base de Dokploy es alcanzable desde el backend por `dokploy-network`); `COOKIE_SECRET`, `ADMIN_AUTH_SECRET`, `CUSTOMER_AUTH_SECRET` (tres secretos **distintos**, `openssl rand -hex 24` cada uno); `STRIPE_WEBHOOK_SECRET` (`whsec_...` del panel de Stripe, sección 7.2); `IDDOC_ENC_KEYS` (`1:<openssl rand -base64 32>`), `IDDOC_ENC_ACTIVE_KEY` (`1`), `IDDOC_BLIND_KEY` (`openssl rand -base64 32`): **pierdes `IDDOC_ENC_KEYS` y las cédulas son irrecuperables** (14.2); `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, `ADMIN_CONTACT_EMAIL` (OQ9, sección «Email»); `NEXT_PUBLIC_BASE_URL` (`https://<DOMAIN>`); y, **añadidas en la ronda 1 de QA de la 20.10** (comparadas contra lo que el código lee al arrancar: `src/auth-core`, `src/checkout`, `src/legal`, `src/audit`, `src/payments-stripe`, `src/prisma`): `MIGRATE_DATABASE_URL` (la URL del propietario; sin ella, con el rol limitado en `DATABASE_URL`, el `CMD` falla con `permission denied for table _prisma_migrations` y Docker lo reinicia en bucle), `FRONTEND_URL` (`https://<DOMAIN>`; sin ella los correos enlazan a `http://localhost:3000`), `CHECKOUT_REQUIRE_BUYER_ID`, `CHECKOUT_REQUIRE_SHIPPING`, `LEGAL_REQUIRE_PUBLISHED` (los tres con defecto `false` en el compose: se activan en la ventana de 22.2 paso 5, nunca antes del frontend), `AUDIT_ANCHOR_EMAIL` (13.5) y `STRIPE_SECRET_KEY` (vacío = Stripe falso). Las del job de retención y del log de uso (22.4) **no** hay que declararlas: con `NODE_ENV=production`, que fija el `Dockerfile`, la retención arranca sola (20.2) y todo lo demás tiene defecto; declara `RETENTION_PURGE_ENABLED=true` solo en un entorno que no sea `production` (22.2 paso 6). `TRUST_PROXY` ya va fijo en el compose. Sin las obligatorias el proceso se detiene con `Configuration key ... does not exist`. **El administrador inicial y la fila de tasa de cambio se crean sin `prisma:seed`** (la imagen no lleva `tsx`; además el seed reescribe la contraseña de un admin existente): 22.8.
    - **Build args del frontend** (quedan en las reescrituras de Next; los mismos valores van en `environment` arriba): `BACKEND_URL=http://cc-backend:3000`, `BACKEND_API_URL=http://cc-backend:3000/api/v1`, `NEXT_PUBLIC_BASE_URL=https://<DOMAIN>`.
    - **Dominios (pestaña *Domains*; Dokploy escribe los routers/labels de Traefik):** `<DOMAIN>` -> servicio `frontend`, puerto 3000; `api.<DOMAIN>` -> servicio `backend`, puerto 3000, **ruta `/api/v1/payments/stripe/webhook`** (el campo *Path* de Dokploy es un `PathPrefix`). Con la ruta fijada, el dominio de la API **no expone nada más** del backend (cualquier otra ruta es un 404 de Traefik): nadie puede atacar el login del admin por ese dominio. Sin dominio de API (Stripe no se usa), quita `dokploy-network` del backend y su alias.
    - (Es un ejemplo: no hay un `docker-compose` de despliegue en los repos; solo el `docker-compose.yml` de Postgres de desarrollo. Un servicio en modo Swarm/stack usa redes `overlay`: la subred se lee con `docker network inspect <red> --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'` y es esa la que va en `TRUST_PROXY`.)
@@ -2473,7 +2498,7 @@ Esta sección es para Angel. No añade comportamiento: reúne en un orden de ope
 | (d) Anclaje externo del `head` de auditoría | 13.5 y 13.4 (`AUDIT_ANCHOR_EMAIL`) |
 | (e) Plazos de retención y variables nuevas con sus valores por omisión | 20.2, 20.8 y la tabla de 22.4 |
 | (f) Volver atrás | 22.5 (más 13.8, 15.2, 18.10, 19.11 y 20.12 por story) |
-| (g) Healthcheck `iddoc:backfill --check` en `deploy.sh` | 15.3 (ya lo ejecuta `deploy/deploy.sh`) |
+| (g) Healthcheck `iddoc:backfill --check` | 15.3 (lo ejecuta `deploy/deploy.sh`, topología A) y **22.2b** (el equivalente a mano en Dokploy, topología B) |
 | IP real del cliente (Traefik/Nginx), defensa CSRF del BFF, `PUBLIC_ORIGIN` | 9.4 y 17.8 |
 | Reloj y zona horaria de la base | 20.5 y 21 |
 
@@ -2481,10 +2506,24 @@ Esta sección es para Angel. No añade comportamiento: reúne en un orden de ope
 
 1. **Claves, antes que nada.** `openssl rand -base64 32` una vez por cada clave (`IDDOC_ENC_KEYS=1:<clave>`, `IDDOC_ENC_ACTIVE_KEY=1`, `IDDOC_BLIND_KEY=<otra clave>`), **copia en un gestor de secretos fuera del servidor y separada de los backups de la base** (14.2: al menos dos copias, prueba de restauración), y solo entonces ponerlas en `/opt/212cc/<entorno>/shared/.env`. `pnpm iddoc:keys` es **solo para el `.env` local** y se niega a correr en producción (15.4). Perder `IDDOC_ENC_KEYS` hace irrecuperables las cédulas (A92); la clave ciega no rota (A97).
 2. **Variables.** Las nuevas con sus valores por omisión están en 22.4; las que **tienes que decidir** están en la checklist (22.7). Con `NODE_ENV=production` el job de retención arranca solo y `PURGE_USAGE_LOG_DAYS` sin definir es 7.
-3. **`deploy/deploy.sh`** (solo, no a mano): valida el llavero (`check-keyring`) y la configuración de retención (`check-config`) antes de migrar; `prisma migrate deploy` con `MIGRATE_DATABASE_URL`; reinicio y health check; después `pnpm iddoc:backfill` y `pnpm iddoc:backfill --check`. Si el backfill o su check fallan el servicio **sigue en pie y sirviendo** y el despliegue termina con código 1 (15.3, 15.7). Migrar **antes** de reiniciar (18.1, 19.3): las migraciones del epic son aditivas.
-4. **Rol de BD limitado** (13.3, fuera de hora punta y **primero en staging**): `DB_ROLES_ENV=<entorno> APP_DB_PASSWORD='...' pnpm db:roles`, `DATABASE_URL` = el rol `collectorsclub_<entorno>_app`, `MIGRATE_DATABASE_URL` = el propietario, reinicio y la verificación `\dp "Audit_Events"` / `has_table_privilege` de 13.3. Hasta este paso `Audit_Events` solo lo protegen los triggers (A90).
+3. **`deploy/deploy.sh`** (topología A, VPS con systemd; solo, no a mano; **en Dokploy los mismos pasos se hacen a mano: 22.2b**): instala con un `DATABASE_URL` de relleno solo para `prisma generate` (el `.env` real se carga más abajo; en un primer despliegue el shell no tiene ninguno y antes fallaba con `PrismaConfigEnvError: Cannot resolve environment variable: DATABASE_URL`; ver 22.9), valida el llavero (`check-keyring`) y la configuración de retención (`check-config`) antes de migrar; `prisma migrate deploy` con `MIGRATE_DATABASE_URL`; reinicio y health check; después `pnpm iddoc:backfill` y `pnpm iddoc:backfill --check`. Si el backfill o su check fallan el servicio **sigue en pie y sirviendo** y el despliegue termina con código 1 (15.3, 15.7). Migrar **antes** de reiniciar (18.1, 19.3): las migraciones del epic son aditivas.
+4. **Rol de BD limitado** (13.3, fuera de hora punta y **primero en staging**), en dos pasos con dos privilegios distintos: **A**, el superusuario de PostgreSQL crea el rol (`CREATE ROLE ... PASSWORD :'verifier'`, 13.3 paso 2; el propietario de 1.2 **no puede**); **B**, el propietario de las tablas ejecuta `DB_ROLES_ENV=<entorno> pnpm db:roles` (sin contraseña). Después `DATABASE_URL` = el rol `collectorsclub_<entorno>_app`, `MIGRATE_DATABASE_URL` = el propietario (en Dokploy, las dos en *Environment*, 17.8), reinicio y la verificación `\dp "Audit_Events"` / `has_table_privilege` de 13.3. Tras restaurar una copia, solo el paso B. Hasta este paso `Audit_Events` solo lo protegen los triggers (A90).
 5. **Frontend del epic (20.9) y `CHECKOUT_REQUIRE_BUYER_ID=true` en la misma ventana** (16.2: activarlo antes de que el frontend envíe `buyerId` hace fallar el 100 % de los checkouts). Con el frontend desplegado: `CHECKOUT_REQUIRE_SHIPPING=true` (12.4) y `PUBLIC_ORIGIN` si hay un proxy que reescribe el Host (17.8, «Defensa CSRF del BFF»).
-6. **Verificación posterior**: `pnpm iddoc:report` (sin filas en claro), `POST /api/v1/admin/audit/verify` → `ok`, `GET /api/v1/admin/audit/head` anotado fuera de la base (13.5), `GET /api/v1/admin/retention/config` con los plazos esperados y un `POST /api/v1/admin/retention/run` manual en staging.
+6. **Verificación posterior**: `pnpm iddoc:report` (sin filas en claro), `POST /api/v1/admin/audit/verify` → `ok`, `GET /api/v1/admin/audit/head` anotado fuera de la base (13.5), `GET /api/v1/admin/retention/config` con los plazos esperados y un `POST /api/v1/admin/retention/run` manual. **Ojo en staging:** el job de retención solo está activo con `NODE_ENV=production` (20.2), y `POST /admin/retention/run` con `NODE_ENV=staging` (1.5) responde **409 `RETENTION_DISABLED`**, que es lo esperado, no un fallo. Para probar la purga en staging fija `RETENTION_PURGE_ENABLED=true` en su `.env` (o en *Environment*), reinicia y repite la llamada (20.2 explica qué se purga; **hazlo con una copia reciente de la base de staging, las purgas son definitivas**, 22.5); quítala después si staging no debe purgar sola.
+
+### 22.2b Dokploy (topología B): lo que `deploy.sh` hace en el VPS, a mano
+
+`deploy/deploy.sh` solo existe para el VPS con systemd. En Dokploy el contenedor del backend ejecuta su `CMD` (`pnpm prisma:deploy && exec node dist/main`: migra con `MIGRATE_DATABASE_URL` y arranca) y **nada valida antes ni ejecuta el backfill después**. Equivalencias, con el directorio del proyecto compose de Dokploy en el servidor (donde `docker compose` lee el *Environment* del servicio; en el compose de 17.8 el servicio se llama `backend`) o la pestaña *Terminal* del servicio:
+
+| Paso de `deploy.sh` | Dokploy |
+|---|---|
+| Validar el llavero **antes** de migrar y reiniciar | Con la **imagen nueva ya descargada** y **antes** de desplegarla sobre la vieja: `docker compose run --rm --no-deps --entrypoint "" backend node dist/crypto/cli/check-keyring.js` (lee el entorno del servicio, imprime nombres y versiones, nunca una clave; 0 = válido). Sin esto, un llavero inválido o una copia de `.env.example` deja el contenedor en bucle de reinicio. |
+| Validar la configuración de retención (`check-config`) | Igual: `docker compose run --rm --no-deps --entrypoint "" backend node dist/retention/cli/check-config.js` (20.2). |
+| `prisma migrate deploy` con `lock_timeout` de 10 s | Lo hace el `CMD` al arrancar, con `MIGRATE_DATABASE_URL`. **No** añade el `lock_timeout`: ponlo en la propia URL (`...?schema=public&options=-c%20lock_timeout%3D10000`; `prisma.config.ts` conserva el `options` que ya traiga). Un solo réplica, sin migradores concurrentes. |
+| Reinicio y health check | Dokploy; el health check es `GET /api/v1/health` por `cc-backend:3000`. |
+| `pnpm iddoc:backfill`, luego `pnpm iddoc:backfill --check` (apartado (g)) | Con el servicio ya sano: `docker compose exec backend pnpm iddoc:backfill` y después `docker compose exec backend pnpm iddoc:backfill --check` (código 0 en ambos; corren con `DATABASE_URL`, el rol limitado; son idempotentes y se reanudan; fallo = 15.7). El servicio sigue sirviendo mientras tanto. Hazlo tras **cada** despliegue que traiga migraciones de 20.3 y como comprobación periódica. |
+
+Los pasos 1, 4, 5 y 6 de 22.2 valen igual en las dos topologías (el paso 4 se ejecuta contra el PostgreSQL de Dokploy: `docker exec -u postgres <contenedor-postgres> psql ...` para el paso A, y el B desde donde llegues a la base como propietario con el repo y `pnpm`). **No verificado contra un Dokploy real**; sí cada comando por separado (los CLI leen el entorno del proceso cuando no se les da `--env-file`).
 
 ### 22.3 Fase 2: quitar la cédula en claro (documentada, **no** implementada en este epic)
 
@@ -2585,12 +2624,60 @@ El texto fuente que siembra `pnpm seed:legal` (y `prisma:seed`) vive en `prisma/
 - [ ] **Plazo fiscal** (cédula, datos de factura y comprobantes de Pago Móvil): hoy se asume ~10 años (A86), **a confirmar con el contador o el abogado**; escribirlo en `[[PLAZO_CONSERVACION_FISCAL]]` y `[[PLAZO_CONSERVACION_COMPROBANTES]]`. Hasta entonces no se borra nada de eso (20.8 punto 1).
 - [ ] **Rol de BD limitado** en producción (22.2 paso 4, 13.3) y **`AUDIT_ANCHOR_EMAIL`** con un buzón que no controle quien administra la BD (13.5).
 - [ ] **El resto de marcadores de la Política** (22.6): los supuestos marcados y los `CONFIRMAR_*` de 12.5 B.
+- [ ] **`[[VERIFICAR_AUTORIDAD_Y_DATOS_DE_CONTACTO_VIGENTES]]`** (aviso legal, 12.5): comprueba la autoridad de supervisión y los datos de contacto vigentes antes de publicar; el marcador bloquea la publicación hasta que alguien lo resuelva.
+- [ ] **`[[CONFIRMAR_BORRADO_DE_CUENTA_IMPLEMENTADO]]`** (privacidad, 22.6): confirma que el cierre de cuenta (anonimización, 18) funciona en el entorno real tal como lo describe la Política, y quita el marcador.
+- [ ] **`[[CONFIRMAR_LIBRETA_DE_DIRECCIONES_EN_SERVIDOR]]`** (privacidad §2, 22.6): confirma que la libreta vive en el servidor (cédula cifrada; nombre, teléfono y dirección **sin** cifrar) y que el navegador ya no la guarda, y quita el marcador.
 
 **Observaciones de despliegue**
 
 - [ ] **Define `PUBLIC_ORIGIN` en producción** (frontend, `https://dominio-publico`, sin barra final): si un proxy reescribe el Host, sin ella toda escritura del BFF da 403 `ORIGIN_MISMATCH` (17.8). Con Traefik, que conserva el Host, no hace falta, pero fijarla es más seguro.
 - [ ] **`TRUST_PROXY=1` emite un warn** (observación registrada por el coordinador; el valor `1` es un número de saltos, no la subred estrecha que pide 17.8 para Traefik → Next → Nest en contenedores distintos). Usa la subred estrecha de 17.8 (p. ej. `172.30.212.0/28`) y mira el log de arranque: no debe haber WARN de `TRUST_PROXY` ni el WARN en ejecución de IP privada. No se pudo reproducir aquí el origen exacto del aviso con `1`: confírmalo en staging.
-- [ ] **`pnpm db:roles` solo lo puede ejecutar un superusuario**: crea el rol de la app y concede privilegios sobre todas las tablas. No lo ejecutes con el rol limitado ni con la cuenta de la app (13.3).
+- [ ] **`pnpm db:roles` necesita dos privilegios distintos** (13.3): crear el rol lo hace un superusuario (o `CREATEROLE`), nunca el propietario normal de 1.2 ni el rol limitado; los `GRANT` y los privilegios por defecto los ejecuta **el propietario real de las tablas** (`MIGRATE_DATABASE_URL`). Tras restaurar una copia, solo la parte del propietario y sin contraseña.
 - [ ] **Exposición de Swagger en producción** (`/api/docs`, `/api/docs-json`): hoy se monta siempre. Decisión **para la auditoría de seguridad** (restringirlo por Nginx/Traefik o apagarlo con `NODE_ENV=production`).
 - [ ] **Para la auditoría de seguridad: `filterHasIdDoc` del frontend es heurístico** (observación del QA de 20.9; **no se corrige aquí**). Es la función que decide si un filtro de texto del admin parece una cédula para enviarlo por cuerpo y no por URL. Una cédula con dígitos de ancho completo (`Ｖ12345678`) en el filtro `entityId` **llega al backend y este responde 200** (no se rechaza ni se redirige al cuerpo), y hay falsos positivos con identificadores numéricos de 6 a 10 dígitos y con RIF `G…`. Proponer que el backend normalice (NFKC) antes de decidir, y que la regla viva en un solo sitio.
+- [ ] **Construye Next SIEMPRE con `BACKEND_API_URL` definida** (frontend, `Dockerfile` `ARG BACKEND_API_URL`; en el VPS, en el entorno del `pnpm build`). `lib/axios.ts` usa `process.env.BACKEND_API_URL || 'https://api.212collectorsclub.com/api/v1'`: una imagen o un build **sin** ella queda apuntando **a producción**, también en staging (una prueba de staging escribiría pedidos y clientes reales). Para Dokploy: `http://cc-backend:3000/api/v1` (17.8). No se hizo fallar el build en producción: staging también se construye con `NODE_ENV=production` y no hay forma segura de distinguirlo; la comprobación es manual (que el `BACKEND_API_URL` del `Dockerfile` no esté vacío en el log de build).
+- [ ] **Fija la versión de pnpm con corepack** en el servidor (1.1): `corepack prepare pnpm@11.5.3 --activate`. En el `Dockerfile` ya viene de la imagen; en el VPS, sin ello `corepack enable` toma la última y `pnpm install --frozen-lockfile` puede cambiar de comportamiento.
+- [ ] **Primer administrador y fila `default` de `Fx_Rate_Settings`** creados con el SQL de 22.8 (no con `prisma:seed`).
 - [ ] **El frontend ya no guarda la libreta en `localStorage`** pero un navegador con datos viejos los conserva hasta su primera visita; la purga es del cliente (22.6).
+
+### 22.8 Primer administrador y fila de tasa de cambio en producción (sin `prisma:seed`)
+
+`prisma:seed` es de desarrollo: usa `tsx` (no está en la imagen de producción), carga datos de ejemplo y, con `ADMIN_SEED_*`, **reescribe la contraseña** de un admin existente. En producción, con la base migrada, se crean a mano estas dos filas (el propietario, `psql`; ejecutado tal cual contra una base migrada desechable, y re-ejecutable: `ON CONFLICT DO NOTHING`).
+
+**Primer administrador.** La contraseña se convierte en hash Argon2id (el mismo que usa el login) sin escribirla en la línea de comandos; la fila de `Admin_Account` de BetterAuth se crea sola en el primer inicio de sesión (*lazy provisioning*, `admin-auth.service.ts`):
+
+```bash
+cd /opt/212cc/<entorno>/app     # o dentro del contenedor del backend en Dokploy
+read -rsp 'Contraseña del admin: ' ADMIN_PW; echo
+ADMIN_HASH="$(printf '%s' "$ADMIN_PW" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',async()=>{const a=await import('argon2');console.log(await a.hash(d,{type:a.argon2id}))})")"
+unset ADMIN_PW
+psql "$MIGRATE_DATABASE_URL" -v ON_ERROR_STOP=1 -v hash="$ADMIN_HASH" <<'SQL'
+INSERT INTO "Admin_Users" ("id", "username", "email", "passwordHash", "updatedAt")
+VALUES (gen_random_uuid(), '<usuario>', '<correo-del-admin>', :'hash', now())
+ON CONFLICT ("username") DO NOTHING;
+SQL
+unset ADMIN_HASH
+```
+
+(`psql` no acepta la `?schema=public` de Prisma en la URL: quítala o usa `psql -h ... -U ... -d ...`.) Entra por `/admin` y **cambia la contraseña** si la compartiste. No uses `ADMIN_SEED_*` en producción.
+
+**Fila `default` de `Fx_Rate_Settings`** (sin ella `FX_RATE_UNAVAILABLE`: el checkout en bolívares no funciona hasta que haya tasa, §11). Pon la tasa **real** de hoy (VES por USD), no un valor de ejemplo; después el refresco automático y el panel FX (§11, 11.6) la mantienen:
+
+```sql
+INSERT INTO "Fx_Rate_Settings" ("id", "vesPerUsd", "updatedAt", "rateFetchedAt")
+VALUES ('default', <tasa-real-VES-por-USD>, now(), now())
+ON CONFLICT ("id") DO NOTHING;
+```
+
+(La fuente por defecto es `BCV_USD`, `maxAgeHours` 48 y `maxVariationPct` 15: columnas con valor por omisión.) Comprueba con `GET /api/v1/admin/fx` (o el panel) que la fila aparece.
+
+### 22.9 Ronda 1 de QA de la 20.10: qué cambió y cómo se comprobó
+
+- **D1, primer despliegue (`deploy.sh`).** `pnpm install` (cuyo `postinstall` es `prisma generate`) corría antes de cargar el `.env`: `PrismaConfigEnvError`. Ahora lleva su propio `DATABASE_URL` de relleno (`postgresql://build:build@localhost:5432/build`, como el `Dockerfile`), solo para ese comando; `prisma generate` no se conecta y el secreto real no interviene. Reproducido y comprobado en un worktree limpio con `pnpm install --offline --frozen-lockfile` y `env -i`: sin el relleno falla con ese error; con él, `Generated Prisma Client`. `src/deploy/deploy-static.spec.ts` lo fija (la línea de instalación lleva el relleno y va antes de `source "$ENV_FILE"`).
+- **D2, rol de BD.** 13.3 (dos fases, quién puede qué), 22.2 paso 4 y 22.7. Probado contra PostgreSQL 17 desechable (`d2010r1-pg`) con un propietario creado como 1.2, dos ejecuciones seguidas por escenario (ver 13.3 paso 6).
+- **D3, retención en staging.** 22.2 paso 6: el 409 `RETENTION_DISABLED` con `NODE_ENV=staging` es el comportamiento esperado; `RETENTION_PURGE_ENABLED=true` lo cambia.
+- **D4, Dokploy.** Compose de 17.8 con `MIGRATE_DATABASE_URL`, `FRONTEND_URL`, `CHECKOUT_REQUIRE_*`, `LEGAL_REQUIRE_PUBLISHED`, `AUDIT_ANCHOR_EMAIL` y `STRIPE_SECRET_KEY`, y 22.2b con los equivalentes de `check-keyring`, `check-config` y `iddoc:backfill`.
+- **D5, bug de producto en la paginación del log de uso.** `usage-read.service.ts` seleccionaba `"id"::text AS "id"` y ordenaba con `ORDER BY "id"`: en SQL un nombre de columna de salida gana sobre la columna de entrada en un `ORDER BY` simple, así que ordenaba **como texto** (`'99'` después de `'100'`) mientras el cursor `"id" < ?::bigint` es numérico: se perdían filas al cruzar una potencia de 10 (QA: 111 de 130). Ahora ordena `ORDER BY u."id"` (la columna `bigint` de la tabla). Revisadas todas las consultas de `src/` con `x::text AS x`: solo `iddoc-migration.service.ts` repite el patrón y allí los ids son uuid (el texto de un uuid ordena igual que el uuid: hexadecimal en minúsculas de ancho fijo con los guiones en el mismo sitio), lo fija `src/deploy/deploy-static.spec.ts` con esa excepción explícita. Auditoría (`ORDER BY "seq"`) y retención no usan el alias de texto. Test e2e determinista en `test/usage-log.e2e-spec.ts`: 130 filas con ids explícitos de 9 999 999 950 a 10 000 000 079 (cruzan 10^10, sin tocar la secuencia real), tres páginas sin repetir ni saltar y en orden descendente exacto.
+- **Tests herméticos.** `admin-betterauth` AC10 retira `ADMIN_AUTH_SECRET`/`ADMIN_JWT_SECRET` de `process.env` mientras construye el módulo (y las restaura); el e2e «rol limitado» de `usage-log` crea su propio rol con `scripts/db-roles.sql` en el clon y lo borra (ya no mira los `collectorsclub_*_app` del clúster); los tres `vitest.config*.ts` generan las claves `IDDOC_*` de prueba con `generateIdDocTestEnv({})` (ya no heredan un `IDDOC_ENC_KEYS` exportado).
+- **Texto legal.** `privacidad.md` §6 y §9: solo la cédula o RIF se guarda cifrada; nombre, teléfono y dirección **no**. `cookies.md`: la cookie de sesión es `cc_session` y, en producción con HTTPS, el navegador la guarda como `__Secure-cc_session`. Si ya sembraste los documentos, aplica el cambio como en 22.6 (los textos fuente no sobrescriben un borrador existente).
+- **Frontend.** Los botones «Ver» de la auditoría plena tenían 22×18 px; ahora `min-h-11 min-w-11` (44 px) en móvil y `md:min-h-6 md:min-w-6` (24 px) desde 768 px.

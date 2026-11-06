@@ -13,7 +13,7 @@ export default defineConfig({
     // Story 19.3b: `pnpm test` is correctness only; time budgets live in
     // `*.perf.spec.ts` (run them with `pnpm test:perf`).
     // Story 20.2: run-time generated, throw-away ID document keys.
-    env: generateIdDocTestEnv(),
+    env: generateIdDocTestEnv({}),
     exclude: [...configDefaults.exclude, '**/*.perf.spec.ts'],
   },
 });

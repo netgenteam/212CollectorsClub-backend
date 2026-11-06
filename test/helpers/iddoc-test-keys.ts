@@ -2,8 +2,10 @@ import { randomBytes } from 'node:crypto';
 
 /**
  * Story 20.2: throw-away ID-document keys for tests, generated at run time
- * (never committed, never a real key). Honours values already present in the
- * environment (CI or a developer who exports their own).
+ * (never committed, never a real key). Called with the default `base`
+ * (process.env) it honours values already present there; the vitest configs call it
+ * with `{}` (Story 20.10) so an exported `IDDOC_ENC_KEYS` (a real or a one-key ring)
+ * can never replace the run's own keys and break the rotation/boot tests.
  */
 export function generateIdDocTestEnv(
   base: Record<string, string | undefined> = process.env,
