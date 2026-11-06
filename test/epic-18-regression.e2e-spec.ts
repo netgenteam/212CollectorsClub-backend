@@ -40,6 +40,7 @@ import {
   snapshotVitrina,
   type VitrinaSnapshot,
 } from './helpers/vitrina-snapshot.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 const TAG = randomUUID().slice(0, 8);
 const USER = `e2e-epic18-${TAG}`;
@@ -305,7 +306,7 @@ describe('Epic 18 regression (e2e, Story 18.12)', { timeout: 120_000 }, () => {
     request(server())
       .post('/api/v1/checkout')
       .set('Cookie', await cart(id.FX))
-      .send(body(rail));
+      .send(withBuyerId(body(rail)));
 
   // ---- signals helpers ----------------------------------------------------
   const view = (productId: string, ip: string) =>

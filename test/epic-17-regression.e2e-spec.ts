@@ -11,6 +11,7 @@ import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { registerConsent } from './helpers/legal-consent.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 const PASSWORD = 'Correct-horse-17-6!';
 const SEEDED = ['MRW', 'ZOOM', 'TEALCA', 'DOMESA'];
@@ -117,7 +118,7 @@ describe('Epic 17 regression (e2e, Story 17.6)', { timeout: 60000 }, () => {
     return request(server())
       .post('/api/v1/checkout')
       .set('Cookie', cookie)
-      .send(body);
+      .send(withBuyerId(body));
   }
 
   beforeAll(async () => {

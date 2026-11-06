@@ -10,6 +10,7 @@ import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { registerConsent } from './helpers/legal-consent.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 interface CartBody {
   items: { productId: string; quantity: number }[];
@@ -427,15 +428,17 @@ describe('Account cart and wishlist with login merge (e2e, Story 12.5)', () => {
       const out = await request(server())
         .post('/api/v1/checkout')
         .set('Cookie', anon)
-        .send({
-          paymentRail: 'pago_movil',
-          fulfillmentType: 'delivery',
-          addressLine1: 'Av. Test 1',
-          city: 'Caracas',
-          state: 'Distrito Capital',
-          recipientName: 'Maria Perez',
-          recipientPhone: '0412-1234567',
-        })
+        .send(
+          withBuyerId({
+            paymentRail: 'pago_movil',
+            fulfillmentType: 'delivery',
+            addressLine1: 'Av. Test 1',
+            city: 'Caracas',
+            state: 'Distrito Capital',
+            recipientName: 'Maria Perez',
+            recipientPhone: '0412-1234567',
+          }),
+        )
         .expect(422);
       expect((out.body as { errorCode: string }).errorCode).toBe('EMPTY_CART');
 

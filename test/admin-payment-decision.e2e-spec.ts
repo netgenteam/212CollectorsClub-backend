@@ -7,6 +7,7 @@ import * as argon2 from 'argon2';
 import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 type App = Parameters<typeof request>[0];
 
@@ -156,7 +157,7 @@ describe('AdminOrdersController — Story 9.2 payment decisions (e2e)', () => {
     const checkoutRes = await request(app.getHttpServer())
       .post('/api/v1/checkout')
       .set('Cookie', cartCookie)
-      .send(pagoMovilBody())
+      .send(withBuyerId(pagoMovilBody()))
       .expect(201);
     const body = checkoutRes.body as CheckoutResponse;
     return { orderId: body.orderId, orderAccessToken: body.orderAccessToken };

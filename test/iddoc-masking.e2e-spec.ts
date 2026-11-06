@@ -12,6 +12,7 @@ import { createGlobalValidationPipe } from './../src/common/global-validation-pi
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { appCrypto, expectOnlyEncrypted } from './helpers/iddoc-assert.js';
 import { registerConsent } from './helpers/legal-consent.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 const PASSWORD = 'Correct-horse-20-3!';
 /** Synthetic sentinel (no real person): its digits must never appear in any non-admin response or log. */
@@ -92,7 +93,7 @@ describe('ID document masking (e2e, Story 20.3)', { timeout: 60000 }, () => {
     return request(server())
       .post('/api/v1/checkout')
       .set('Cookie', s ?? cookieOf(added, 'cartId'))
-      .send(body);
+      .send(withBuyerId(body));
   }
   const noClearValue = (body: unknown): void => {
     const json = JSON.stringify(body);

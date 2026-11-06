@@ -34,11 +34,14 @@ export const isAgencyFormat = (body: Record<string, unknown>): boolean =>
  * the agency / saved-address format buys "as the recipient", the legacy flat format sends an
  * explicit V number (it has no recipient cedula to copy).
  */
-export function withBuyerId<T extends Record<string, unknown>>(
+export function withBuyerId<T extends object>(
   body: T,
 ): T & Record<string, unknown> {
-  if ('buyerId' in body || 'buyerSameAsRecipient' in body) return body;
-  return isAgencyFormat(body)
-    ? { ...body, buyerSameAsRecipient: true }
-    : { ...body, buyerId: { ...E2E_BUYER } };
+  const b = body as Record<string, unknown>;
+  if ('buyerId' in b || 'buyerSameAsRecipient' in b)
+    return body as T & Record<string, unknown>;
+  return (isAgencyFormat(b)
+    ? { ...b, buyerSameAsRecipient: true }
+    : { ...b, buyerId: { ...E2E_BUYER } }) as unknown as T &
+    Record<string, unknown>;
 }

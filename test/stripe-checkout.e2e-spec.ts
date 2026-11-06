@@ -14,6 +14,7 @@ import { PaymentProcessingTimeoutCronService } from './../src/orders/cron/paymen
 import { StockHoldExpiryCronService } from './../src/orders/cron/stock-hold-expiry-cron.service.js';
 import { FakeStripeClient } from './../src/payments-stripe/fake-stripe-client.js';
 import { registerConsent } from './helpers/legal-consent.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 // Story 14.4 e2e: checkout with paymentRail=stripe (FR-57, AD-46, AD-44).
 const TAG = randomUUID().slice(0, 8);
@@ -157,7 +158,7 @@ describe('Stripe checkout (e2e, Story 14.4)', () => {
     request(server())
       .post('/api/v1/checkout')
       .set('Cookie', cookie)
-      .send(body(over));
+      .send(withBuyerId(body(over)));
 
   it('AC1/AC2/AC4: guest checkout creates a PAYMENT_PROCESSING order with one 65-min hold per line (14.5b), session args computed server-side, success lookup stays payment_processing', async () => {
     const p1 = await makeProduct(
@@ -302,7 +303,7 @@ describe('Stripe checkout (e2e, Story 14.4)', () => {
     const res = await request(server())
       .post('/api/v1/checkout')
       .set('Cookie', s)
-      .send(body())
+      .send(withBuyerId(body()))
       .expect(201);
     const out = res.body as StripeCheckoutBody;
     expect(out.stripe).not.toBeNull();
@@ -462,7 +463,7 @@ describe('Stripe checkout (e2e, Story 14.4)', () => {
           : request(server())
               .post('/api/v1/checkout')
               .set('Cookie', c)
-              .send(pmBody),
+              .send(withBuyerId(pmBody)),
       ),
     );
     expect(rs.filter((r) => r.status === 201)).toHaveLength(1);

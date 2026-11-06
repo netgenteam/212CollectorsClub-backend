@@ -9,6 +9,7 @@ import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { FAKE_STRIPE_WEBHOOK_SECRET } from './../src/payments-stripe/fake-stripe-client.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 type App = Parameters<typeof request>[0];
 
@@ -208,15 +209,17 @@ describe('Order status lookup + history (e2e, Story 5.1)', () => {
     const checkoutRes = await request(app.getHttpServer())
       .post('/api/v1/checkout')
       .set('Cookie', cartCookie)
-      .send({
-        paymentRail: 'stripe',
-        fulfillmentType: 'delivery',
-        addressLine1: 'Av. Test 1',
-        city: 'Caracas',
-        state: 'Distrito Capital',
-        recipientName: 'Order Lookup E2E Buyer',
-        recipientPhone: '0412-9999999',
-      })
+      .send(
+        withBuyerId({
+          paymentRail: 'stripe',
+          fulfillmentType: 'delivery',
+          addressLine1: 'Av. Test 1',
+          city: 'Caracas',
+          state: 'Distrito Capital',
+          recipientName: 'Order Lookup E2E Buyer',
+          recipientPhone: '0412-9999999',
+        }),
+      )
       .expect(201);
     const body = checkoutRes.body as CheckoutResponse;
     if (!body.stripe) {

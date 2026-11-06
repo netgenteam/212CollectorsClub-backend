@@ -992,11 +992,13 @@ Marca cada punto solo cuando lo hayas comprobado tú. Los textos sembrados son *
 
 *Dependen del negocio, el contador o el abogado (no del código):* `CONFIRMAR_PRODUCTOS_ORIGINALES_CON_EL_DUENO`, `CONFIRMAR_UBICACION_DE_PROVEEDORES`, `CONFIRMAR_QUIEN_PAGA`, `CONFIRMAR_IVA_E_IGTF_CON_CONTADOR`, `CONFIRMAR_METODO_DE_FACTURACION_CON_CONTADOR`, `CONFIRMAR_METODOS_DE_PAGO_VIGENTES`, `CONFIRMAR_CRITERIO_DE_TASA_EN_REEMBOLSOS`, `CONFIRMAR_CON_ABOGADO_QUE_NO_REQUIERE_CONSENTIMIENTO` y `CONFIRMAR_CON_ABOGADO`.
 
-*Dependen del Epic 20 (Stories 20.2 a 20.9): NO confirmar todavía.*
+*Dependen del Epic 20 (Stories 20.2 a 20.9): IMPLEMENTADO desde el cierre del epic (20.10). Un marcador se quita solo tras comprobar en el entorno publicado lo que afirma; la comprobación de cada uno está en 22.6.*
 
-- [ ] `CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA` (20.2, 20.3, 20.4, 20.9): el Epic 20 aún no está implementado: la cédula no se cifra en la base y la consulta de pedido la devuelve completa (sin enmascarar).
-- [ ] `CONFIRMAR_CEDULA_EN_ALMACENAMIENTO_LOCAL_DEL_NAVEGADOR` (20.9): la libreta del frontend guarda la cédula en `localStorage` en claro (sin story que lo corrija todavía fuera del 20.9).
+- [ ] `CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA` (20.2, 20.3, 20.4, 20.9): la cédula se guarda cifrada (`...Enc`) y se muestra enmascarada. Compruébalo con `pnpm iddoc:backfill --check` (0) y `pnpm iddoc:report` (sin filas en claro) y mirando una orden en el admin. Las columnas en claro siguen existiendo hasta la fase 2 (22.3): lo prometido es que **no se usan** para leer, no que ya no existan.
+- [ ] `CONFIRMAR_CEDULA_EN_ALMACENAMIENTO_LOCAL_DEL_NAVEGADOR` (20.9): ya **no** es cierto que la libreta se guarde en `localStorage`: la libreta vive en el servidor y el frontend borra al cargar toda clave `212_customer_addresses_*` heredada (`lib/privacy/legacy-storage.ts`). Los textos `privacidad` §2/§7 y `cookies` lo dicen así (22.6). Compruébalo en el navegador del sitio publicado (DevTools → Application → Local Storage: ninguna clave `212_customer_addresses_*` tras entrar).
 - [ ] `CONFIRMAR_RETENCION_FISCAL_DE_CEDULA_IMPLEMENTADA` (20.6 y 20.8) y `CONFIRMAR_REGISTRO_DE_CONSULTAS_DE_CEDULA_IMPLEMENTADO` (20.4, 20.5 y 20.7): todavía no existen.
+- [ ] `CONFIRMAR_DATOS_DE_FACTURACION_DEL_COMPRADOR_IMPLEMENTADOS` (20.4 y 20.9, `privacidad` §2): el checkout pide el nombre o razón social y la cédula o RIF del comprador. Solo es cierto con `CHECKOUT_REQUIRE_BUYER_ID=true` (16.2) y el frontend de 20.9 desplegado.
+- [ ] `CONFIRMAR_CANAL_DE_SOLICITUDES_DE_CIERRE_DE_CUENTA` (A93, `privacidad` §9): el correo o formulario que el texto anuncia para pedir el cierre de cuenta existe, alguien lo atiende y sabe ejecutar la anonimización desde el admin (`/admin/clientes`, 18.4). Hasta que exista el autoservicio «Mi cuenta» es el único canal.
 - [ ] `CONFIRMAR_REGISTRO_DE_USO_7_DIAS_IMPLEMENTADO` (20.7, `privacidad` §2, §3, §7 y §9): confírmala cuando el despliegue tenga la migración `20261110100000_add_usage_logs_retention`, el log activo (`USAGE_LOG_ENABLED` no es `false`) y la purga diaria funcionando (`PURGE_USAGE_LOG_DAYS`, 19.6). **`CONFIRMAR_CON_ABOGADO_BASE_LEGAL_DEL_REGISTRO_DE_USO`** (20.7) es del abogado: si el interés legítimo basta para guardar IP y agente de usuario 7 días y si ese plazo es el adecuado (19.2).
 - [ ] `[[PLAZO_CONSERVACION_CONTACTO]]` (`privacidad` §7) **debe decir lo mismo que `PURGE_CONTACT_MONTHS`** (20.8 ronda 2): el valor por omisión es **12 meses**; el job borra los mensajes de contacto a los N meses de calendario (`PURGE_CONTACT_MONTHS`, 3..60) y el texto legal promete un plazo escrito a mano; el sistema no los compara. Antes de publicar `privacidad`: `node dist/retention/cli/check-config.js --env-file <el .env del servidor>` imprime `PURGE_CONTACT_MONTHS=<N>` (o mira `GET /admin/retention/config`, `periods.contactMonths`) y escribe **ese mismo número de meses** en el marcador. Si el abogado o el contador fijan otro plazo (la auditoría legal dice 12-24 meses), cambia **los dos** a la vez y reinicia.
 - [ ] `CONFIRMAR_BORRADO_DE_SESIONES_VENCIDAS_IMPLEMENTADO` y `CONFIRMAR_BORRADO_DE_CARRITOS_Y_LISTAS_ANONIMOS_VENCIDOS_IMPLEMENTADO` (20.8, ver §20): el job existe y el texto de `privacidad` §7 coincide con lo que hace (sesión vencida: se elimina a los 7 días de vencer; IP y agente: se anulan a los 90 días de **creada** la sesión y solo si ya venció, una sesión viva no se toca; carritos y listas anónimos: se eliminan al vencer su cookie de 30 días con renovación). **Confírmalos solo cuando la corrida ya haya pasado en producción**: despliega con `NODE_ENV=production` (el job arranca solo en producción o con `RETENTION_PURGE_ENABLED=true`), pulsa `POST /admin/retention/run` o espera la de las 04:30 UTC y mira `GET /api/v1/admin/retention/runs` (estado `OK`, `auditedAt` no nulo, las tareas `sessions_expired`, `session_pii`, `anon_carts` y `anon_wishlists` sin `error`). Lo que el texto promete y el valor de la variable: `PURGE_SESSION_PII_DAYS` solo admite 30..90 justamente para que «90 días» no pueda volverse falso. **Los plazos de §7 que dependen de ti** (contactos 12 meses, comprobantes, cédula) están en §20.8, en la lista de decisiones.
@@ -2455,3 +2457,140 @@ Contenedor `postgres:17-alpine` desechable (`d208b-pg`, secretos y datos sintét
 | `America/New_York` | 102/102 | 1 497/1 497 | OK, 1 415 filas |
 
 (Dentro de cada una, `db-timezone.e2e-spec.ts` además pone el clon en las cuatro zonas: 36 pruebas.) Antes de arreglarlo, el mismo reproductor daba `CLOCK_SKEW` de 18 000 s con `America/New_York`; después, en una base en `America/Caracas`, un servidor real (`node dist/main.js`, `NODE_ENV=development`, `RETENTION_PURGE_ENABLED=true`) respondió `POST /admin/retention/run` con corrida `OK`, `clockClamped=false`.
+
+
+## 22. Epic 20, Story 20.10: cierre del epic, runbook de despliegue y checklist de lanzamiento
+
+Esta sección es para Angel. No añade comportamiento: reúne en un orden de operación lo que 20.1 a 20.9 dejaron repartido, **no duplica** lo que ya está escrito (cada punto remite a su sección) y cierra la checklist de lanzamiento. La story pedía llamarla «§13»; el 13 ya es la Story 20.1, por eso es la 22.
+
+### 22.1 Dónde está cada cosa
+
+| Tema | Dónde |
+|---|---|
+| (a) Generar, respaldar, rotar y perder las claves `IDDOC_*` | 14.1 a 14.3 (y 22.2 paso 1) |
+| (b) Rol de BD limitado, `MIGRATE_DATABASE_URL`, verificación de `\dp "Audit_Events"` | 13.3 (y 22.2 paso 4) |
+| (c) Fase 2: quitar las columnas en claro | **22.3** (el SQL se documenta aquí; no está en `prisma/migrations`) |
+| (d) Anclaje externo del `head` de auditoría | 13.5 y 13.4 (`AUDIT_ANCHOR_EMAIL`) |
+| (e) Plazos de retención y variables nuevas con sus valores por omisión | 20.2, 20.8 y la tabla de 22.4 |
+| (f) Volver atrás | 22.5 (más 13.8, 15.2, 18.10, 19.11 y 20.12 por story) |
+| (g) Healthcheck `iddoc:backfill --check` en `deploy.sh` | 15.3 (ya lo ejecuta `deploy/deploy.sh`) |
+| IP real del cliente (Traefik/Nginx), defensa CSRF del BFF, `PUBLIC_ORIGIN` | 9.4 y 17.8 |
+| Reloj y zona horaria de la base | 20.5 y 21 |
+
+### 22.2 Orden de despliegue del epic completo (primera vez, staging antes que producción)
+
+1. **Claves, antes que nada.** `openssl rand -base64 32` una vez por cada clave (`IDDOC_ENC_KEYS=1:<clave>`, `IDDOC_ENC_ACTIVE_KEY=1`, `IDDOC_BLIND_KEY=<otra clave>`), **copia en un gestor de secretos fuera del servidor y separada de los backups de la base** (14.2: al menos dos copias, prueba de restauración), y solo entonces ponerlas en `/opt/212cc/<entorno>/shared/.env`. `pnpm iddoc:keys` es **solo para el `.env` local** y se niega a correr en producción (15.4). Perder `IDDOC_ENC_KEYS` hace irrecuperables las cédulas (A92); la clave ciega no rota (A97).
+2. **Variables.** Las nuevas con sus valores por omisión están en 22.4; las que **tienes que decidir** están en la checklist (22.7). Con `NODE_ENV=production` el job de retención arranca solo y `PURGE_USAGE_LOG_DAYS` sin definir es 7.
+3. **`deploy/deploy.sh`** (solo, no a mano): valida el llavero (`check-keyring`) y la configuración de retención (`check-config`) antes de migrar; `prisma migrate deploy` con `MIGRATE_DATABASE_URL`; reinicio y health check; después `pnpm iddoc:backfill` y `pnpm iddoc:backfill --check`. Si el backfill o su check fallan el servicio **sigue en pie y sirviendo** y el despliegue termina con código 1 (15.3, 15.7). Migrar **antes** de reiniciar (18.1, 19.3): las migraciones del epic son aditivas.
+4. **Rol de BD limitado** (13.3, fuera de hora punta y **primero en staging**): `DB_ROLES_ENV=<entorno> APP_DB_PASSWORD='...' pnpm db:roles`, `DATABASE_URL` = el rol `collectorsclub_<entorno>_app`, `MIGRATE_DATABASE_URL` = el propietario, reinicio y la verificación `\dp "Audit_Events"` / `has_table_privilege` de 13.3. Hasta este paso `Audit_Events` solo lo protegen los triggers (A90).
+5. **Frontend del epic (20.9) y `CHECKOUT_REQUIRE_BUYER_ID=true` en la misma ventana** (16.2: activarlo antes de que el frontend envíe `buyerId` hace fallar el 100 % de los checkouts). Con el frontend desplegado: `CHECKOUT_REQUIRE_SHIPPING=true` (12.4) y `PUBLIC_ORIGIN` si hay un proxy que reescribe el Host (17.8, «Defensa CSRF del BFF»).
+6. **Verificación posterior**: `pnpm iddoc:report` (sin filas en claro), `POST /api/v1/admin/audit/verify` → `ok`, `GET /api/v1/admin/audit/head` anotado fuera de la base (13.5), `GET /api/v1/admin/retention/config` con los plazos esperados y un `POST /api/v1/admin/retention/run` manual en staging.
+
+### 22.3 Fase 2: quitar la cédula en claro (documentada, **no** implementada en este epic)
+
+Las columnas en claro (`Orders.recipientIdDoc` y `Customer_Addresses.recipientIdDoc`) siguen existiendo: son el respaldo de lectura y la vía de vuelta atrás (22.5). **No se quitan hasta verificar en producción que todo se lee y se revela desde `...Enc`** (NFR-20.1, A92). La fase 2 es una release posterior y separada, en este orden:
+
+1. **Release de código** que ya no lee la columna en claro como respaldo (hoy lo hacen `iddoc-migration`, `id-doc-reveal.service`, los serializadores de enmascarado y `redact`). Esa story aún no existe.
+2. En producción, con la release anterior: `pnpm iddoc:backfill --verify` debe terminar con código 0 (descifra **todas** las filas, compara con el claro y recalcula el índice ciego; ningún nombre con cédula) y `pnpm iddoc:backfill --check` también. Con cualquier diferencia **no se continúa** (15.7).
+3. `pnpm iddoc:backfill --scrub` (solo la libreta de direcciones; `Orders` nunca lo acepta; hace su propio `--verify` y vuelve a verificar cada fila bajo bloqueo antes de poner el claro a `NULL`).
+4. Respaldar la base **y las claves** (14.2) y desplegar la migración posterior `…_drop_plain_iddoc`. **Propuesta de SQL** (nueva, con `BEGIN;` en la primera línea y **sin** `lock_timeout`: `deploy.sh` ya lo pone por la sesión; sin guarda el `DROP` destruye datos):
+
+```sql
+BEGIN;
+
+-- Guarda: si queda un claro sin su cifrado, la migración se detiene y no borra nada.
+DO $$
+DECLARE
+  pending bigint;
+BEGIN
+  SELECT
+    (SELECT count(*) FROM "Orders"
+      WHERE "recipientIdDoc" IS NOT NULL AND btrim("recipientIdDoc") <> '' AND "recipientIdDocEnc" IS NULL)
+  + (SELECT count(*) FROM "Customer_Addresses"
+      WHERE "recipientIdDoc" IS NOT NULL AND btrim("recipientIdDoc") <> '' AND "recipientIdDocEnc" IS NULL)
+  INTO pending;
+  IF pending > 0 THEN
+    RAISE EXCEPTION 'IDDOC_BACKFILL_INCOMPLETE: % rows still hold a plain ID document without its encrypted copy; run pnpm iddoc:backfill and --verify first', pending
+      USING ERRCODE = 'P0001';
+  END IF;
+END
+$$;
+
+ALTER TABLE "Orders" DROP COLUMN "recipientIdDoc";
+ALTER TABLE "Customer_Addresses" DROP COLUMN "recipientIdDoc";
+
+COMMIT;
+```
+
+La guarda no ve el nombre con cédula dentro (`recipientName`): eso lo cubre `--check` del paso 2, que **tiene que haber pasado el mismo día**. Un archivo `iddoc-static.spec.ts` comprueba que esa migración **no** está en `prisma/migrations`: añadirla es una decisión de la story de fase 2, con su propio QA. Cuando esté hecha, el rollback de 22.5 deja de existir para esas columnas: **la copia previa a la migración y las claves pasan a ser la única vuelta atrás**.
+
+### 22.4 Variables nuevas del epic y sus valores por omisión (resumen; la fuente es `.env.example`)
+
+| Variable | Defecto | Notas |
+|---|---|---|
+| `IDDOC_ENC_KEYS`, `IDDOC_ENC_ACTIVE_KEY`, `IDDOC_BLIND_KEY` | **obligatorias, sin defecto** | 14.1. La app no arranca sin ellas. |
+| `RIF_CHECKDIGIT_STRICT` | sin definir = estricto | Recomendación: **`false`** hasta confirmar un RIF real (16.4). |
+| `CHECKOUT_REQUIRE_BUYER_ID` | `false` | Poner `true` con el frontend de 20.9 (16.2). |
+| `ID_DOC_REVEAL_MAX_PER_HOUR` | `30` | Revelados por admin y hora. |
+| `MIGRATE_DATABASE_URL` | = `DATABASE_URL` | Propietario, para migraciones y `db:roles` (13.3). |
+| `AUDIT_VERIFY_CRON`, `AUDIT_VERIFY_CRON_MODE`, `AUDIT_VERIFY_ENABLED`, `AUDIT_PAYLOAD_STRICT`, `AUDIT_ANCHOR_EMAIL` | `0 5 * * 0` UTC, `full`, `true`, estricto salvo producción, sin definir | 13.4. Definir `AUDIT_ANCHOR_EMAIL` (13.5). |
+| `ADMIN_LOGIN_MAX_FAILURES_PER_IP`, `ADMIN_LOGIN_MAX_FAILURES_PER_USER`, `ADMIN_LOGIN_WINDOW_MS`, `AUDIT_LOGIN_FAILED_MAX_PER_MINUTE`, `AUDIT_LOGIN_FAILED_MAX_IN_FLIGHT` | `20`, `5`, `900000`, `20`, `4` | 17.3. |
+| `TRUST_PROXY`, `HOST` | `loopback`, todas las interfaces | 9.4 y 17.8. |
+| `USAGE_LOG_ENABLED`, `USAGE_LOG_BUFFER_MAX`, `USAGE_LOG_FLUSH_MS`, `USAGE_LOG_FLUSH_BATCH` | `true`, `10000`, `1000`, `200` | 19. |
+| `PURGE_USAGE_LOG_DAYS` | `7` (1 a 7) | La Política promete 7. |
+| `RETENTION_PURGE_ENABLED`, `RETENTION_PURGE_CRON`, `RETENTION_BATCH_SIZE`, `RETENTION_BATCH_PAUSE_MS`, `RETENTION_MAX_RUN_MS` | solo con `NODE_ENV=production`, `30 4 * * *` UTC, `1000`, `100`, `600000` | 20.1 y 20.2. |
+| `PURGE_SESSION_PII_DAYS`, `PURGE_CONTACT_MONTHS`, `PURGE_EXPIRED_TOKENS_DAYS`, `PURGE_RETENTION_RUNS_DAYS` | `90` (30 a 90), `12` (3 a 60), `1`, `400` | 20.2. `PURGE_CONTACT_MONTHS` y `[[PLAZO_CONSERVACION_CONTACTO]]` deben decir lo mismo (22.7). |
+| `PUBLIC_ORIGIN` (**frontend**) | sin definir = el propio `Host` | Obligatoria si un proxy reescribe el Host (17.8). |
+
+### 22.5 Volver atrás
+
+- Las migraciones del epic son aditivas: desplegar el build anterior (§5) y dejarlas aplicadas es seguro (las columnas y tablas nuevas son inertes para él). Excepción: un build **anterior a 20.3** escribe la cédula en claro y deja el `Enc` desfasado (`plainMismatch`): tras volver adelante, `pnpm iddoc:backfill` y `--check` lo corrigen (15.7).
+- **Las columnas en claro no se eliminan** hasta verificar FR-128 en producción y hacer la fase 2 (22.3, NFR-20.1): por eso el rollback del epic sigue siendo posible.
+- Antes de volver atrás quita las exigencias nuevas: `CHECKOUT_REQUIRE_BUYER_ID=false` (con el frontend anterior el 100 % de los checkouts daría 400) y, si procede, `CHECKOUT_REQUIRE_SHIPPING=false` y `LEGAL_REQUIRE_PUBLISHED=false` (12.7).
+- **No se puede volver atrás una anonimización de cuenta ni una purga** (A94): son definitivas. **Antes de las primeras purgas reales (el primer despliegue con `NODE_ENV=production`) haz una copia de la base** (y de `uploads/private/`): las copias anteriores conservan lo borrado hasta que rotan, y la Política de Privacidad lo declara (22.6). Para pararlas sin desplegar: `RETENTION_PURGE_ENABLED=false` y reinicio.
+- El rol de BD limitado se revierte quitando `MIGRATE_DATABASE_URL` y devolviendo el `DATABASE_URL` anterior (13.8).
+- Las claves **nunca** se «revierten»: no se borra una versión del llavero mientras exista una fila cifrada con ella (14.3).
+
+### 22.6 Política de Privacidad y Cookies: qué cambió con el epic (y cómo publicarlo)
+
+El texto fuente que siembra `pnpm seed:legal` (y `prisma:seed`) vive en `prisma/seed-data/legal/*.md`; el seed **solo crea borradores** y no toca un documento que ya tenga borrador o versión. La Story 20.10 reescribió `privacidad.md` y la tabla de `cookies.md` para que describan el epic:
+
+- **Libreta de direcciones en el servidor, con la cédula cifrada** (`privacidad` §2 y §7) y **ya no en el navegador**: la versión actual borra al cargar lo que dejó la anterior (`212_customer_addresses_*`, con la cédula sin cifrar) y avisa una vez si había direcciones (`privacidad` §2, `cookies`).
+- **Datos de facturación del comprador**: nombre o razón social y cédula o RIF, cifrada (`privacidad` §2, marcador nuevo `[[CONFIRMAR_DATOS_DE_FACTURACION_DEL_COMPRADOR_IMPLEMENTADOS]]`).
+- **Anonimización a petición expresa del titular y su canal** (A93, `privacidad` §9, **«Cómo pedirlo»**, marcador nuevo `[[CONFIRMAR_CANAL_DE_SOLICITUDES_DE_CIERRE_DE_CUENTA]]`): «no recomendable», irreversible, sin autoservicio todavía; escribe a `[[EMAIL_CONTACTO]]` o usa el formulario, una persona verifica la titularidad y ejecuta el cierre.
+- **Log de uso de 7 días y auditoría permanente** (ya estaban, 20.6 y 20.7): sin cambios.
+- **Plazos** (`privacidad` §7): datos de factura y cédula al plazo fiscal (`[[PLAZO_CONSERVACION_FISCAL]]`) sin purga automática ni al cerrar la cuenta; contacto (`[[PLAZO_CONSERVACION_CONTACTO]]`); sesiones; carritos; comprobantes (`[[PLAZO_CONSERVACION_COMPROBANTES]]`); y **copias de seguridad** (A94: conservan lo borrado hasta rotar, `[[PLAZO_ROTACION_DE_COPIAS_DE_SEGURIDAD]]`).
+
+**Supuestos marcados para Angel (no son hechos, ningún marcador se quitó):** (1) que el canal de cierre de cuenta sea el correo y el formulario de contacto, con verificación manual de la titularidad; (2) que el nombre o razón social del comprador se conserve el mismo plazo fiscal que la cédula (se asume por formar parte del soporte de la factura; **lo confirma el contador o el abogado**); (3) el plazo de copias de seguridad; (4) el plazo de contactos (12 o 24 meses). Cada marcador `[[...]]` bloquea la publicación hasta que alguien lo resuelva; los de tipo `CONFIRMAR_*` ya tienen su prueba en 12.5 B.
+
+**Cómo publicarlo sin tocar versiones publicadas.** Se asume que ningún documento está publicado todavía (A64; no se pudo comprobar en el entorno real). (a) Base nueva: `pnpm seed:legal` crea el borrador con el texto nuevo. (b) Una base que ya tiene el borrador de `privacidad` (la de desarrollo, un entorno ya sembrado): el seed no lo sobrescribe; copia el texto de `privacidad.md` al borrador desde el editor legal del admin (`/admin/legal`, deja bitácora e identidad). (c) Si `privacidad` o `cookies` **ya tuvieran una versión PUBLICADA**: **no se edita**; se redacta un borrador nuevo desde el editor y se publica como versión nueva, marcada como **sustancial** (con `changeSummary`: «libreta de direcciones en el servidor, datos de facturación del comprador, cierre de cuenta a petición y plazos»), lo que dispara la re-aceptación de las cuentas (19.7). Los marcadores se resuelven en el borrador antes de publicar: la publicación se bloquea mientras quede uno.
+
+### 22.7 Checklist de lanzamiento del epic (complementa 12.5; marca solo lo que hayas comprobado)
+
+**Advertencias que deben quedar claras para quien opere la tienda**
+
+- [ ] **La anonimización de una cuenta es «no recomendada» y solo se ejecuta a petición explícita del titular** (verificada su identidad). Es irreversible. Mientras no exista el autoservicio «Mi cuenta» (A93) las solicitudes llegan por el canal de `privacidad` §9 y las ejecuta una persona del admin. Con pedidos activos el sistema responde 409.
+- [ ] **La cédula del pedido es obligatoria en la factura y no se purga** ni al anonimizar la cuenta ni por el job de retención; solo se conserva cifrada y se revela por el admin con auditoría previa (30 por hora y admin).
+- [ ] **El log de uso dura 7 días** (IP, agente, ruta genérica) y no es prueba legal; **la auditoría plena es permanente e inmutable** (también guarda la IP de las acciones, incluso tras anonimizar).
+- [ ] Las **copias de seguridad** conservan lo purgado hasta su rotación (A94).
+
+**Pendientes de Angel (decisiones y datos)**
+
+- [ ] **Datos de Pago Móvil PLACEHOLDER** en `src/checkout/pago-movil-instructions.constant.ts` (RIF `J-00000000-0`, teléfono `0412-0000000` y banco «PLACEHOLDER»): **bloquean el lanzamiento**. Reemplázalos por los reales y verifica que la pantalla de pago los muestra.
+- [ ] **Rotar las credenciales reales del `.env`** de desarrollo (12.5 D): Stripe y su secreto de webhook, `TCGAPI_KEY`, SMTP, contraseñas de BD y de admin, secretos de sesión. Las de producción no deben haber pasado por esa máquina.
+- [ ] **Generar las claves `IDDOC_*` de producción** con `openssl rand -base64 32` (22.2 paso 1) y guardarlas en un gestor de secretos fuera del servidor. Ojo: `pnpm iddoc:keys` es de **uso local** y se niega a correr con `NODE_ENV=production` (15.4); no sirve para el servidor.
+- [ ] **`CHECKOUT_REQUIRE_BUYER_ID=true` y `CHECKOUT_REQUIRE_SHIPPING=true` en producción**, en la misma ventana que el frontend de 20.9 (22.2 paso 5; 12.4 y 16.2).
+- [ ] **`RIF_CHECKDIGIT_STRICT`**: recomendación **`false`** (solo formato) hasta contrastar un RIF J/G real con resto 1 (16.4). Un estricto equivocado rechazaría RIF válidos en el checkout.
+- [ ] **Plazo de retención de los mensajes de contacto: 12 o 24 meses.** La auditoría legal dice 12 a 24 según el contador; el valor por omisión es 12. Si eliges otro, `PURGE_CONTACT_MONTHS` y `[[PLAZO_CONSERVACION_CONTACTO]]` deben decir lo mismo (20.8 punto 3).
+- [ ] **Plazo fiscal** (cédula, datos de factura y comprobantes de Pago Móvil): hoy se asume ~10 años (A86), **a confirmar con el contador o el abogado**; escribirlo en `[[PLAZO_CONSERVACION_FISCAL]]` y `[[PLAZO_CONSERVACION_COMPROBANTES]]`. Hasta entonces no se borra nada de eso (20.8 punto 1).
+- [ ] **Rol de BD limitado** en producción (22.2 paso 4, 13.3) y **`AUDIT_ANCHOR_EMAIL`** con un buzón que no controle quien administra la BD (13.5).
+- [ ] **El resto de marcadores de la Política** (22.6): los supuestos marcados y los `CONFIRMAR_*` de 12.5 B.
+
+**Observaciones de despliegue**
+
+- [ ] **Define `PUBLIC_ORIGIN` en producción** (frontend, `https://dominio-publico`, sin barra final): si un proxy reescribe el Host, sin ella toda escritura del BFF da 403 `ORIGIN_MISMATCH` (17.8). Con Traefik, que conserva el Host, no hace falta, pero fijarla es más seguro.
+- [ ] **`TRUST_PROXY=1` emite un warn** (observación registrada por el coordinador; el valor `1` es un número de saltos, no la subred estrecha que pide 17.8 para Traefik → Next → Nest en contenedores distintos). Usa la subred estrecha de 17.8 (p. ej. `172.30.212.0/28`) y mira el log de arranque: no debe haber WARN de `TRUST_PROXY` ni el WARN en ejecución de IP privada. No se pudo reproducir aquí el origen exacto del aviso con `1`: confírmalo en staging.
+- [ ] **`pnpm db:roles` solo lo puede ejecutar un superusuario**: crea el rol de la app y concede privilegios sobre todas las tablas. No lo ejecutes con el rol limitado ni con la cuenta de la app (13.3).
+- [ ] **Exposición de Swagger en producción** (`/api/docs`, `/api/docs-json`): hoy se monta siempre. Decisión **para la auditoría de seguridad** (restringirlo por Nginx/Traefik o apagarlo con `NODE_ENV=production`).
+- [ ] **Para la auditoría de seguridad: `filterHasIdDoc` del frontend es heurístico** (observación del QA de 20.9; **no se corrige aquí**). Es la función que decide si un filtro de texto del admin parece una cédula para enviarlo por cuerpo y no por URL. Una cédula con dígitos de ancho completo (`Ｖ12345678`) en el filtro `entityId` **llega al backend y este responde 200** (no se rechaza ni se redirige al cuerpo), y hay falsos positivos con identificadores numéricos de 6 a 10 dígitos y con RIF `G…`. Proponer que el backend normalice (NFKC) antes de decidir, y que la regla viva en un solo sitio.
+- [ ] **El frontend ya no guarda la libreta en `localStorage`** pero un navegador con datos viejos los conserva hasta su primera visita; la purga es del cliente (22.6).

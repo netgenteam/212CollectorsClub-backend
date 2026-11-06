@@ -16,6 +16,7 @@ import {
   PUBLIC_STATIC_PREFIX,
   UPLOADS_PUBLIC_ROOT,
 } from './../src/admin-catalog/product-image-upload-paths.constants.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 interface ApiErrorBody {
   errorCode?: string;
@@ -311,15 +312,17 @@ describe('AdminProductsController (e2e)', () => {
       const checkoutRes = await request(app.getHttpServer())
         .post('/api/v1/checkout')
         .set('Cookie', cartCookie)
-        .send({
-          paymentRail: 'pago_movil',
-          fulfillmentType: 'delivery',
-          addressLine1: 'Av. Test 1',
-          city: 'Caracas',
-          state: 'Distrito Capital',
-          recipientName: 'Maria Perez',
-          recipientPhone: '0412-1234567',
-        })
+        .send(
+          withBuyerId({
+            paymentRail: 'pago_movil',
+            fulfillmentType: 'delivery',
+            addressLine1: 'Av. Test 1',
+            city: 'Caracas',
+            state: 'Distrito Capital',
+            recipientName: 'Maria Perez',
+            recipientPhone: '0412-1234567',
+          }),
+        )
         .expect(201);
       const body = checkoutRes.body as CheckoutResponse;
       return {

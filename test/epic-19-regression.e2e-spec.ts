@@ -34,6 +34,7 @@ import {
   seedConsentDocs,
   type SeededConsent,
 } from './helpers/legal-consent.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 90_000 });
 
@@ -510,7 +511,7 @@ describe('Epic 19 regression (e2e, Story 19.9)', () => {
           request(http())
             .post('/api/v1/checkout')
             .set('Cookie', c)
-            .send(checkoutBody(seeded.checkoutBody())),
+            .send(withBuyerId(checkoutBody(seeded.checkoutBody()))),
         ),
       );
       expect(rs.map((r) => r.status)).toEqual([201, 201, 201, 201]);
@@ -569,7 +570,7 @@ describe('Epic 19 regression (e2e, Story 19.9)', () => {
       const r = await request(http())
         .post('/api/v1/checkout')
         .set('Cookie', await guestCart(p))
-        .send(checkoutBody(seeded.checkoutBody()))
+        .send(withBuyerId(checkoutBody(seeded.checkoutBody())))
         .expect(201);
       const orderId = (r.body as { orderId: string }).orderId;
       expect(await consentsOf({ orderId })).toHaveLength(3);
@@ -792,18 +793,20 @@ describe('Epic 19 regression (e2e, Story 19.9)', () => {
         const none = await request(http())
           .post('/api/v1/checkout')
           .set('Cookie', who)
-          .send(checkoutBody())
+          .send(withBuyerId(checkoutBody()))
           .expect(400);
         expect((none.body as Err).errorCode).toBe('CONSENT_REQUIRED');
         const stale = await request(http())
           .post('/api/v1/checkout')
           .set('Cookie', who)
           .send(
-            checkoutBody({
-              acceptedTermsVersion: 2,
-              acceptedShippingVersion: 1,
-              acceptedReturnsVersion: 1,
-            }),
+            withBuyerId(
+              checkoutBody({
+                acceptedTermsVersion: 2,
+                acceptedShippingVersion: 1,
+                acceptedReturnsVersion: 1,
+              }),
+            ),
           )
           .expect(409);
         expect((stale.body as Err).errorCode).toBe('CONSENT_VERSION_STALE');
@@ -819,7 +822,7 @@ describe('Epic 19 regression (e2e, Story 19.9)', () => {
       const r = await request(http())
         .post('/api/v1/checkout')
         .set('Cookie', await guestCart(p))
-        .send(checkoutBody(seeded.checkoutBody()))
+        .send(withBuyerId(checkoutBody(seeded.checkoutBody())))
         .expect(201);
       const orderId = (r.body as { orderId: string }).orderId;
       const order = await prisma.order.findUniqueOrThrow({
@@ -847,7 +850,7 @@ describe('Epic 19 regression (e2e, Story 19.9)', () => {
       const res = await request(http())
         .post('/api/v1/checkout')
         .set('Cookie', cart)
-        .send(checkoutBody(seeded.checkoutBody()));
+        .send(withBuyerId(checkoutBody(seeded.checkoutBody())));
       expect(res.status).toBeGreaterThanOrEqual(400);
       expect(res.status).toBeLessThan(500);
       expect(await counts()).toEqual(before);

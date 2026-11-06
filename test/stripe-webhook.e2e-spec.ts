@@ -12,6 +12,7 @@ import { createGlobalValidationPipe } from './../src/common/global-validation-pi
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { PaymentProcessingTimeoutCronService } from './../src/orders/cron/payment-processing-timeout-cron.service.js';
 import { FAKE_STRIPE_WEBHOOK_SECRET } from './../src/payments-stripe/fake-stripe-client.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 // Story 14.5 e2e: signed, idempotent Stripe webhook (FR-58, AD-47).
 const TAG = randomUUID().slice(0, 8);
@@ -101,15 +102,17 @@ describe('Stripe webhook (e2e, Story 14.5)', () => {
     const res = await request(server())
       .post('/api/v1/checkout')
       .set('Cookie', cookie)
-      .send({
-        paymentRail: 'stripe',
-        fulfillmentType: 'delivery',
-        addressLine1: 'Av. Test 1',
-        city: 'Caracas',
-        state: 'Distrito Capital',
-        recipientName: 'Maria Perez',
-        recipientPhone: '0412-1234567',
-      })
+      .send(
+        withBuyerId({
+          paymentRail: 'stripe',
+          fulfillmentType: 'delivery',
+          addressLine1: 'Av. Test 1',
+          city: 'Caracas',
+          state: 'Distrito Capital',
+          recipientName: 'Maria Perez',
+          recipientPhone: '0412-1234567',
+        }),
+      )
       .expect(201);
     return {
       co: res.body as Checkout,

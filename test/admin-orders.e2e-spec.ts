@@ -10,6 +10,7 @@ import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { FAKE_STRIPE_WEBHOOK_SECRET } from './../src/payments-stripe/fake-stripe-client.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 type App = Parameters<typeof request>[0];
 
@@ -174,7 +175,7 @@ describe('AdminOrdersController (e2e)', () => {
     const checkoutRes = await request(app.getHttpServer())
       .post('/api/v1/checkout')
       .set('Cookie', cartCookie)
-      .send(pagoMovilBody())
+      .send(withBuyerId(pagoMovilBody()))
       .expect(201);
     return (checkoutRes.body as CheckoutResponse).orderId;
   }
@@ -211,7 +212,7 @@ describe('AdminOrdersController (e2e)', () => {
     const checkoutRes = await request(app.getHttpServer())
       .post('/api/v1/checkout')
       .set('Cookie', cartCookie)
-      .send(stripeBody())
+      .send(withBuyerId(stripeBody()))
       .expect(201);
     const body = checkoutRes.body as CheckoutResponse;
     if (!body.stripe) {

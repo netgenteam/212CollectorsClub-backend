@@ -31,9 +31,8 @@ Además de las cookies, el sitio usa `localStorage`, que guarda datos solo en tu
 |---|---|
 | `212_cart_images` | Miniaturas de los productos de tu carrito |
 | `212_saved_products` | Identificadores de los productos de tu lista de deseos |
-| `212_customer_addresses_*` | Tu libreta de direcciones: nombre, teléfono, dirección y la cédula del destinatario **sin cifrar** |
 
-Puedes borrarlo desde la configuración de tu navegador. [[CONFIRMAR_CEDULA_EN_ALMACENAMIENTO_LOCAL_DEL_NAVEGADOR]] [[VERIFICAR_CLAVES_DE_ALMACENAMIENTO_LOCAL_CONTRA_EL_SITIO_PUBLICADO]]
+Puedes borrarlo desde la configuración de tu navegador. Tu libreta de direcciones **no** se guarda aquí: vive en nuestros servidores (ver la [Política de Privacidad](/privacidad)). Las versiones anteriores del sitio guardaban en la clave `212_customer_addresses_*` la libreta con la cédula **sin cifrar**; el sitio actual la borra al abrirlo. [[CONFIRMAR_CEDULA_EN_ALMACENAMIENTO_LOCAL_DEL_NAVEGADOR]] [[VERIFICAR_CLAVES_DE_ALMACENAMIENTO_LOCAL_CONTRA_EL_SITIO_PUBLICADO]]
 
 ### Analíticas (desactivadas por defecto)
 

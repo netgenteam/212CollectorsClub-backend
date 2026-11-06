@@ -915,7 +915,8 @@ describe('Usage log (e2e, Story 20.7)', { timeout: 120_000 }, () => {
         .set('Authorization', `Bearer ${admin.token}`)
         .send({
           confirmEmail: email,
-          reason: `Solicitud del titular por WhatsApp, ref ${TAG}, 2026-11-04`,
+          // letters only: a TAG that ends in digits next to the date made the reason look like a long grouped number
+          reason: `Solicitud del titular por WhatsApp, ref ${TAG.replace(/\d/g, (d) => 'ghijklmnop'[Number(d)])}, 2026-11-04`,
         });
 
     it('rows in the table AND rows still in the buffer AND a row that arrives after the commit: none survives', async () => {

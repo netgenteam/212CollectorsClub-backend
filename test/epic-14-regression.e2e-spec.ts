@@ -15,6 +15,7 @@ import { AppModule } from './../src/app.module.js';
 import { createGlobalValidationPipe } from './../src/common/global-validation-pipe.js';
 import { PrismaService } from './../src/prisma/prisma.service.js';
 import { FAKE_STRIPE_WEBHOOK_SECRET } from './../src/payments-stripe/fake-stripe-client.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 const TAG = randomUUID().slice(0, 8);
 const TEST_USERNAME = 'e2e-admin-story-14-7-reg';
@@ -149,15 +150,17 @@ describe('Epic 14 regression (e2e, Story 14.7)', () => {
     const res = await request(server())
       .post('/api/v1/checkout')
       .set('Cookie', cookie)
-      .send({
-        paymentRail: rail,
-        fulfillmentType: 'delivery',
-        addressLine1: 'Av. Test 1',
-        city: 'Caracas',
-        state: 'Distrito Capital',
-        recipientName: 'Maria Perez',
-        recipientPhone: '0412-1234567',
-      })
+      .send(
+        withBuyerId({
+          paymentRail: rail,
+          fulfillmentType: 'delivery',
+          addressLine1: 'Av. Test 1',
+          city: 'Caracas',
+          state: 'Distrito Capital',
+          recipientName: 'Maria Perez',
+          recipientPhone: '0412-1234567',
+        }),
+      )
       .expect(201);
     return res.body as Checkout;
   }

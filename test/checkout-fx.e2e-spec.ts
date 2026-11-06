@@ -16,6 +16,7 @@ import {
   FAKE_FX_FIXTURES,
 } from './../src/fx/fake-fx.provider.js';
 import { snapshotFx, restoreFx, type FxState } from './helpers/db-snapshot.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 const TAG = randomUUID().slice(0, 8);
 const ADMIN_USERNAME = `e2e-admin-18-3-${TAG}`;
@@ -88,7 +89,7 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
     request(server())
       .post('/api/v1/checkout')
       .set('Cookie', await cart())
-      .send(body(rail));
+      .send(withBuyerId(body(rail)));
   const current = () => request(server()).get('/api/v1/fx/current');
 
   beforeAll(async () => {
@@ -322,7 +323,7 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
           request(server())
             .post('/api/v1/checkout')
             .set('Cookie', c)
-            .send(body('pago_movil')),
+            .send(withBuyerId(body('pago_movil'))),
         ),
       );
     } finally {
@@ -367,7 +368,7 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
           request(server())
             .post('/api/v1/checkout')
             .set('Cookie', c)
-            .send(body('pago_movil')),
+            .send(withBuyerId(body('pago_movil'))),
         ),
       ),
     ]);
@@ -425,7 +426,7 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
             request(server())
               .post('/api/v1/checkout')
               .set('Cookie', c)
-              .send(body('pago_movil')),
+              .send(withBuyerId(body('pago_movil'))),
           ),
         );
         await sleep(2);
@@ -476,7 +477,7 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
           request(server())
             .post('/api/v1/checkout')
             .set('Cookie', c)
-            .send(body('pago_movil')),
+            .send(withBuyerId(body('pago_movil'))),
         ),
       );
       await sleep(2);

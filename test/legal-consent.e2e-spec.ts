@@ -16,6 +16,7 @@ import {
   seedConsentDocs,
   type SeededConsent,
 } from './helpers/legal-consent.js';
+import { withBuyerId } from './helpers/buyer-id.js';
 
 /**
  * Story 19.4 (AD-92, FR-112..116): consent in register / checkout /
@@ -441,7 +442,7 @@ describe(
             const none = await request(server())
               .post('/api/v1/checkout')
               .set('Cookie', who)
-              .send(checkoutBody({ paymentRail: rail }))
+              .send(withBuyerId(checkoutBody({ paymentRail: rail })))
               .expect(400);
             expect((none.body as Err).errorCode).toBe('CONSENT_REQUIRED');
             expect((none.body as Err).details?.missing).toEqual([
@@ -453,12 +454,14 @@ describe(
               .post('/api/v1/checkout')
               .set('Cookie', who)
               .send(
-                checkoutBody({
-                  paymentRail: rail,
-                  acceptedTermsVersion: 2,
-                  acceptedShippingVersion: 1,
-                  acceptedReturnsVersion: 1,
-                }),
+                withBuyerId(
+                  checkoutBody({
+                    paymentRail: rail,
+                    acceptedTermsVersion: 2,
+                    acceptedShippingVersion: 1,
+                    acceptedReturnsVersion: 1,
+                  }),
+                ),
               )
               .expect(409);
             expect((stale.body as Err).errorCode).toBe('CONSENT_VERSION_STALE');
@@ -487,7 +490,7 @@ describe(
         const res = await request(server())
           .post('/api/v1/checkout')
           .set('Cookie', guest)
-          .send(checkoutBody(seeded.checkoutBody()))
+          .send(withBuyerId(checkoutBody(seeded.checkoutBody())))
           .expect(201);
         const out = res.body as Checkout;
         const order = await prisma.order.findUniqueOrThrow({
@@ -547,7 +550,9 @@ describe(
           .post('/api/v1/checkout')
           .set('Cookie', c.s)
           .send(
-            checkoutBody({ paymentRail: 'stripe', ...seeded.checkoutBody() }),
+            withBuyerId(
+              checkoutBody({ paymentRail: 'stripe', ...seeded.checkoutBody() }),
+            ),
           )
           .expect(201);
         const rows = await consentsOf({
@@ -565,7 +570,7 @@ describe(
         const res = await request(server())
           .post('/api/v1/checkout')
           .set('Cookie', guest)
-          .send(checkoutBody(seeded.checkoutBody()))
+          .send(withBuyerId(checkoutBody(seeded.checkoutBody())))
           .expect(409);
         expect((res.body as Err).errorCode).toBe('INSUFFICIENT_STOCK');
         expect(await counts()).toEqual(before);
@@ -584,7 +589,7 @@ describe(
             request(server())
               .post('/api/v1/checkout')
               .set('Cookie', ck)
-              .send(checkoutBody(seeded.checkoutBody())),
+              .send(withBuyerId(checkoutBody(seeded.checkoutBody()))),
           ),
         );
         expect(ok.map((r) => r.status)).toEqual(Array(8).fill(201));
@@ -605,10 +610,12 @@ describe(
               .post('/api/v1/checkout')
               .set('Cookie', ck)
               .send(
-                checkoutBody({
-                  ...seeded.checkoutBody(),
-                  acceptedTermsVersion: 2,
-                }),
+                withBuyerId(
+                  checkoutBody({
+                    ...seeded.checkoutBody(),
+                    acceptedTermsVersion: 2,
+                  }),
+                ),
               ),
           ),
         );
@@ -777,7 +784,12 @@ describe(
           .post('/api/v1/checkout')
           .set('Cookie', await guestCart(p))
           .send(
-            checkoutBody({ ...seeded.checkoutBody(), acceptedTermsVersion: 8 }),
+            withBuyerId(
+              checkoutBody({
+                ...seeded.checkoutBody(),
+                acceptedTermsVersion: 8,
+              }),
+            ),
           )
           .expect(409);
         expect((co.body as Err).errorCode).toBe('CONSENT_VERSION_STALE');
@@ -834,7 +846,7 @@ describe(
           await request(server())
             .post('/api/v1/checkout')
             .set('Cookie', g)
-            .send(checkoutBody(seeded.checkoutBody()))
+            .send(withBuyerId(checkoutBody(seeded.checkoutBody())))
             .expect(201)
         ).body as Checkout;
         const [rc] = await sql(
@@ -947,10 +959,12 @@ describe(
           .post('/api/v1/checkout')
           .set('Cookie', g1)
           .send(
-            checkoutBody({
-              acceptedTermsVersion: 1,
-              acceptedReturnsVersion: 1,
-            }),
+            withBuyerId(
+              checkoutBody({
+                acceptedTermsVersion: 1,
+                acceptedReturnsVersion: 1,
+              }),
+            ),
           )
           .expect(201);
         const order = await prisma.order.findUniqueOrThrow({
@@ -968,11 +982,13 @@ describe(
           .post('/api/v1/checkout')
           .set('Cookie', g2)
           .send(
-            checkoutBody({
-              acceptedTermsVersion: 1,
-              acceptedReturnsVersion: 1,
-              acceptedShippingVersion: 1,
-            }),
+            withBuyerId(
+              checkoutBody({
+                acceptedTermsVersion: 1,
+                acceptedReturnsVersion: 1,
+                acceptedShippingVersion: 1,
+              }),
+            ),
           )
           .expect(409);
         expect((sent.body as Err).errorCode).toBe('CONSENT_VERSION_STALE');
@@ -988,7 +1004,7 @@ describe(
         const ok = await request(server())
           .post('/api/v1/checkout')
           .set('Cookie', g)
-          .send(checkoutBody())
+          .send(withBuyerId(checkoutBody()))
           .expect(201);
         const order = await prisma.order.findUniqueOrThrow({
           where: { id: (ok.body as Checkout).orderId },
@@ -1024,7 +1040,7 @@ describe(
         const co = await request(server())
           .post('/api/v1/checkout')
           .set('Cookie', g)
-          .send(checkoutBody({ acceptedTermsVersion: 1 }))
+          .send(withBuyerId(checkoutBody({ acceptedTermsVersion: 1 })))
           .expect(503);
         expect((co.body as Err).errorCode).toBe('LEGAL_NOT_PUBLISHED');
         expect((co.body as Err).details?.documents).toEqual([

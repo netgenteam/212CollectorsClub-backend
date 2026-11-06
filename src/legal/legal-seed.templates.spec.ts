@@ -224,6 +224,16 @@ describe('legal seed templates (Story 19.3)', () => {
     ],
     ['terminos', /Solo vendemos producto que creemos original/, O],
     ['privacidad', /Almacenamiento local de tu navegador/, L],
+    [
+      'privacidad',
+      /Datos de facturación del comprador/,
+      '[[CONFIRMAR_DATOS_DE_FACTURACION_DEL_COMPRADOR_IMPLEMENTADOS]]',
+    ],
+    [
+      'privacidad',
+      /Cómo pedirlo/,
+      '[[CONFIRMAR_CANAL_DE_SOLICITUDES_DE_CIERRE_DE_CUENTA]]',
+    ],
     ['cookies', /Puedes borrarlo desde la configuración/, L],
   ];
   it.each(claims)(
@@ -235,14 +245,54 @@ describe('legal seed templates (Story 19.3)', () => {
     },
   );
 
-  it('cookies/privacidad do not hide the local storage of the cédula', () => {
+  it('cookies/privacidad say the address book left the browser and that the old unencrypted copy is purged (Story 20.9)', () => {
     for (const slug of ['cookies', 'privacidad']) {
       expect(templates[slug]).toContain('localStorage');
+      expect(templates[slug]).toMatch(/sin cifrar/);
     }
+    // the legacy key is still named (a visitor may still have it) but it is no longer a row of the live table
+    expect(templates.cookies).not.toMatch(/^\| `212_customer_addresses_\*`/m);
     expect(templates.cookies).toContain('`212_customer_addresses_*`');
     expect(templates.cookies).toContain('`212_cart_images`');
     expect(templates.cookies).toContain('`212_saved_products`');
-    expect(templates.privacidad).toMatch(/sin cifrar/);
+    expect(templates.privacidad).toMatch(
+      /Ya no guarda tu libreta de direcciones/,
+    );
+    expect(templates.privacidad).toMatch(/borra esos datos del navegador/);
+  });
+
+  it('Story 20.10: privacidad describes what the Epic 20 changed (billing data, how to ask for the closing, backups, fiscal term)', () => {
+    const t = templates.privacidad;
+    const bullet = t
+      .split('\n')
+      .find((l) => l.includes('**Datos de facturación del comprador:**'));
+    expect(bullet).toBeDefined();
+    expect(bullet).toMatch(/nombre o razón social/);
+    expect(bullet).toMatch(/cédula o RIF/);
+    expect(bullet).toMatch(/\*\*cifrado\*\*/);
+    expect(bullet).toContain(
+      '[[CONFIRMAR_DATOS_DE_FACTURACION_DEL_COMPRADOR_IMPLEMENTADOS]]',
+    );
+    // A93: while there is no self-service, the request goes through the contact channel and an admin executes it
+    const ask = t.split('\n').find((l) => l.includes('**Cómo pedirlo:**'));
+    expect(ask).toBeDefined();
+    expect(ask).toMatch(/no existe un botón de autoservicio/);
+    expect(ask).toContain('[[EMAIL_CONTACTO]]');
+    expect(ask).toContain(
+      '[[CONFIRMAR_CANAL_DE_SOLICITUDES_DE_CIERRE_DE_CUENTA]]',
+    );
+    // A94: backups keep what they had until they rotate; purges are not retroactive
+    expect(t).toMatch(
+      /Copias de seguridad de la base de datos[^\n]*no\*\* se aplican de forma retroactiva/,
+    );
+    // the buyer fiscal data follows the fiscal term and is never purged automatically
+    expect(t).toMatch(
+      /Pedidos y datos de factura[^\n]*\[\[PLAZO_CONSERVACION_FISCAL\]\]/,
+    );
+    // the address book of the account is on the server, cedula encrypted
+    expect(t).toMatch(
+      /Libreta de direcciones de tu cuenta[^\n]*\*\*cifrada\*\*/,
+    );
   });
 
   it('Story 19.3a: removed claims stay removed', () => {
