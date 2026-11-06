@@ -34,7 +34,7 @@ const NONEXISTENT_PRODUCT_ID = '00000000-0000-0000-0000-000000000000';
 // "persists despite SMTP failure" test below builds its own isolated app
 // with a deliberately unreachable SMTP target instead, so it doesn't
 // depend on MailHog being down.
-const MAILHOG_API_BASE = 'http://localhost:8025';
+const MAILHOG_API_BASE = process.env.MAILHOG_API_URL ?? 'http://localhost:8025';
 
 async function mailhogMessagesTo(email: string): Promise<unknown[]> {
   const res = await fetch(`${MAILHOG_API_BASE}/api/v2/messages?limit=50`);

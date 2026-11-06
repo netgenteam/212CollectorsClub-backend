@@ -45,10 +45,34 @@ describe('deploy.sh (D1)', () => {
   });
 });
 
+/** `ORDER BY "alias"` or `ORDER BY alias` (quoted or not; the alias must end there, `"id"` has no `\b` after the quote). */
+function orderByAlias(sql: string, alias: string): boolean {
+  return new RegExp(`ORDER BY\\s+(?:"${alias}"|${alias})(?![\\w"])`, 'i').test(
+    sql,
+  );
+}
+
 describe('text alias in ORDER BY (D5)', () => {
+  it('the detector sees quoted and bare aliases and ignores table-qualified columns', () => {
+    expect(orderByAlias('ORDER BY "id" DESC', 'id')).toBe(true);
+    expect(orderByAlias('ORDER BY id DESC', 'id')).toBe(true);
+    expect(orderByAlias('ORDER BY "id"', 'id')).toBe(true);
+    expect(orderByAlias('ORDER BY "id",', 'id')).toBe(true);
+    expect(orderByAlias('ORDER BY u."id" DESC', 'id')).toBe(false);
+    expect(orderByAlias('ORDER BY "idx" DESC', 'id')).toBe(false);
+    expect(orderByAlias('ORDER BY identity', 'id')).toBe(false);
+  });
+
   // Files reviewed by hand: their ids are uuid, and the text of a uuid sorts like the uuid (fixed-width lowercase hex
   // with the hyphens in the same places), so the keyset `id > cursor::uuid` stays consistent with the order.
   const REVIEWED_UUID = ['src/iddoc-migration/iddoc-migration.service.ts'];
+  // Reviewed by hand, not a numeric cursor: the text alias only fixes a deterministic order that nothing paginates on.
+  //  - admin-orders: `paymentRail` (enum) orders alphabetically in the reconciliation rollup, as intended.
+  //  - pack-generator: `DISTINCT ON ("masterCardId") ... ORDER BY "masterCardId"` uses the same (text) key on both sides.
+  const REVIEWED_NOT_A_CURSOR = new Set([
+    'src/orders/admin-orders.service.ts#paymentRail',
+    'src/simulator/pack-generator.service.ts#masterCardId',
+  ]);
 
   it('no query orders by the text alias of a column it also casts to text', () => {
     const offenders: string[] = [];
@@ -61,9 +85,12 @@ describe('text alias in ORDER BY (D5)', () => {
         const col = m[1] ?? m[2];
         const alias = m[3] ?? m[4];
         if (col !== alias) continue;
-        const after = text.slice(m.index, m.index + 1500);
-        const order = new RegExp(`ORDER BY\\s+(?:"${alias}"|${alias})\\b`, 'i');
-        if (order.test(after)) offenders.push(`${rel}: ${m[0]}`);
+        // SQL line comments removed (they may quote the bad pattern while explaining it)
+        const after = text
+          .slice(m.index, m.index + 1500)
+          .replace(/--[^\n]*/g, '');
+        if (REVIEWED_NOT_A_CURSOR.has(`${rel}#${alias}`)) continue;
+        if (orderByAlias(after, alias)) offenders.push(`${rel}: ${m[0]}`);
       }
     }
     expect(offenders).toEqual([]);

@@ -45,7 +45,7 @@ Algunos de esos proveedores (por ejemplo, Stripe o el alojamiento) pueden tratar
 
 ## 6. Cédula y datos de facturación
 
-El número de cédula o RIF es obligatorio en la factura y en el despacho. Se guarda **cifrado** en los pedidos, se muestra **enmascarado** en pantalla y en las comunicaciones, y solo personal autorizado de la Tienda puede verlo completo, quedando registro de cada consulta. [[CONFIRMAR_REGISTRO_DE_CONSULTAS_DE_CEDULA_IMPLEMENTADO]] En los pedidos se **conserva durante el plazo que exija la normativa fiscal** ([[PLAZO_CONSERVACION_FISCAL]]) aunque cierres tu cuenta, porque forma parte del soporte de la factura. [[CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA]] [[CONFIRMAR_RETENCION_FISCAL_DE_CEDULA_IMPLEMENTADA]]
+El número de cédula o RIF es obligatorio en la factura y en el despacho. Se guarda **cifrado** en los pedidos, se muestra **enmascarado** en pantalla y en las comunicaciones, y solo personal autorizado de la Tienda puede verlo completo, quedando registro de cada consulta. [[CONFIRMAR_REGISTRO_DE_CONSULTAS_DE_CEDULA_IMPLEMENTADO]] En los pedidos anteriores a la introducción del cifrado puede subsistir, **temporalmente y con acceso restringido**, una copia antigua de ese número **sin cifrar**, además de la cifrada; la retiraremos en una fase posterior de migración que aún no se ha completado (los pedidos nuevos solo la guardan cifrada). En los pedidos se **conserva durante el plazo que exija la normativa fiscal** ([[PLAZO_CONSERVACION_FISCAL]]) aunque cierres tu cuenta, porque forma parte del soporte de la factura. [[CONFIRMAR_CEDULA_CIFRADA_Y_ENMASCARADA_IMPLEMENTADA]] [[CONFIRMAR_RETENCION_FISCAL_DE_CEDULA_IMPLEMENTADA]]
 
 ## 7. Cuánto tiempo los conservamos
 

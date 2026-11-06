@@ -28,6 +28,11 @@ import { adminDatabaseUrl } from './helpers/audit-sandbox.js';
 import { E2E_COMPANY, withBuyerId } from './helpers/buyer-id.js';
 import { registerConsent } from './helpers/legal-consent.js';
 import { appCrypto, expectOnlyEncrypted } from './helpers/iddoc-assert.js';
+import {
+  hasCedulaShapedNumber,
+  letteredTag,
+  stripUuids,
+} from './helpers/pii-text.js';
 
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 240_000 });
 
@@ -43,7 +48,8 @@ vi.setConfig({ testTimeout: 120_000, hookTimeout: 240_000 });
  * cedulas only.
  */
 const BASE = '/api/v1';
-const TAG = randomUUID().replace(/-/g, '').slice(0, 8);
+// a leading letter: an all-digit tag in GOOD_REASON would trip the anonymization digit-run rule (400)
+const TAG = letteredTag(randomUUID().replace(/-/g, ''));
 const PASSWORD = 'Correct-horse-20-10!';
 const ADMIN_PASSWORD = 'correct-horse-battery-staple-20-10';
 /** The sentinel cedula of AC1 (a V number) and the digits of the company RIF of `E2E_COMPANY`. */
@@ -957,8 +963,17 @@ describe('Epic 20 regression (e2e, Story 20.10)', () => {
       expect(ev).toHaveLength(1);
       expect(ev[0].t).not.toMatch(/@/); // no email
       expect(ev[0].t).not.toContain('203.0.113.'); // no IP of a purged row
-      expect(ev[0].t).not.toMatch(/\b\d{7,10}\b/); // no cedula-shaped number
-      expect(ev[0].t).not.toContain(TAG);
+      // no cedula-shaped number (the random UUIDs of the row are removed first: they can hold an 8-digit group)
+      expect(hasCedulaShapedNumber(ev[0].t)).toBe(false);
+      for (const digits of [
+        SENTINEL_DIGITS,
+        RIF_DIGITS,
+        '91111111',
+        '92222222',
+      ]) {
+        expect(stripUuids(ev[0].t)).not.toContain(digits);
+      }
+      expect(stripUuids(ev[0].t)).not.toContain(TAG);
     });
 
     it('four runs at the same time on one instance: exactly one 202, the others 409 RETENTION_ALREADY_RUNNING', async () => {

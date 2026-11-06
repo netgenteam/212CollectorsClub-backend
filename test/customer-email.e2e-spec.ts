@@ -19,7 +19,7 @@ const PASSWORD = 'correct-horse-battery-12-4';
 const NEW_PASSWORD = 'brand-new-password-12-4';
 const sha256b64 = (t: string) =>
   createHash('sha256').update(t).digest('base64url');
-const MAILHOG = 'http://localhost:8025';
+const MAILHOG = process.env.MAILHOG_API_URL ?? 'http://localhost:8025';
 
 /** Mail bodies are quoted-printable: undo soft breaks and =XX escapes. */
 const qpDecode = (s: string) =>

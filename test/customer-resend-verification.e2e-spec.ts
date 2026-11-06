@@ -12,7 +12,7 @@ import { PrismaService } from './../src/prisma/prisma.service.js';
 type App = Parameters<typeof request>[0];
 type Mail = { id: string; subject: string; body: string };
 
-const MAILHOG = 'http://localhost:8025';
+const MAILHOG = process.env.MAILHOG_API_URL ?? 'http://localhost:8025';
 const TAG = randomUUID().slice(0, 8);
 const emailOf = (k: string) => `e2e-12-6-rv-${TAG}-${k}@212collectorsclub.test`;
 const GENERIC =

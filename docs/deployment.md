@@ -51,9 +51,10 @@ apt update && apt install -y git nginx postgresql ufw curl
 # system-wide Node install method) so `/usr/bin/node` (or wherever it
 # lands — confirm with `which node`) exists for every user, including the
 # dedicated service users created below.
-corepack enable   # makes `pnpm` available system-wide once Node is installed
-corepack prepare pnpm@11.5.3 --activate   # the version the repo is built and tested with (pnpm-lock.yaml); without it corepack picks whatever is latest
+corepack enable   # as root: installs the `pnpm` shim system-wide once Node is installed
 ```
+
+The pnpm version is NOT chosen by root: `package.json` pins `"packageManager": "pnpm@11.5.3"` (the version the repo is built and tested with, `pnpm-lock.yaml`) and corepack downloads and uses exactly that for whoever runs `pnpm` inside the repo. `corepack prepare ... --activate` run as root only affects root's cache (`~/.cache/node/corepack`), not the `cc212-*` users that run `deploy.sh`; the per-user pre-download is in 1.3 (so the first deploy does not depend on network access at that moment).
 
 Confirm the real Node binary path (`which node`) and update `ExecStart=` in
 both `deploy/systemd/212cc-backend-*.service` files if it isn't
@@ -85,6 +86,11 @@ useradd --system --create-home --home-dir /opt/212cc/production \
 mkdir -p /opt/212cc/staging/shared /opt/212cc/production/shared
 chown -R cc212-staging:cc212-staging /opt/212cc/staging
 chown -R cc212-production:cc212-production /opt/212cc/production
+
+# pnpm for EACH deploy user (corepack keeps its cache in the user's own home; root's is not shared). Same version as
+# `packageManager` in package.json (corepack would also fetch it on first use, but that needs network at deploy time):
+sudo -u cc212-staging    env HOME=/opt/212cc/staging    corepack prepare pnpm@11.5.3 --activate
+sudo -u cc212-production env HOME=/opt/212cc/production corepack prepare pnpm@11.5.3 --activate
 ```
 
 ### 1.4 Clone the repo into each environment
@@ -1276,7 +1282,6 @@ Resultado: cadena `ok: true, rows: 30` en ambos formatos (texto plano y custom).
 
 Los triggers siguen activos después de la restauración (insertar fuera de secuencia da `chain fork or gap rejected`). La verificación de la cadena después de **cualquier** restauración no es opcional: es la prueba de que la copia no está truncada ni alterada.
 
-Las funciones se fijan con `SET search_path FROM CURRENT` (el de la sesión que migra: `"$user", public` con Prisma). Un test estático (`src/audit/migration-search-path.spec.ts`) falla si una migración futura crea o reemplaza una función sin `SET search_path` (`CREATE OR REPLACE FUNCTION` borra el ajuste).
 Las funciones se fijan con `SET search_path = pg_catalog, public, pg_temp` (migración `20261107100000`, ver 13.2; las de la tercera ronda usaban `FROM CURRENT`, que reparaba la restauración pero **no** el secuestro por `pg_temp`). Un test estático (`src/audit/migration-search-path.spec.ts`) falla si una migración futura crea o reemplaza una función sin ese ajuste (`CREATE OR REPLACE FUNCTION` borra el ajuste) o si lo deja sin `pg_temp` al final.
 
 **Quién puede usar `audit.allow_unordered_restore`.** Solo el propietario de `Audit_Events` (o un superusuario): la función comprueba `pg_has_role(current_user, <propietario de la tabla>, 'USAGE')`. Si la aplicación corre con ese mismo rol (desarrollo, o producción sin `MIGRATE_DATABASE_URL`), su SQL también puede activarla, y eso es una razón más para usar el rol limitado de 13.3 (con él la opción se ignora, probado). No la dejes nunca en el `.env` ni en `PGOPTIONS` del servicio.
@@ -1567,6 +1572,11 @@ La primera versión de la 20.4 buscaba con `GET /admin/orders?idDoc=`. Incumplí
 Los `global-*` de snapshot (FX, `Product_Daily_Stats`, vitrina, landing, consentimientos huérfanos) siguen funcionando, ahora sobre el clon (son inofensivos y protegen si alguien apunta la suite a otra base); su marcador de aborto lleva la identidad de la base, así que uno viejo de tu base real **no** se restaura en un clon.
 
 Necesita `CREATEDB`: el propietario (`MIGRATE_DATABASE_URL`) o, con una sola URL, el rol actual. Con rol limitado: `DATABASE_URL='<app>' MIGRATE_DATABASE_URL='<propietario>' pnpm test:e2e --no-file-parallelism` (el clon hereda los privilegios del rol).
+
+**Requisitos del entorno de los e2e que no se ven en el código.**
+
+- **MailHog.** `contact`, `customer-email` y `customer-resend-verification` leen el correo de la API HTTP de MailHog. Por omisión `http://localhost:8025`; con otro puerto o contenedor, `MAILHOG_API_URL=http://localhost:18025 pnpm test:e2e ...` (solo la URL base de la API, sin barra final). El SMTP sigue siendo `SMTP_HOST`/`SMTP_PORT` del `.env` (1025 por omisión): ponlos de acuerdo con la misma instancia.
+- **`CREATEROLE`.** El e2e `usage-log` «rol limitado» crea su propio rol (`collectorsclub_u<tag>_app`) ejecutando `scripts/db-roles.sql` en el clon y lo borra al terminar. Eso requiere que el usuario de la **base de pruebas** (el de `MIGRATE_DATABASE_URL`, o `DATABASE_URL` si no hay otra) tenga `CREATEROLE` (o sea superusuario); con un propietario normal de 1.2 falla con `permission denied to create role`. Se concede una vez, en un servidor de **desarrollo** (nunca en producción): `ALTER ROLE <usuario-de-pruebas> CREATEROLE;`. El resto de la suite no lo necesita.
 
 **Base solo migrada (CI, contenedor desechable).** La fila `default` de `Fx_Rate_Settings` la crea `prisma/seed.ts`, no una migración: sin ella fallaban 313 e2e. `test/helpers/global-test-db.ts` (el que clona; lo usan `pnpm test:e2e` y `pnpm test:perf`) la crea en el **clon** una vez verificado que lo es, si falta (`INSERT … ON CONFLICT DO NOTHING`, 200 como el seed; nunca en la base real), así que no hace falta sembrar antes de correr las pruebas (sin ella, además de los 313 e2e, fallaban `audit-emission.perf` y `fx-put-budget.perf` con 503 `FX_RATE_UNAVAILABLE`). **Lo demás sí necesita el seed:** en una base solo migrada, con la fila FX ya asegurada, fallaron 163 e2e de 30 archivos (catálogo, vendedor, legal: los tests dan por hechos los datos de `pnpm prisma:seed` y `pnpm seed:legal`) y `retention.perf`; tras sembrar la base fuente, `pnpm test:e2e --no-file-parallelism --sequence.shuffle.files` dio 105/105 archivos y 1 512/1 512 pruebas con el rol limitado, y `pnpm test:perf` 13/13 y 62/62. La fuente de los clones debe llevar el seed.
 
@@ -2595,6 +2605,7 @@ La guarda no ve el nombre con cédula dentro (`recipientName`): eso lo cubre `--
 El texto fuente que siembra `pnpm seed:legal` (y `prisma:seed`) vive en `prisma/seed-data/legal/*.md`; el seed **solo crea borradores** y no toca un documento que ya tenga borrador o versión. La Story 20.10 reescribió `privacidad.md` y la tabla de `cookies.md` para que describan el epic:
 
 - **Libreta de direcciones en el servidor, con la cédula cifrada** (`privacidad` §2 y §7) y **ya no en el navegador**: la versión actual borra al cargar lo que dejó la anterior (`212_customer_addresses_*`, con la cédula sin cifrar) y avisa una vez si había direcciones (`privacidad` §2, `cookies`).
+- **Copia heredada en claro** (`privacidad` §6): hasta completar la fase 2 (22.3) puede seguir existiendo la copia antigua en claro de la cédula en pedidos anteriores a 20.3 (`Orders.recipientIdDoc`; los pedidos nuevos solo la guardan cifrada). El texto lo dice, sin fecha. Cuando se haga la fase 2, quita esa frase de `privacidad.md` y publícalo como versión sustancial.
 - **Datos de facturación del comprador**: nombre o razón social y cédula o RIF, cifrada (`privacidad` §2, marcador nuevo `[[CONFIRMAR_DATOS_DE_FACTURACION_DEL_COMPRADOR_IMPLEMENTADOS]]`).
 - **Anonimización a petición expresa del titular y su canal** (A93, `privacidad` §9, **«Cómo pedirlo»**, marcador nuevo `[[CONFIRMAR_CANAL_DE_SOLICITUDES_DE_CIERRE_DE_CUENTA]]`): «no recomendable», irreversible, sin autoservicio todavía; escribe a `[[EMAIL_CONTACTO]]` o usa el formulario, una persona verifica la titularidad y ejecuta el cierre.
 - **Log de uso de 7 días y auditoría permanente** (ya estaban, 20.6 y 20.7): sin cambios.
@@ -2636,7 +2647,7 @@ El texto fuente que siembra `pnpm seed:legal` (y `prisma:seed`) vive en `prisma/
 - [ ] **Exposición de Swagger en producción** (`/api/docs`, `/api/docs-json`): hoy se monta siempre. Decisión **para la auditoría de seguridad** (restringirlo por Nginx/Traefik o apagarlo con `NODE_ENV=production`).
 - [ ] **Para la auditoría de seguridad: `filterHasIdDoc` del frontend es heurístico** (observación del QA de 20.9; **no se corrige aquí**). Es la función que decide si un filtro de texto del admin parece una cédula para enviarlo por cuerpo y no por URL. Una cédula con dígitos de ancho completo (`Ｖ12345678`) en el filtro `entityId` **llega al backend y este responde 200** (no se rechaza ni se redirige al cuerpo), y hay falsos positivos con identificadores numéricos de 6 a 10 dígitos y con RIF `G…`. Proponer que el backend normalice (NFKC) antes de decidir, y que la regla viva en un solo sitio.
 - [ ] **Construye Next SIEMPRE con `BACKEND_API_URL` definida** (frontend, `Dockerfile` `ARG BACKEND_API_URL`; en el VPS, en el entorno del `pnpm build`). `lib/axios.ts` usa `process.env.BACKEND_API_URL || 'https://api.212collectorsclub.com/api/v1'`: una imagen o un build **sin** ella queda apuntando **a producción**, también en staging (una prueba de staging escribiría pedidos y clientes reales). Para Dokploy: `http://cc-backend:3000/api/v1` (17.8). No se hizo fallar el build en producción: staging también se construye con `NODE_ENV=production` y no hay forma segura de distinguirlo; la comprobación es manual (que el `BACKEND_API_URL` del `Dockerfile` no esté vacío en el log de build).
-- [ ] **Fija la versión de pnpm con corepack** en el servidor (1.1): `corepack prepare pnpm@11.5.3 --activate`. En el `Dockerfile` ya viene de la imagen; en el VPS, sin ello `corepack enable` toma la última y `pnpm install --frozen-lockfile` puede cambiar de comportamiento.
+- [ ] **pnpm con corepack, por usuario de despliegue** (1.1 y 1.3): `corepack enable` lo hace root una vez, pero la versión la fija `"packageManager": "pnpm@11.5.3"` del `package.json` y la caché de corepack es **de cada usuario** (`cc212-staging`, `cc212-production`; el `deploy.sh` corre como ese usuario, no como root): `sudo -u cc212-<entorno> env HOME=/opt/212cc/<entorno> corepack prepare pnpm@11.5.3 --activate` (1.3). El `corepack prepare` de root **no** vale para ellos. En el `Dockerfile` la versión ya viene fijada en la imagen.
 - [ ] **Primer administrador y fila `default` de `Fx_Rate_Settings`** creados con el SQL de 22.8 (no con `prisma:seed`).
 - [ ] **El frontend ya no guarda la libreta en `localStorage`** pero un navegador con datos viejos los conserva hasta su primera visita; la purga es del cliente (22.6).
 
@@ -2669,7 +2680,7 @@ VALUES ('default', <tasa-real-VES-por-USD>, now(), now())
 ON CONFLICT ("id") DO NOTHING;
 ```
 
-(La fuente por defecto es `BCV_USD`, `maxAgeHours` 48 y `maxVariationPct` 15: columnas con valor por omisión.) Comprueba con `GET /api/v1/admin/fx` (o el panel) que la fila aparece.
+(La fuente por defecto es `BCV_USD`, `maxAgeHours` 48 y `maxVariationPct` 15: columnas con valor por omisión.) Comprueba con `GET /api/v1/admin/fx/settings` o `GET /api/v1/admin/fx/status` (con la sesión de admin; o el panel) que la fila aparece. La ruta `admin/fx` a secas no existe (404); las reales son `settings`, `status`, `history`, `audit`, `refresh` y `accept-rejected`.
 
 ### 22.9 Ronda 1 de QA de la 20.10: qué cambió y cómo se comprobó
 

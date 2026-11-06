@@ -70,6 +70,7 @@
     "stripe": "^23.0.0",
     "unified": "^11.0.5"
   },
+  "packageManager": "pnpm@11.5.3",
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.7",
     "@eslint/js": "^10.0.1",
