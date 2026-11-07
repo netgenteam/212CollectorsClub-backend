@@ -38,7 +38,7 @@ RUN pnpm build
 RUN mkdir -p uploads/public uploads/private && chown -R node:node uploads
 
 ENV NODE_ENV=production
-ENV PORT=3000
+ENV PORT=3005
 # CLIENT IP BEHIND DOKPLOY (docs/deployment.md 17.8): Next and this container are different peers, so
 # the default `trust proxy loopback` IGNORES X-Forwarded-For and every client looks like the Next
 # container (one shared rate-limit bucket, wrong IP in every audit event). Set, in Dokploy's
@@ -47,7 +47,7 @@ ENV PORT=3000
 # The container must listen on all interfaces (HOST stays unset); do not publish this port: only Next
 # reaches it (Traefik too, for the Stripe webhook only, through a network that TRUST_PROXY does not cover).
 # At boot the app logs a WARN when TRUST_PROXY is unset in production and HOST is not loopback.
-EXPOSE 3000
+EXPOSE 3005
 
 # Story 20.11: the migration is NOT part of the service's CMD any more. A service that runs `prisma migrate deploy` at
 # every start gives the app process the DDL-capable (owner) URL and races with every other replica or restart. Run it
