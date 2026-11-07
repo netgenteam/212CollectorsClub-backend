@@ -7,10 +7,20 @@
 #              /etc/nginx/sites-enabled/
 #   sudo nginx -t && sudo systemctl reload nginx
 #
-# TLS is deliberately NOT hardcoded here: run `sudo certbot --nginx -d
-# api.<DOMAIN>` after this file is enabled and serving plain HTTP —
-# certbot rewrites this file in place to add the 443/TLS server block and a
-# 80->443 redirect. See docs/deployment.md.
+# TLS (Story 20.11, security audit high priority 3): this template serves HTTPS on 443 and redirects every plain-HTTP
+# request on 80 to it, with HSTS. Nginx will not load the 443 block until the certificate files exist, so the order is:
+#   1. Point the DNS A/AAAA record of api.<DOMAIN> at the VPS and open ports 80 and 443 (docs/deployment.md 1.8).
+#   2. Get the certificate BEFORE enabling this file (port 80 free, or nginx stopped for a minute):
+#        sudo certbot certonly --standalone -d api.<DOMAIN>
+#      (or, with nginx already serving another site on 80: `--webroot -w /var/www/certbot`; the 80 block below serves
+#      /.well-known/acme-challenge/ from that directory). Renewal is automatic (certbot.timer); make it reload nginx:
+#        echo 'renew_hook = systemctl reload nginx' | sudo tee -a /etc/letsencrypt/renewal/api.<DOMAIN>.conf
+#   3. Install this file, replace <DOMAIN>, then: sudo nginx -t && sudo systemctl reload nginx
+#   4. Check: curl -sI http://api.<DOMAIN>/ (301 to https) and curl -sI https://api.<DOMAIN>/api/v1/health (200 and a
+#      Strict-Transport-Security header).
+# HSTS here is `max-age=15552000` (180 days) WITHOUT includeSubDomains and WITHOUT preload: both are decisions for the
+# whole domain, taken once every subdomain serves HTTPS. The backend (helmet) sends the same header in production; `always`
+# makes Nginx add it on error pages too, and the two never conflict (proxy_hide_header drops the upstream copy).
 #
 # NOT verified against a real domain or real traffic in this sandbox — only
 # checked with `nginx -t` inside a throwaway nginx:alpine container (no
@@ -33,6 +43,33 @@ server {
     listen [::]:80;
     server_name api.<DOMAIN>;
 
+    # Certbot's webroot challenge (renewals with `--webroot -w /var/www/certbot`); everything else goes to HTTPS.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name api.<DOMAIN>;
+
+    ssl_certificate     /etc/letsencrypt/live/api.<DOMAIN>/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.<DOMAIN>/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    add_header Strict-Transport-Security "max-age=15552000" always;
+    # One copy only: the backend sends its own (helmet); drop it here so the browser never sees two.
+    proxy_hide_header Strict-Transport-Security;
+
     # Matches the production systemd unit's PORT (see
     # /opt/212cc/production/shared/.env and
     # deploy/systemd/212cc-backend-production.service) — the app only ever
@@ -52,7 +89,7 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto $scheme;  # always https here: the 80 block only redirects
         proxy_read_timeout 60s;
     }
 

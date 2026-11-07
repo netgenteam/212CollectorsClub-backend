@@ -48,6 +48,9 @@ export class StripeSignatureError extends Error {
 }
 
 export interface StripeClient {
+  /** Story 20.11: `true` only on `DisabledStripeClient` (STRIPE_ENABLED=false). Checkout answers 503 before creating anything. */
+  readonly disabled?: boolean;
+
   createCheckoutSession(
     params: CreateStripeCheckoutSessionParams,
   ): Promise<CreateStripeCheckoutSessionResult>;

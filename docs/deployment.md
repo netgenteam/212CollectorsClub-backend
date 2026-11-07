@@ -139,10 +139,17 @@ FRONTEND_URL=https://REPLACE_ME
 # POST /api/v1/admin/customers/verify-email (admin marks a customer's email
 # verified by hand); anything else = route 404s. Set to false/unset once SMTP works.
 MANUAL_EMAIL_VERIFY_ENABLED=false
-# Stripe (Epic 14, see section 7). Keep BOTH empty to run on the in-memory
-# fake client; with a real key STRIPE_WEBHOOK_SECRET is mandatory.
-STRIPE_SECRET_KEY=
-STRIPE_WEBHOOK_SECRET=
+# Stripe (Epic 14, see sections 7 and 23). With NODE_ENV=production BOTH are mandatory (a live
+# sk_live_... key and a real whsec_...): the service refuses to boot on the fake client.
+# To run WITHOUT Stripe on purpose, leave both out and set STRIPE_ENABLED=false (section 23.2).
+STRIPE_SECRET_KEY=REPLACE_ME
+STRIPE_WEBHOOK_SECRET=REPLACE_ME
+# Signs the cart cookie. Story 20.11: with NODE_ENV=production the three secrets (COOKIE_SECRET,
+# ADMIN_AUTH_SECRET, CUSTOMER_AUTH_SECRET) must be DIFFERENT, >= 32 characters, and never a dev-only value
+# (`openssl rand -hex 24` each). The service refuses to boot otherwise (section 23.1).
+COOKIE_SECRET=REPLACE_ME
+# Production only: must be exactly "true" (section 23.1).
+LEGAL_REQUIRE_PUBLISHED=true
 ```
 
 Set ownership/permissions so only the matching service user (and root) can
@@ -177,12 +184,15 @@ ln -s /etc/nginx/sites-available/api.<DOMAIN>.conf /etc/nginx/sites-enabled/
 nginx -t && systemctl reload nginx
 ```
 
-Point `staging-api.<domain>` and `api.<domain>` DNS A/AAAA records at the
-VPS, then issue TLS certs:
+**TLS (Story 20.11).** The templates now serve HTTPS on 443, redirect 80 to 443 and send HSTS, so Nginx will **not
+load them until the certificates exist**: get them first (section 23.5 has the whole procedure and the checks).
 
 ```bash
-apt install -y certbot python3-certbot-nginx
-certbot --nginx -d staging-api.<DOMAIN> -d api.<DOMAIN>
+apt install -y certbot
+# DNS A/AAAA of staging-api.<DOMAIN> and api.<DOMAIN> pointing at the VPS; ports 80 and 443 open.
+# Issue BEFORE the `ln -s ... sites-enabled` / `nginx -t` lines above (or nginx -t fails on the missing .pem):
+certbot certonly --standalone -d staging-api.<DOMAIN>
+certbot certonly --standalone -d api.<DOMAIN>
 ```
 
 ### 1.8 Firewall
@@ -315,7 +325,9 @@ production go-live.
 
 | Variable | Meaning |
 |---|---|
-| `STRIPE_SECRET_KEY` | `sk_test_...` (staging) / `sk_live_...` (production). Empty => in-memory fake client (local/CI, no network). |
+| `STRIPE_SECRET_KEY` | `sk_test_...` (staging) / `sk_live_...` (production). Empty => in-memory fake client in development and CI only; **with `NODE_ENV=production` an empty, placeholder or test-mode key stops the boot** (section 23.1). |
+| `STRIPE_ENABLED` | `false` switches the Stripe rail OFF on purpose (any environment): no Stripe variable needed, checkout by card answers `503 STRIPE_DISABLED`, the webhook rejects everything. Unset or `true` = on. Section 23.2. |
+| `STRIPE_ALLOW_TEST_KEYS` | `true` lets a staging that runs with `NODE_ENV=production` use `sk_test_`/`rk_test_` keys. Never in the real production. |
 | `STRIPE_WEBHOOK_SECRET` | Signing secret `whsec_...` of the dashboard webhook endpoint. **Mandatory whenever `STRIPE_SECRET_KEY` is set: the service refuses to boot otherwise.** |
 | `FRONTEND_URL` | Storefront base URL; Stripe's `success_url` / `cancel_url` are built from it. Must be the real public URL per environment. |
 
@@ -1708,9 +1720,22 @@ Una acción de admin o de sistema se audita si cumple **al menos uno**:
        external: true
 
    services:
+     migrate:                         # Story 20.11: la migración, UNA vez y aparte del servicio (ya no va en el CMD)
+       image: ${BACKEND_IMAGE:?}      # la MISMA imagen que `backend`
+       restart: 'no'                  # una sola corrida; si falla, `backend` no arranca
+       command: ['pnpm', 'prisma:deploy']
+       networks:
+         dokploy-network: {}          # solo necesita llegar a la base
+       environment:
+         DATABASE_URL: ${DATABASE_URL:?}
+         MIGRATE_DATABASE_URL: ${MIGRATE_DATABASE_URL:-}  # el PROPIETARIO (13.3); vacío = DATABASE_URL
+
      backend:
        image: ${BACKEND_IMAGE:?}      # o `build:` con el Dockerfile del repo del backend
        restart: unless-stopped
+       depends_on:
+         migrate:
+           condition: service_completed_successfully   # no arranca sobre un esquema sin migrar ni si la migración falló
        init: true                     # tini como PID 1: reenvía SIGTERM y recoge zombis (ver «Cierre ordenado»)
        stop_grace_period: 30s         # el cierre de la app tarda hasta 13 s con la base caída; el valor por omisión (10 s) la mataría con SIGKILL
        # sin `ports:`
@@ -1722,17 +1747,21 @@ Una acción de admin o de sistema se audita si cumple **al menos uno**:
        environment:
          TRUST_PROXY: 172.30.212.0/28 # solo cc-app: Traefik NO está aquí, no se le cree (ver 2)
          DATABASE_URL: ${DATABASE_URL:?}              # con el rol limitado (13.3) en cuanto lo crees
-         MIGRATE_DATABASE_URL: ${MIGRATE_DATABASE_URL:-}  # el PROPIETARIO: lo usa `pnpm prisma:deploy` del CMD. Vacío = DATABASE_URL. Con el rol limitado en DATABASE_URL y esto vacío, el contenedor entra en bucle (`permission denied for table _prisma_migrations`)
+         # Story 20.11: el servicio `backend` ya NO recibe MIGRATE_DATABASE_URL: el proceso de la app corre con el rol limitado
+         # y la URL del propietario (DDL) solo existe en el servicio `migrate`. Con el rol limitado en DATABASE_URL y
+         # MIGRATE_DATABASE_URL vacío en `migrate`, éste falla con `permission denied for table _prisma_migrations`.
          FRONTEND_URL: ${FRONTEND_URL:?}              # https://<DOMAIN>, sin barra final: los correos (verificación, reinicio de contraseña) enlazan aquí; sin ella apuntan a http://localhost:3000
          CHECKOUT_REQUIRE_BUYER_ID: ${CHECKOUT_REQUIRE_BUYER_ID:-false}    # `true` en la misma ventana que el frontend de 20.9 (22.2 paso 5)
          CHECKOUT_REQUIRE_SHIPPING: ${CHECKOUT_REQUIRE_SHIPPING:-false}    # `true` con el frontend desplegado (12.4)
-         LEGAL_REQUIRE_PUBLISHED: ${LEGAL_REQUIRE_PUBLISHED:-false}        # `true` en producción cuando los documentos legales estén publicados (§12)
+         LEGAL_REQUIRE_PUBLISHED: ${LEGAL_REQUIRE_PUBLISHED:?}             # Story 20.11: en producción DEBE ser `true` (si no, el servicio no arranca); publica los cuatro documentos antes (§12, 22.2 paso 5)
          AUDIT_ANCHOR_EMAIL: ${AUDIT_ANCHOR_EMAIL:-}                       # buzón externo del anclaje del head (13.5); vacío = sin anclaje (WARN al arrancar)
-         STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}    # vacío = cliente Stripe FALSO (nunca cobra); con valor, STRIPE_WEBHOOK_SECRET es obligatoria
+         STRIPE_ENABLED: ${STRIPE_ENABLED:-}          # `false` = riel Stripe apagado A PROPÓSITO (23.2); vacío = encendido
+         STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}    # Story 20.11: en producción, clave sk_live_...; vacía = el servicio NO arranca (nunca el cliente falso), salvo STRIPE_ENABLED=false
+         STRIPE_ALLOW_TEST_KEYS: ${STRIPE_ALLOW_TEST_KEYS:-}  # solo un staging con NODE_ENV=production y claves sk_test_
          COOKIE_SECRET: ${COOKIE_SECRET:?}
          ADMIN_AUTH_SECRET: ${ADMIN_AUTH_SECRET:?}
          CUSTOMER_AUTH_SECRET: ${CUSTOMER_AUTH_SECRET:?}
-         STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?}
+         STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}  # whsec_... real; obligatoria salvo STRIPE_ENABLED=false (el arranque lo exige, 23.1)
          IDDOC_ENC_KEYS: ${IDDOC_ENC_KEYS:?}
          IDDOC_ENC_ACTIVE_KEY: ${IDDOC_ENC_ACTIVE_KEY:?}
          IDDOC_BLIND_KEY: ${IDDOC_BLIND_KEY:?}
@@ -1754,7 +1783,7 @@ Una acción de admin o de sistema se audita si cumple **al menos uno**:
          BACKEND_URL: http://cc-backend:3000
          BACKEND_API_URL: http://cc-backend:3000/api/v1
          TRUSTED_PROXY_HOPS: '1'      # Traefik delante de Next
-         # PUBLIC_ORIGIN: https://${DOMAIN}   # solo si un proxy reescribe el Host (ver «Defensa CSRF del BFF»); con Traefik, que conserva el Host, no hace falta
+         PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?}   # Story 20.11: OBLIGATORIA en producción (https://<DOMAIN>, sin barra final; varias, separadas por comas). Sin ella el guard CSRF rechaza toda escritura del BFF (23.4)
          NEXT_PUBLIC_BASE_URL: ${NEXT_PUBLIC_BASE_URL:?}
    ```
 
@@ -1774,6 +1803,8 @@ Una acción de admin o de sistema se audita si cumple **al menos uno**:
 - **Cómo comprobarlo**: lista de verificación de 9.4, punto 4, y un `curl -H 'X-Forwarded-For: 1.2.3.4' https://<DOMAIN>/api/...` desde fuera: la IP del evento no puede ser `1.2.3.4`, ni la de Traefik, ni la del CDN.
 
 **Next no debe exponerse sin el proxy delante.** El `Dockerfile` del frontend fija `HOSTNAME=0.0.0.0` (necesario para que el proxy lo alcance en la red de contenedores). Con `TRUSTED_PROXY_HOPS=1`, quien llegue **directo** a Next (puerto publicado por error, red compartida con un contenedor hostil) escribe el último `X-Forwarded-For`, y por tanto **elige la IP** que Next reenvía al backend, que `TRUST_PROXY` cree. Reglas: ni `ports:` en el servicio de Next ni un puerto abierto en el cortafuegos del host; solo Traefik lo alcanza. **Defensa propuesta, no implementada** (es invasiva: toca el proxy, Next y el despliegue a la vez): una cabecera secreta compartida. Traefik la añade con un middleware (`headers.customRequestHeaders.X-Edge-Secret`), Next (`lib/utils/client-ip.ts`) solo reenvía una IP si la cabecera coincide (comparación en tiempo constante, secreto en las variables de Dokploy) y, si no coincide, no reenvía nada (el backend verá la IP de Next: degrada, no se deja engañar). Alternativa: lista de pares permitidos en el propio Next, que desde una ruta de Route Handler no se ve (`request` no expone el socket), así que haría falta un servidor propio delante. Con el secreto, el CDN/Traefik debe poder fijar la cabecera; hay que valorarlo cuando Angel confirme el destino.
+
+> **Story 20.11 (esta sección cambió).** (1) La migración salió del `CMD`: el compose de arriba tiene el servicio `migrate` y `backend` espera a que termine bien (23.3). (2) `PUBLIC_ORIGIN` ya **no es opcional** en producción: donde más abajo se lee «no hace falta `PUBLIC_ORIGIN`» o «queda como línea comentada», vale lo de 23.4. (3) Las variables de Stripe y `LEGAL_REQUIRE_PUBLISHED` se exigen al arrancar (23.1).
 
 **Defensa CSRF del BFF (frontend Next, Story 20.9).** La cookie de sesión es `SameSite=Lax`, que no protege de sitios hermanos (otro puerto, otro subdominio o un XSS en ellos). El frontend rechaza con 403 `CSRF_BLOCKED`, antes de llegar a este backend, toda petición `POST/PUT/PATCH/DELETE` a `/api/**` cuyo `Origin` no sea el propio, o que lleve cuerpo con `Content-Type` distinto de `application/json` (multipart solo en las subidas de comprobante e imágenes). Requisitos de despliegue: (1) Nginx debe pasar `proxy_set_header Host $host;` o `X-Forwarded-Host $host;` (Traefik conserva el Host por omisión); (2) si un proxy reescribe el Host al del upstream, o se quiere exigir también https, definir en el frontend `PUBLIC_ORIGIN=https://dominio-publico[,https://otro]` (esquema+host+puerto exactos, sin barra final; variable de runtime, no de build); si no, toda escritura dará 403 `ORIGIN_MISMATCH`; (3) el webhook de Stripe va directo al backend y no pasa por Next, así que no se ve afectado; (4) cualquier cliente que llame al BFF fuera de un navegador (scripts, pruebas) debe enviar `Origin` propio y `Content-Type: application/json`. Este backend no cambia: la defensa vive en el frontend.
 
@@ -2523,13 +2554,14 @@ Esta sección es para Angel. No añade comportamiento: reúne en un orden de ope
 
 ### 22.2b Dokploy (topología B): lo que `deploy.sh` hace en el VPS, a mano
 
-`deploy/deploy.sh` solo existe para el VPS con systemd. En Dokploy el contenedor del backend ejecuta su `CMD` (`pnpm prisma:deploy && exec node dist/main`: migra con `MIGRATE_DATABASE_URL` y arranca) y **nada valida antes ni ejecuta el backfill después**. Equivalencias, con el directorio del proyecto compose de Dokploy en el servidor (donde `docker compose` lee el *Environment* del servicio; en el compose de 17.8 el servicio se llama `backend`) o la pestaña *Terminal* del servicio:
+`deploy/deploy.sh` solo existe para el VPS con systemd. En Dokploy (desde la 20.11) el `CMD` del contenedor es solo `node dist/main` y la migración es el servicio `migrate` del compose (23.3); **nada valida antes ni ejecuta el backfill después**. Equivalencias, con el directorio del proyecto compose de Dokploy en el servidor (donde `docker compose` lee el *Environment* del servicio; en el compose de 17.8 el servicio se llama `backend`) o la pestaña *Terminal* del servicio:
 
 | Paso de `deploy.sh` | Dokploy |
 |---|---|
 | Validar el llavero **antes** de migrar y reiniciar | Con la **imagen nueva ya descargada** y **antes** de desplegarla sobre la vieja: `docker compose run --rm --no-deps --entrypoint "" backend node dist/crypto/cli/check-keyring.js` (lee el entorno del servicio, imprime nombres y versiones, nunca una clave; 0 = válido). Sin esto, un llavero inválido o una copia de `.env.example` deja el contenedor en bucle de reinicio. |
+| Validar la configuración de producción (20.11: secretos, Stripe, `LEGAL_REQUIRE_PUBLISHED`) | `docker compose run --rm --no-deps --entrypoint "" backend node dist/common/cli/check-production-config.js --as-production` (0 = válida; nombra variables y reglas, nunca valores). |
 | Validar la configuración de retención (`check-config`) | Igual: `docker compose run --rm --no-deps --entrypoint "" backend node dist/retention/cli/check-config.js` (20.2). |
-| `prisma migrate deploy` con `lock_timeout` de 10 s | Lo hace el `CMD` al arrancar, con `MIGRATE_DATABASE_URL`. **No** añade el `lock_timeout`: ponlo en la propia URL (`...?schema=public&options=-c%20lock_timeout%3D10000`; `prisma.config.ts` conserva el `options` que ya traiga). Un solo réplica, sin migradores concurrentes. |
+| `prisma migrate deploy` con `lock_timeout` de 10 s | Lo hace el servicio `migrate` (20.11, 23.3), una vez antes de `backend`, con `MIGRATE_DATABASE_URL`. **No** añade el `lock_timeout`: ponlo en la propia URL (`...?schema=public&options=-c%20lock_timeout%3D10000`; `prisma.config.ts` conserva el `options` que ya traiga). Un solo `migrate` por despliegue, sin migradores concurrentes. |
 | Reinicio y health check | Dokploy; el health check es `GET /api/v1/health` por `cc-backend:3000`. |
 | `pnpm iddoc:backfill`, luego `pnpm iddoc:backfill --check` (apartado (g)) | Con el servicio ya sano: `docker compose exec backend pnpm iddoc:backfill` y después `docker compose exec backend pnpm iddoc:backfill --check` (código 0 en ambos; corren con `DATABASE_URL`, el rol limitado; son idempotentes y se reanudan; fallo = 15.7). El servicio sigue sirviendo mientras tanto. Hazlo tras **cada** despliegue que traiga migraciones de 20.3 y como comprobación periódica. |
 
@@ -2692,3 +2724,88 @@ ON CONFLICT ("id") DO NOTHING;
 - **Tests herméticos.** `admin-betterauth` AC10 retira `ADMIN_AUTH_SECRET`/`ADMIN_JWT_SECRET` de `process.env` mientras construye el módulo (y las restaura); el e2e «rol limitado» de `usage-log` crea su propio rol con `scripts/db-roles.sql` en el clon y lo borra (ya no mira los `collectorsclub_*_app` del clúster); los tres `vitest.config*.ts` generan las claves `IDDOC_*` de prueba con `generateIdDocTestEnv({})` (ya no heredan un `IDDOC_ENC_KEYS` exportado).
 - **Texto legal.** `privacidad.md` §6 y §9: solo la cédula o RIF se guarda cifrada; nombre, teléfono y dirección **no**. `cookies.md`: la cookie de sesión es `cc_session` y, en producción con HTTPS, el navegador la guarda como `__Secure-cc_session`. Si ya sembraste los documentos, aplica el cambio como en 22.6 (los textos fuente no sobrescriben un borrador existente).
 - **Frontend.** Los botones «Ver» de la auditoría plena tenían 22×18 px; ahora `min-h-11 min-w-11` (44 px) en móvil y `md:min-h-6 md:min-w-6` (24 px) desde 768 px.
+
+## 23. Epic 20, Story 20.11: endurecimiento de prioridad alta previo al lanzamiento
+
+Origen: `SECURITY-AUDIT-REPORT.md` §5 «Prioridad alta antes del lanzamiento» (cinco puntos). **Solo se atendió la prioridad alta**; lo de prioridad media, baja y «por validar», y el acaparamiento de stock, siguen abiertos.
+
+### 23.1 El arranque falla cerrado con `NODE_ENV=production`
+
+`src/common/production-config.ts` se ejecuta en `main.ts` **antes de crear Nest** (antes de tocar base ni puerto). Si algo falla, el proceso termina con código 1 y un mensaje que **nombra la variable y la regla, nunca el valor**:
+
+```
+Refusing to start with NODE_ENV=production: 2 configuration problem(s):
+  - COOKIE_SECRET is shorter than 32 characters (use `openssl rand -hex 24`)
+  - LEGAL_REQUIRE_PUBLISHED must be exactly `true` in production (...)
+```
+
+| Variable | Regla en producción |
+|---|---|
+| `COOKIE_SECRET`, `ADMIN_AUTH_SECRET` (o el nombre antiguo `ADMIN_JWT_SECRET` si es el que usas), `CUSTOMER_AUTH_SECRET` | Presente, **>= 32 caracteres**, no empieza por `dev-only`, no es un valor publicado en el repo (`.env.example`, CI), no parece un marcador (`change-me`, `example`, `fake`, `<...>`), y **los tres distintos entre sí**. `openssl rand -hex 24` da 48. |
+| `STRIPE_SECRET_KEY` | `sk_live_...` o `rk_live_...`. Vacía, marcador, o `sk_test_/rk_test_` (salvo `STRIPE_ALLOW_TEST_KEYS=true`) detienen el arranque. |
+| `STRIPE_WEBHOOK_SECRET` | `whsec_...` real: no vacía, no `whsec_fake_test_secret`, no un marcador. |
+| `LEGAL_REQUIRE_PUBLISHED` | Exactamente `true`. Publica antes los cuatro documentos (§12) o el registro y el checkout responderán 503 `LEGAL_NOT_PUBLISHED`. |
+
+Fuera de producción **nada cambia** (desarrollo y los e2e, que corren con `NODE_ENV=test`, conservan el cliente falso y los secretos cortos). Además, `stripeClientProvider` repite la regla de Stripe y **nunca devuelve el cliente falso en producción** (defensa en profundidad si otro punto de entrada arrancara Nest).
+
+**`deploy/deploy.sh`** exige ahora `ADMIN_AUTH_SECRET`, `STRIPE_SECRET_KEY` y `STRIPE_WEBHOOK_SECRET` (los dos de Stripe, salvo `STRIPE_ENABLED=false` en el `.env`) y, **antes de migrar y reiniciar**, ejecuta `node dist/common/cli/check-production-config.js --env-file <.env>` con las mismas reglas (`--as-production` en el despliegue de producción, que no depende de que el archivo diga `NODE_ENV=production`; en staging solo si el archivo lo declara). Un fallo detiene el despliegue con el servicio anterior intacto.
+
+### 23.2 Stripe: apagarlo a propósito (decisión)
+
+Angel aún no ha confirmado si Stripe operará al lanzar. **Decisión:** producción nunca arranca con el cliente falso; si Stripe no se usa, se declara **explícitamente** con `STRIPE_ENABLED=false`. Entonces:
+
+- no hace falta ninguna variable de Stripe (se ignoran);
+- `POST /api/v1/checkout` con `paymentRail=stripe` responde **503 `STRIPE_DISABLED`** antes de crear nada (sin pedido ni reserva de stock); el riel `pago_movil` no cambia;
+- `POST /api/v1/payments/stripe/webhook` rechaza **todo** con 400 `STRIPE_SIGNATURE_INVALID`, aunque la firma sea «válida» (nadie puede firmar contra un secreto que no existe);
+- el arranque deja un `WARN` (`STRIPE_ENABLED=false: the Stripe rail is OFF`).
+
+**El frontend** sigue mostrando el botón de tarjeta mientras no se lo oculte (no se tocó, queda fuera de alcance): el comprador verá el mensaje de error del 503. Si Stripe no va a operar, conviene ocultar ese riel en el checkout antes de abrir. Para activar Stripe después: quita `STRIPE_ENABLED` (o `true`), pon las dos claves reales (7.1, 7.2) y reinicia.
+
+### 23.3 La migración fuera del `CMD` (Dokploy y `deploy.sh`)
+
+El `CMD` de la imagen del backend es ahora `["node", "dist/main"]` (forma exec: node es el PID 1 y recibe `SIGTERM`; probado, ver 23.7). El `Dockerfile` termina en `USER node` y la migración es un paso aparte, desde **la misma imagen**:
+
+```bash
+pnpm prisma:deploy        # lee MIGRATE_DATABASE_URL (el propietario) y, si falta, DATABASE_URL
+```
+
+- **Dokploy, tipo Docker Compose (el de 17.8):** servicio `migrate` de una sola corrida (`restart: 'no'`, `command: ['pnpm','prisma:deploy']`) y `backend` con `depends_on: migrate: condition: service_completed_successfully`. En cada despliegue Compose corre `migrate`, y solo si sale con 0 arranca `backend`; si falla, `backend` no arranca y el error de Prisma queda en el log de `migrate` (`docker compose logs migrate`). **La URL del propietario (`MIGRATE_DATABASE_URL`) solo está en `migrate`**: el proceso de la app ya no la ve. Para el `lock_timeout` de 10 s, ponlo en esa URL (`...&options=-c%20lock_timeout%3D10000`).
+- **Dokploy, tipo Application (una sola imagen):** el comando de **pre-despliegue** (*Advanced > Pre Deploy Command* o equivalente de tu versión) es `pnpm prisma:deploy`, con `MIGRATE_DATABASE_URL` definida en el *Environment*. No verificado contra un Dokploy real: la ruta exacta del campo depende de la versión; si no lo ofrece, usa el tipo Compose.
+- **Modo Swarm/stack:** `depends_on` con `condition` **se ignora**; corre `migrate` a mano antes (`docker compose run --rm migrate`) o usa el pre-despliegue.
+- **VPS con systemd (`deploy.sh`):** sin cambios: siempre migró como paso propio, antes del reinicio. Ahora además valida (23.1) antes.
+
+**`uploads/` y el usuario `node`.** La imagen crea `/app/uploads/{public,private}` propiedad de `node` (uid 1000); es lo **único** que la app escribe (imágenes de producto y landing, comprobantes de pago). El resto de `/app` es de root y de solo lectura para el proceso. Un **volumen con nombre** montado en `/app/uploads` hereda ese dueño al crearse; un *bind mount* conserva el del anfitrión: `chown -R 1000:1000 <directorio>` antes de arrancar (si no, la subida de un comprobante o de una imagen falla con `EACCES`). `pnpm` queda accesible para `node` (`COREPACK_HOME=/usr/local/share/corepack`), por eso `pnpm prisma:deploy` y `pnpm iddoc:backfill` funcionan desde `docker compose exec`/`run`.
+
+**Imagen base por digest.** `FROM node:24-slim@sha256:01d566e8...` (índice multi-arquitectura, resuelto el 2026-11-06 contra Docker Hub; mismo digest en el `Dockerfile` del frontend). Para actualizarlo a propósito: `docker buildx imagetools inspect node:24-slim --format '{{.Manifest.Digest}}'` y pega el resultado en los dos `Dockerfile`. **Actions de CI:** fijadas por SHA de commit (`.github/workflows/ci.yml`, con la etiqueta de origen en un comentario): `actions/checkout`, `actions/setup-node`, `pnpm/action-setup`, `appleboy/ssh-action`. Las imágenes de servicio del job de pruebas (`postgres:17-alpine`, `mailhog/mailhog:v1.0.1`) **no** se fijaron por digest (solo corren la base y el buzón de CI, sin secretos de despliegue).
+
+### 23.4 `PUBLIC_ORIGIN` obligatorio en producción (frontend)
+
+El guard CSRF del BFF (`212CollectorsClub-frontend/lib/security/csrf.ts`) caía a comparar el `Origin` con el `Host`/`X-Forwarded-Host` de la petición cuando `PUBLIC_ORIGIN` no estaba definida. Ahora, **con `NODE_ENV=production` y sin `PUBLIC_ORIGIN` válida, toda escritura del BFF (`POST/PUT/PATCH/DELETE` a `/api/**`) responde 403 `CSRF_BLOCKED` (`reason: ORIGIN_UNCONFIGURED`)** y se escribe un error en el log nombrando la variable; nunca se usa el `Host`. Fuera de producción el comportamiento es el de antes (desarrollo y `next dev` sin configuración). Valor: el origen público con esquema y sin barra final, `https://<DOMAIN>`; varias, separadas por comas (`https://a.club,https://www.a.club`). Va en el *Environment* del servicio `frontend` (compose de 17.8) y **en tiempo de ejecución**, no de build. Comprobación tras desplegar: el login del admin y el de cliente (un `POST`) deben funcionar; con la variable mal puesta ves 403 `CSRF_BLOCKED` y, en el log de Next, `PUBLIC_ORIGIN`.
+
+### 23.5 Cabeceras y TLS
+
+**Backend (`helmet`, `src/common/security-headers.ts`)**, en todas las respuestas (también estáticos y errores): `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, CSP `default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'` (es una API JSON: nadie la enmarca ni carga nada de ella), `Referrer-Policy: no-referrer`, `Cross-Origin-Resource-Policy: same-origin` (`cross-origin` solo bajo `/uploads/public/`, pensado para incrustarse), sin `X-Powered-By`, y **`Strict-Transport-Security: max-age=15552000` solo con `NODE_ENV=production`** (180 días, sin `includeSubDomains` ni `preload`: esas son decisiones de todo el dominio, cuando cada subdominio sirva HTTPS). Swagger (cuando está montado) se sirve **sin** la CSP porque su interfaz necesita scripts y estilos en línea; conserva el resto. No rompe el webhook de Stripe (helmet solo escribe cabeceras de respuesta; el cuerpo en bruto no se toca; probado con una firma real) ni las cookies. El backend no habilita CORS (lo consume el BFF de Next, del lado del servidor, y el webhook lo llama Stripe); helmet no añade ninguna política CORS.
+
+**Swagger (`/api/docs`, `/api/docs-json`):** no se monta con `NODE_ENV=production` salvo `SWAGGER_ENABLED=true` (opt-in explícito; lista todas las rutas, DTO y códigos de error: solo detrás de una ACL de red o mientras depuras). Fuera de producción sigue disponible; `SWAGGER_ENABLED=false` lo apaga también en desarrollo.
+
+**Frontend (`next.config.ts`):** cabeceras de seguridad en todas las rutas, una CSP medida contra la tienda real (la lista y lo que hubo que permitir están en el reporte de la story y en `212CollectorsClub-frontend/docs/security-headers.md`) y `Referrer-Policy: no-referrer` en `/reset-password` y `/verify-email` (los tokens viajan en la URL). HSTS (`max-age=15552000`) solo en producción.
+
+**Nginx (VPS con systemd).** Las dos plantillas (`deploy/nginx/api.conf.template`, `staging-api.conf.template`) sirven por **TLS en el 443**, redirigen el 80 al 443 y envían HSTS (`always`, y ocultan el del upstream para que no haya dos). Nginx no carga el bloque 443 sin los certificados, así que el orden es: (1) DNS apuntando al VPS y puertos 80/443 abiertos (1.8); (2) `certbot certonly --standalone -d api.<DOMAIN>` (y el de staging) **antes** de habilitar el sitio, o `--webroot -w /var/www/certbot` si el 80 ya lo usa otro sitio de Nginx; (3) instalar la plantilla, reemplazar `<DOMAIN>`, `nginx -t && systemctl reload nginx`; (4) renovación automática con `certbot.timer` (añade `renew_hook = systemctl reload nginx` a `/etc/letsencrypt/renewal/<dominio>.conf`); (5) comprobar `curl -sI http://api.<DOMAIN>/` (301 a https) y `curl -sI https://api.<DOMAIN>/api/v1/health` (200 con `Strict-Transport-Security`). Las plantillas se comprobaron con `nginx -t` en un contenedor `nginx:alpine` con certificados autofirmados desechables; **no** contra un dominio real.
+
+**Dokploy/Traefik.** TLS y la redirección 80 a 443 los pone Traefik: en la pestaña *Domains* de cada dominio activa **HTTPS** con el certificado **Let's Encrypt** (`certificateType: letsencrypt`); Dokploy escribe el router `websecure` y el `redirect-to-https`. HSTS lo envían las propias apps (helmet en producción para la API, `next.config.ts` para la tienda), por lo que no hace falta (ni conviene duplicar) un middleware `stsSeconds` de Traefik; si lo añades, usa el mismo `max-age`. El dominio de la API solo expone el webhook (17.8, ruta fijada), así que su HSTS importa poco. **No verificado contra un Dokploy real.**
+
+### 23.6 Variables nuevas u obligatorias (resumen; la fuente es cada `.env.example`)
+
+| Variable | Dónde | Efecto |
+|---|---|---|
+| `COOKIE_SECRET`, `ADMIN_AUTH_SECRET`, `CUSTOMER_AUTH_SECRET` | backend | Ya obligatorias; en producción además >= 32 caracteres, sin `dev-only`, distintas (23.1). |
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | backend | En producción obligatorias y reales (23.1), salvo `STRIPE_ENABLED=false`. `deploy.sh` las exige. |
+| `STRIPE_ENABLED` | backend | **Nueva.** `false` apaga el riel Stripe a propósito (23.2). |
+| `STRIPE_ALLOW_TEST_KEYS` | backend | **Nueva.** `true` admite claves `sk_test_` en un staging con `NODE_ENV=production`. |
+| `LEGAL_REQUIRE_PUBLISHED` | backend | En producción debe ser `true`. |
+| `SWAGGER_ENABLED` | backend | **Nueva.** `true` monta Swagger en producción; `false` lo apaga en desarrollo. |
+| `PUBLIC_ORIGIN` | frontend | **Obligatoria en producción** (23.4). |
+
+### 23.7 Lo comprobado y lo que no
+
+Las cifras de pruebas y lo verificado a mano (arranque real de `node dist/main` con cada variable mala, contenedor como `node`, `SIGTERM`, migración desde la imagen contra un Postgres desechable, recorrido del navegador con la CSP) están en el reporte de la story. **No verificado:** un Dokploy real, un VPS con systemd, Stripe real, certificados reales.

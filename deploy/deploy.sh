@@ -67,11 +67,22 @@ log "environment=$ENVIRONMENT app_dir=$APP_DIR service=$SERVICE_NAME ref=$GIT_RE
 [ -d "$APP_DIR/.git" ] || fail "$APP_DIR is not a git checkout — see docs/deployment.md provisioning steps"
 [ -f "$ENV_FILE" ] || fail "$ENV_FILE not found — create it per docs/deployment.md before deploying"
 
-# Epic 12: the service does not boot without CUSTOMER_AUTH_SECRET; fail the
-# deploy early instead of crash-looping after the restart.
-for var in CUSTOMER_AUTH_SECRET; do
+# Epic 12 + Story 20.11: the service does not boot without these; fail the deploy early instead of crash-looping
+# after the restart. Only PRESENCE is checked here (cheap, before the checkout/build); the production RULES (length,
+# no dev-only value, real Stripe keys, LEGAL_REQUIRE_PUBLISHED=true) are checked further down with the service's own
+# function (check-production-config).
+for var in CUSTOMER_AUTH_SECRET ADMIN_AUTH_SECRET; do
   grep -Eq "^${var}=.+" "$ENV_FILE" || fail "$var is missing in $ENV_FILE — see docs/deployment.md §1.5"
 done
+# Story 20.11: the Stripe keys are mandatory unless the rail is switched off ON PURPOSE (STRIPE_ENABLED=false): a
+# production service never runs on the fake Stripe client (it refuses to boot), so a missing key must stop the deploy.
+if grep -Eq '^STRIPE_ENABLED=[[:space:]]*false[[:space:]]*$' "$ENV_FILE"; then
+  log "STRIPE_ENABLED=false: the Stripe rail is OFF in this environment (checkout by card answers 503, the webhook rejects everything)"
+else
+  for var in STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET; do
+    grep -Eq "^${var}=.+" "$ENV_FILE" || fail "$var is missing in $ENV_FILE — set it (docs/deployment.md section 7) or switch the Stripe rail off on purpose with STRIPE_ENABLED=false (section 23)"
+  done
+fi
 # Story 20.2: the service does not boot without the ID document keyring either
 # (docs/deployment.md section 14). Only PRESENCE is checked here (cheap, before the
 # checkout/build); the VALUES are validated further down with the app's own parser
@@ -79,7 +90,7 @@ done
 for var in IDDOC_ENC_KEYS IDDOC_ENC_ACTIVE_KEY IDDOC_BLIND_KEY; do
   grep -Eq "^${var}=.+" "$ENV_FILE" || fail "$var is missing in $ENV_FILE — see docs/deployment.md §14"
 done
-for var in ADMIN_AUTH_SECRET FRONTEND_URL; do
+for var in FRONTEND_URL; do
   grep -Eq "^${var}=.+" "$ENV_FILE" || log "WARNING: $var is not set in $ENV_FILE — see docs/deployment.md §1.5"
 done
 
@@ -107,6 +118,17 @@ pnpm build
 # .env.example has '<...>' placeholders that bash would choke on.
 log "validating the ID document keyring (parseIdDocKeyring)"
 node dist/crypto/cli/check-keyring.js --env-file "$ENV_FILE" || fail "the ID document keyring in $ENV_FILE is invalid (see above; docs/deployment.md section 14). Nothing was migrated and the service was NOT restarted."
+
+# Story 20.11 (security audit, high priority 1): the production rules the service applies at boot (dev-only or short
+# secrets, test or fake Stripe keys, LEGAL_REQUIRE_PUBLISHED != true), checked BEFORE the migration and the restart with
+# the same function. The production deploy applies them whatever NODE_ENV the file says (the unit does not set it, so
+# a file without NODE_ENV=production would otherwise skip them here and be refused at the restart); staging applies
+# them only when its file declares NODE_ENV=production. Names variables and rules, never a value.
+PRODUCTION_FLAG=""
+[ "$ENVIRONMENT" = "production" ] && PRODUCTION_FLAG="--as-production"
+log "validating the production configuration (check-production-config)"
+# shellcheck disable=SC2086
+node dist/common/cli/check-production-config.js --env-file "$ENV_FILE" $PRODUCTION_FLAG || fail "the configuration in $ENV_FILE does not meet the production rules (see above; docs/deployment.md section 23). Nothing was migrated and the service was NOT restarted."
 
 # Story 20.8 round 2: validate the optional retention / usage-log / cron settings with the SAME functions the service runs at
 # boot, before the migrations and the restart. An optional variable written wrong (PURGE_USAGE_LOG_DAYS=30, a cron of

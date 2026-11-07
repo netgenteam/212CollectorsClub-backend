@@ -1,7 +1,7 @@
+import './common/env-at-import.js';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { Logger, VersioningType } from '@nestjs/common';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module.js';
@@ -19,6 +19,12 @@ import { applyUsageLog } from './usage/usage-log.middleware.js';
 import { applyJsonBodyLimit } from './common/json-body-limit.js';
 import { createGlobalValidationPipe } from './common/global-validation-pipe.js';
 import { installShutdownDeadline } from './common/shutdown-deadline.js';
+import {
+  ProductionConfigError,
+  assertProductionConfig,
+} from './common/production-config.js';
+import { setupSwagger } from './common/swagger-setup.js';
+import { applySecurityHeaders } from './common/security-headers.js';
 import { RedactingLogger } from './common/redacting-logger.js';
 import {
   PUBLIC_STATIC_PREFIX,
@@ -26,6 +32,10 @@ import {
 } from './admin-catalog/product-image-upload-paths.constants.js';
 
 async function bootstrap() {
+  // Story 20.11: with NODE_ENV=production a dev secret, the fake Stripe client or LEGAL_REQUIRE_PUBLISHED=false
+  // stop the boot here, naming the variable (never its value), before Nest, the database or the port are touched.
+  // `.env` is already loaded (env-at-import, imported first, the same file ConfigModule reads).
+  assertProductionConfig(process.env);
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     // Story 14.3 (AD-47): exposes req.rawBody (Buffer) for Stripe webhook
     // signature verification; JSON parsing of every route is unchanged.
@@ -63,6 +73,9 @@ async function bootstrap() {
   // only for requests carrying a Bearer token). See `json-body-limit.ts`.
   // Story 20.1: requestId + ip context for every request, before cookie-parser.
   applyRequestContext(app);
+
+  // Story 20.11: helmet headers on every response (static files and errors included), before anything else.
+  applySecurityHeaders(app, process.env);
 
   // Story 20.7 (AD-100): the usage log. A plain Express middleware (an interceptor would not see a 404
   // nor a request a guard rejected), right after the request id it records and before cookie-parser.
@@ -104,54 +117,8 @@ async function bootstrap() {
   // error shape everywhere, not a raw 500 from downstream Prisma/Postgres.
   app.useGlobalPipes(createGlobalValidationPipe());
 
-  // FR-2: OpenAPI/Swagger doc generated purely from @nestjs/swagger
-  // decorators on controllers/DTOs — never a hand-maintained separate doc.
-  // Mounted at /api/docs, independent of the API's own /api/v1 prefix.
-  const swaggerConfig = new DocumentBuilder()
-    .setTitle('212CollectorsClub API')
-    .setDescription(
-      'Versioned REST API for the 212CollectorsClub backend (e-commerce TCG platform).',
-    )
-    .setVersion('1.0')
-    // Story 4.2 (AD-17): documents the "Authorization: Bearer <token>"
-    // scheme every orders/:orderId/... route (Proof-of-Payment upload,
-    // and later Story 5.1's order lookup) expects the one-time
-    // orderAccessToken in — referenced by @ApiBearerAuth() on those routes.
-    // Not actually a JWT (it's a raw SHA-256-backed opaque token — see
-    // CheckoutService), so `bearerFormat` is left generic rather than
-    // claiming a JWT shape the token doesn't have.
-    .addBearerAuth({
-      type: 'http',
-      scheme: 'bearer',
-      description:
-        'The one-time orderAccessToken from the checkout response (Story 4.1) — an opaque token, not a JWT.',
-    })
-    // Story 7.1 (AD-11): a second, separately-named bearer scheme for the
-    // Admin JWT (`POST /api/v1/admin/auth/login`'s `accessToken`) — kept
-    // distinct from the unnamed scheme above since the two are different
-    // trust boundaries with different formats (this one really is a JWT).
-    // Referenced by `@ApiBearerAuth('admin-jwt')` on every
-    // AdminAuthGuard-gated route.
-    .addBearerAuth(
-      {
-        type: 'http',
-        scheme: 'bearer',
-        bearerFormat: 'JWT',
-        description:
-          'The Admin JWT from POST /api/v1/admin/auth/login (8h max-age, AD-11).',
-      },
-      'admin-jwt',
-    )
-    // Story 12.3 (AD-28): the customer session is an httpOnly cookie, never a
-    // bearer token (Authorization stays for admin / orderAccessToken).
-    .addCookieAuth(
-      'cc_session',
-      { type: 'apiKey', in: 'cookie', name: 'cc_session' },
-      'customer-session',
-    )
-    .build();
-  const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup('api/docs', app, swaggerDocument);
+  // FR-2 / Story 20.11: OpenAPI/Swagger at /api/docs (see common/swagger-setup.ts for the production rule).
+  setupSwagger(app, process.env);
 
   // Story 20.5: closing the app (SIGTERM from systemd) flushes what the services keep pending,
   // such as the discarded failed-login counts (`AdminLoginFailureSummary`), and (Story 20.7) the usage
@@ -167,6 +134,10 @@ try {
   await bootstrap();
 } catch (err) {
   // A bad TRUST_PROXY is an operator mistake: say which variable, not a stack of Express internals.
+  if (err instanceof ProductionConfigError) {
+    new Logger('Bootstrap').error(err.message);
+    process.exit(1);
+  }
   if (err instanceof TrustProxyConfigError) {
     new Logger('Bootstrap').error(err.message);
     process.exit(1);

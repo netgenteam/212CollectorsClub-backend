@@ -249,6 +249,19 @@ export class CheckoutService implements OnModuleInit {
     // (race between GET /auth/me and this POST). 409, nothing created, no DB touched.
     assertExpectedCustomer(dto.expectedCustomerId, customer?.id ?? null);
 
+    // Story 20.11: the Stripe rail was switched off on purpose (STRIPE_ENABLED=false): a clear 503 before
+    // anything is created (no Order, no StockHold), never an order that waits for a payment that cannot come.
+    if (
+      dto.paymentRail === CheckoutPaymentRail.STRIPE &&
+      this.stripeClient.disabled === true
+    ) {
+      throw new ApiException(
+        HttpStatus.SERVICE_UNAVAILABLE,
+        'STRIPE_DISABLED',
+        'Card payments (Stripe) are not available right now. Pay with pago movil instead.',
+      );
+    }
+
     // Story 17.4 (AD-74): DB-free shipping gates, before touching cart/stock.
     assertCheckoutShippingPreconditions(dto, customer !== null);
 
