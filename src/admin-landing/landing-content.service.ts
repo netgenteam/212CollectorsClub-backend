@@ -1,4 +1,5 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
+import { withDrop212Enabled } from './landing-blocks.normalize.js';
 import { isISO8601 } from 'class-validator';
 import { ApiException } from '../common/api-exception.js';
 import { Prisma } from '../generated/prisma/client.js';
@@ -322,10 +323,18 @@ export class LandingContentService {
       Record<string, { valueType: string; value: unknown; updatedAt: Date }>
     > = {};
     for (const row of rows) {
-      const value =
-        row.section === LANDING_SECTION_HOME && row.key === 'vitrina'
-          ? await this.expandVitrina(row.value as Record<string, unknown>)
-          : row.value;
+      let value: unknown;
+      if (row.section === LANDING_SECTION_HOME && row.key === 'vitrina') {
+        value = await this.expandVitrina(row.value as Record<string, unknown>);
+      } else if (
+        row.section === LANDING_SECTION_HOME &&
+        row.key === 'drop212'
+      ) {
+        // Story 21.2 (AD-105): `enabled` is always a boolean (legacy => true).
+        value = withDrop212Enabled(row.value as Record<string, unknown>, row);
+      } else {
+        value = row.value;
+      }
       grouped[row.section] ??= {};
       grouped[row.section][row.key] = {
         valueType: row.valueType,
@@ -336,6 +345,15 @@ export class LandingContentService {
           row.section === LANDING_SECTION_HOME && row.publishedAt
             ? row.publishedAt
             : row.updatedAt,
+      };
+    }
+    // Story 21.2 (AD-105; FR-146): never published => synthesized hidden block.
+    if (!grouped[LANDING_SECTION_HOME]?.drop212) {
+      grouped[LANDING_SECTION_HOME] ??= {};
+      grouped[LANDING_SECTION_HOME].drop212 = {
+        valueType: 'json',
+        value: { enabled: false },
+        updatedAt: new Date(0),
       };
     }
     return grouped;

@@ -83,7 +83,7 @@ export class AdminLandingBlocksController {
     summary:
       'Effective Home content for the preview (draft if any, else published)',
     description:
-      'Returns { blocks, draftBlocks }: per block the draft when it exists, otherwise the published value (blocks with neither are omitted); vitrina carries the expanded in-stock `products` like the public GET.',
+      'Returns { blocks, draftBlocks }: per block the draft when it exists, otherwise the published value (blocks with neither are omitted); vitrina carries the expanded in-stock `products` like the public GET. Story 21.2: drop212 is always present with a boolean `enabled` (`{ enabled: false }` when it was never published and has no draft); a draft without `enabled` shows the value it would inherit.',
   })
   @ApiResponse({ status: HttpStatus.OK })
   @ApiResponse(UNAUTHORIZED)

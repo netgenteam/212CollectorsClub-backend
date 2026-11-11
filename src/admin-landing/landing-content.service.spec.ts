@@ -460,7 +460,9 @@ describe('LandingContentService', () => {
         },
       ]);
 
-      const result = await service.getPublicContent();
+      const { home, ...result } = await service.getPublicContent();
+      // Story 21.2: only the synthesized home.drop212 is added.
+      expect(Object.keys(home)).toEqual(['drop212']);
 
       expect(result).toEqual({
         texts: {
@@ -476,10 +478,61 @@ describe('LandingContentService', () => {
       });
     });
 
-    it('returns {} (never throws) when no rows exist', async () => {
+    it('never throws when no rows exist: only the synthesized hidden home.drop212 (Story 21.2)', async () => {
       prisma.landingConfigEntry.findMany.mockResolvedValue([]);
 
-      await expect(service.getPublicContent()).resolves.toEqual({});
+      await expect(service.getPublicContent()).resolves.toEqual({
+        home: {
+          drop212: {
+            valueType: 'json',
+            value: { enabled: false },
+            updatedAt: new Date(0),
+          },
+        },
+      });
+    });
+
+    describe('home.drop212 enabled (Story 21.2, AD-105)', () => {
+      const publishedAt = new Date('2026-02-01');
+      const row = (value: unknown) => ({
+        section: 'home',
+        key: 'drop212',
+        valueType: 'json',
+        value,
+        updatedAt: new Date('2026-03-01'),
+        publishedAt,
+      });
+
+      it('legacy published block without the field reads enabled:true, rest untouched', async () => {
+        prisma.landingConfigEntry.findMany.mockResolvedValue([
+          row({ eyebrow: 'E', tiers: [] }),
+        ]);
+        const r = await service.getPublicContent();
+        expect(r.home.drop212.value).toEqual({
+          eyebrow: 'E',
+          tiers: [],
+          enabled: true,
+        });
+        expect(r.home.drop212.updatedAt).toEqual(publishedAt);
+      });
+
+      it.each([true, false])('explicit %s wins', async (enabled) => {
+        prisma.landingConfigEntry.findMany.mockResolvedValue([
+          row({ eyebrow: 'E', enabled }),
+        ]);
+        const r = await service.getPublicContent();
+        expect((r.home.drop212.value as { enabled: boolean }).enabled).toBe(
+          enabled,
+        );
+      });
+
+      it('does not touch other home blocks', async () => {
+        const ticker = { ...row({ items: [] }), key: 'ticker' };
+        prisma.landingConfigEntry.findMany.mockResolvedValue([ticker]);
+        const r = await service.getPublicContent();
+        expect(r.home.ticker.value).toEqual({ items: [] });
+        expect(r.home.drop212.value).toEqual({ enabled: false });
+      });
     });
 
     it('groups a "pack_simulator" row alongside texts/banners/drop212, with no special-casing needed (Story 10.3)', async () => {

@@ -18,6 +18,7 @@ import {
   MaxLength,
   Min,
   Validate,
+  ValidateIf,
   ValidateNested,
   ValidatorConstraint,
   type ValidationArguments,
@@ -348,6 +349,16 @@ export class Drop212BlockDto {
   @ValidateNested({ each: true })
   @Type(() => Drop212TierDto)
   tiers: Drop212TierDto[];
+
+  @ApiPropertyOptional({
+    type: Boolean,
+    description:
+      'Story 21.2 (AD-105). Visibility of the Drop 212 section on the Home. Strict boolean (no coercion; null is rejected). ' +
+      'Default when omitted: inherits the published value (a legacy published block without the field => true); never published => false.',
+  })
+  @ValidateIf((_o, v) => v !== undefined)
+  @IsBoolean()
+  enabled?: boolean;
 }
 
 // ---- simulator ------------------------------------------------------------

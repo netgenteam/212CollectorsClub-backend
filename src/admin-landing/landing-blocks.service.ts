@@ -15,6 +15,7 @@ import {
 import { LandingContentService } from './landing-content.service.js';
 import { LANDING_IMAGES_URL_PREFIX } from '../admin-catalog/product-image-upload-paths.constants.js';
 import { LandingImagesService } from './landing-images.service.js';
+import { withDrop212Enabled } from './landing-blocks.normalize.js';
 import { validateLandingBlock } from './landing-blocks.validation.js';
 
 const BLOCK_SELECT = {
@@ -81,13 +82,21 @@ export class LandingBlocksService {
     const draftBlocks: string[] = [];
     for (const block of LANDING_BLOCKS) {
       const row = byKey.get(block);
-      if (!row) continue;
+      if (!row) {
+        // Story 21.2 (AD-105): never published and no draft => hidden.
+        if (block === 'drop212') blocks[block] = { enabled: false };
+        continue;
+      }
       let value: Record<string, unknown> | null = null;
       if (row.draftValue !== null) {
         value = row.draftValue as Record<string, unknown>;
         draftBlocks.push(block);
       } else if (row.publishedAt !== null) {
         value = row.value as Record<string, unknown>;
+      }
+      if (block === 'drop212') {
+        blocks[block] = withDrop212Enabled(value ?? {}, row);
+        continue;
       }
       if (value === null) continue;
       blocks[block] =
@@ -136,7 +145,7 @@ export class LandingBlocksService {
     adminUserId: string,
   ): Promise<LandingBlockDetailDto> {
     const block = assertKnownBlock(blockParam);
-    const value = await validateLandingBlock(block, body);
+    let value = await validateLandingBlock(block, body);
     if (block === 'vitrina') {
       await this.assertProductsExist(value.productIds as string[]);
     }
@@ -148,6 +157,16 @@ export class LandingBlocksService {
           await this.images.assertStoredCard(url);
         }
       }
+    }
+
+    if (block === 'drop212' && typeof value.enabled !== 'boolean') {
+      // Story 21.2 (AD-105): persist the inherited value so an old admin
+      // client editing a text does not silently hide a visible section.
+      const current = await this.prisma.landingConfigEntry.findUnique({
+        where: { section_key: { section: LANDING_SECTION_HOME, key: block } },
+        select: { value: true, publishedAt: true },
+      });
+      value = withDrop212Enabled(value, current);
     }
 
     const now = new Date();
@@ -243,10 +262,23 @@ export class LandingBlocksService {
     adminUserId: string,
   ): Promise<BlockRow> {
     const where = { section: LANDING_SECTION_HOME, key: row.key };
+    let promoted = row.draftValue as Prisma.InputJsonValue;
+    if (row.key === 'drop212') {
+      // Story 21.2 (AD-105): normalize a legacy draft against the current
+      // published value, inside the same transaction.
+      const current = await tx.landingConfigEntry.findUnique({
+        where: { section_key: where },
+        select: { value: true, publishedAt: true },
+      });
+      promoted = withDrop212Enabled(
+        row.draftValue as Record<string, unknown>,
+        current,
+      ) as Prisma.InputJsonObject;
+    }
     await tx.landingConfigEntry.update({
       where: { section_key: where },
       data: {
-        value: row.draftValue as Prisma.InputJsonValue,
+        value: promoted,
         publishedAt: new Date(),
         updatedById: adminUserId,
       },
@@ -300,13 +332,22 @@ function toDetail(
   block: LandingBlock,
   row: BlockRow | null,
 ): LandingBlockDetailDto {
+  const isDrop = block === 'drop212';
+  const published =
+    row && row.publishedAt !== null
+      ? (row.value as Record<string, unknown>)
+      : null;
+  const draft = row?.draftValue
+    ? (row.draftValue as Record<string, unknown>)
+    : null;
   return {
     block,
+    // Story 21.2 (AD-105): `enabled` is always a boolean for drop212.
     published:
-      row && row.publishedAt !== null
-        ? (row.value as Record<string, unknown>)
-        : null,
-    draft: row?.draftValue ? (row.draftValue as Record<string, unknown>) : null,
+      isDrop && published && row
+        ? withDrop212Enabled(published, row)
+        : published,
+    draft: isDrop && draft ? withDrop212Enabled(draft, row) : draft,
     publishedAt: row?.publishedAt ?? null,
     draftUpdatedAt: row?.draftUpdatedAt ?? null,
   };

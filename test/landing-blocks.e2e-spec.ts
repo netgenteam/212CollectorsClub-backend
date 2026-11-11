@@ -281,7 +281,12 @@ describe('Landing blocks draft/publish (e2e)', () => {
       .expect(200);
     expect(res.body).toEqual({ published: ['ticker', 'simulator'] });
     const home = await publicHome();
-    expect(Object.keys(home).sort()).toEqual(['simulator', 'ticker']);
+    // Story 21.2: home.drop212 is always present (synthesized hidden block).
+    expect(Object.keys(home).sort()).toEqual([
+      'drop212',
+      'simulator',
+      'ticker',
+    ]);
   });
 
   it('publish-all is atomic: a failure on the 2nd block publishes none', async () => {
@@ -315,7 +320,8 @@ describe('Landing blocks draft/publish (e2e)', () => {
     expect(
       rows.every((r) => r.publishedAt === null && r.draftValue !== null),
     ).toBe(true);
-    expect((await publicHome()) ?? {}).toEqual({});
+    // Story 21.2: only the synthesized hidden drop212 remains.
+    expect(Object.keys((await publicHome()) ?? {})).toEqual(['drop212']);
   });
 
   describe('validation (one case per block)', () => {
@@ -478,6 +484,149 @@ describe('Landing blocks draft/publish (e2e)', () => {
         where: { section: 'pack_simulator', key },
       });
     }
+  });
+
+  describe('drop212 enabled flag (Story 21.2, AD-105)', () => {
+    const publish = (block: string) =>
+      request(app.getHttpServer())
+        .post(`${BASE}/blocks/${block}/publish`)
+        .set(auth());
+    const legacyDrop = () => {
+      const { ...v } = validBlock('drop212');
+      return v;
+    };
+    const seedPublishedLegacy = () =>
+      prisma.landingConfigEntry.create({
+        data: {
+          section: 'home',
+          key: 'drop212',
+          valueType: 'json',
+          value: legacyDrop() as Prisma.InputJsonObject,
+          publishedAt: new Date(),
+        },
+      });
+    const dropValue = async () =>
+      (await publicHome()).drop212?.value as Record<string, unknown>;
+    const draftEnabled = async () =>
+      (
+        (
+          await request(app.getHttpServer())
+            .get(`${BASE}/draft`)
+            .set(auth())
+            .expect(200)
+        ).body as { blocks: { drop212: { enabled: boolean } } }
+      ).blocks.drop212.enabled;
+
+    it('never published: public GET synthesizes enabled:false; effective draft too', async () => {
+      const home = await publicHome();
+      expect(home.drop212).toMatchObject({
+        valueType: 'json',
+        value: { enabled: false },
+      });
+      expect(Object.keys(home)).toEqual(['drop212']);
+      expect(await draftEnabled()).toBe(false);
+    });
+
+    it('published legacy without the field => public true, detail true, other blocks unchanged', async () => {
+      await seedPublishedLegacy();
+      await put('ticker', validBlock('ticker')).expect(200);
+      await publish('ticker').expect(200);
+      expect(await dropValue()).toEqual({ ...legacyDrop(), enabled: true });
+      expect((await publicHome()).ticker?.value).toEqual(validBlock('ticker'));
+      const detail = (
+        await request(app.getHttpServer())
+          .get(`${BASE}/blocks/drop212`)
+          .set(auth())
+          .expect(200)
+      ).body as Detail;
+      expect((detail.published as { enabled: boolean }).enabled).toBe(true);
+      expect(await draftEnabled()).toBe(true);
+    });
+
+    it.each(['si', 'false', 0, null])(
+      'PUT enabled=%j => 400 LANDING_BLOCK_INVALID',
+      async (enabled) => {
+        const res = await put('drop212', {
+          ...validBlock('drop212'),
+          enabled,
+        }).expect(400);
+        const body = res.body as ErrBody;
+        expect(body.errorCode).toBe('LANDING_BLOCK_INVALID');
+        expect(body.details?.errors?.some((e) => e.path === 'enabled')).toBe(
+          true,
+        );
+      },
+    );
+
+    it('activate and publish => true; deactivate and publish => false', async () => {
+      await put('drop212', { ...validBlock('drop212'), enabled: true }).expect(
+        200,
+      );
+      expect(await dropValue()).toEqual({ enabled: false }); // draft not leaked
+      await publish('drop212').expect(200);
+      expect((await dropValue()).enabled).toBe(true);
+      await put('drop212', { ...validBlock('drop212'), enabled: false }).expect(
+        200,
+      );
+      expect(await draftEnabled()).toBe(false);
+      await publish('drop212').expect(200);
+      expect((await dropValue()).enabled).toBe(false);
+    });
+
+    it('saveDraft without enabled: inherits true from legacy published; false if never published', async () => {
+      const r1 = await put('drop212', validBlock('drop212')).expect(200);
+      expect(((r1.body as Detail).draft as { enabled: boolean }).enabled).toBe(
+        false,
+      );
+      await wipe();
+      await seedPublishedLegacy();
+      const r2 = await put('drop212', validBlock('drop212')).expect(200);
+      expect(((r2.body as Detail).draft as { enabled: boolean }).enabled).toBe(
+        true,
+      );
+    });
+
+    it('publishAll with a legacy drop212 draft (no field) normalizes it in the tx', async () => {
+      await seedPublishedLegacy();
+      await prisma.landingConfigEntry.update({
+        where: { section_key: { section: 'home', key: 'drop212' } },
+        data: {
+          draftValue: {
+            ...legacyDrop(),
+            eyebrow: 'Editado',
+          },
+          draftUpdatedAt: new Date(),
+        },
+      });
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/publish`)
+        .set(auth())
+        .expect(200);
+      expect((res.body as { published: string[] }).published).toContain(
+        'drop212',
+      );
+      const row = await prisma.landingConfigEntry.findUniqueOrThrow({
+        where: { section_key: { section: 'home', key: 'drop212' } },
+      });
+      expect((row.value as { enabled: boolean }).enabled).toBe(true);
+      expect((await dropValue()).eyebrow).toBe('Editado');
+    });
+
+    it('the blocks list keeps its shape', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/blocks`)
+        .set(auth())
+        .expect(200);
+      const data = (res.body as { data: Record<string, unknown>[] }).data;
+      expect(data).toHaveLength(7);
+      expect(Object.keys(data[0]).sort()).toEqual([
+        'block',
+        'draftUpdatedAt',
+        'hasDraft',
+        'hasPublished',
+        'publishedAt',
+      ]);
+    });
   });
 
   async function anyProduct() {

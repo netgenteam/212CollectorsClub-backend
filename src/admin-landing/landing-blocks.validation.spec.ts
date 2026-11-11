@@ -215,3 +215,37 @@ describe('validateLandingBlock', () => {
     expect(errors[0].messages[0]).toMatch(/maximum/);
   });
 });
+
+/** Story 21.2 (AD-105): `enabled` is a strict boolean on drop212 only. */
+describe('validateLandingBlock drop212.enabled', () => {
+  it.each([true, false])('accepts enabled:%s', async (enabled) => {
+    await expect(
+      validateLandingBlock('drop212', { ...validBlock('drop212'), enabled }),
+    ).resolves.toMatchObject({ enabled });
+  });
+
+  it('accepts the legacy shape without enabled', async () => {
+    await expect(
+      validateLandingBlock('drop212', validBlock('drop212')),
+    ).resolves.not.toHaveProperty('enabled');
+  });
+
+  it.each(['si', 'false', 0, 1, null, {}, []])(
+    'rejects enabled=%j with a path "enabled" error',
+    async (enabled) => {
+      const errors = await errorsOf('drop212', {
+        ...validBlock('drop212'),
+        enabled,
+      });
+      expect(errors.some((e) => e.path === 'enabled')).toBe(true);
+    },
+  );
+
+  it('does not accept enabled on other blocks', async () => {
+    const errors = await errorsOf('ticker', {
+      ...validBlock('ticker'),
+      enabled: true,
+    });
+    expect(errors.some((e) => e.path === 'enabled')).toBe(true);
+  });
+});

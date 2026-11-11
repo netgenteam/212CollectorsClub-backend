@@ -29,7 +29,7 @@ export class LandingContentController {
   @ApiOperation({
     summary: 'Read all landing-page content, grouped by section',
     description:
-      "Returns every LandingConfigEntry grouped as { [section]: { [key]: { valueType, value, updatedAt } } }. No authentication required. Reflects the admin's latest edit immediately (no caching layer, AD-10). Returns {} (never an error) when nothing has been seeded/edited yet. Story 16.1: the typed Home blocks appear under `home` ONLY once published (never their drafts); the legacy sections texts/banners/drop212/pack_simulator are deprecated but still served under their own names.",
+      "Returns every LandingConfigEntry grouped as { [section]: { [key]: { valueType, value, updatedAt } } }. No authentication required. Reflects the admin's latest edit immediately (no caching layer, AD-10). Never an error on an empty table (Story 21.2: the response then only carries the synthesized `home.drop212`). Story 16.1: the typed Home blocks appear under `home` ONLY once published (never their drafts); the legacy sections texts/banners/drop212/pack_simulator are deprecated but still served under their own names. Story 21.2 (AD-105): `home.drop212.value.enabled` is ALWAYS a boolean — an explicit value wins, a block published before the flag existed reads `true`, and when drop212 was never published the block is synthesized as `{ valueType: 'json', value: { enabled: false }, updatedAt: '1970-01-01T00:00:00.000Z' }` (the Home must hide the section).",
   })
   @ApiOkResponse({
     description: 'Landing content grouped by section.',

@@ -344,7 +344,11 @@ describe('Landing images, vitrina and draft view (e2e)', () => {
     });
 
     it('GET draft returns effective values and never leaks into the public GET', async () => {
-      expect(await draftView()).toEqual({ blocks: {}, draftBlocks: [] });
+      // Story 21.2: drop212 is always present, hidden when never published.
+      expect(await draftView()).toEqual({
+        blocks: { drop212: { enabled: false } },
+        draftBlocks: [],
+      });
 
       const a = await mkProduct('Active3 16.2', { stock: 3 });
       await putBlock('ticker', validBlock('ticker'));
@@ -359,7 +363,11 @@ describe('Landing images, vitrina and draft view (e2e)', () => {
       expect(
         (d.blocks.vitrina.products as { id: string }[]).map((p) => p.id),
       ).toEqual([a]);
-      expect(Object.keys(d.blocks).sort()).toEqual(['ticker', 'vitrina']);
+      expect(Object.keys(d.blocks).sort()).toEqual([
+        'drop212',
+        'ticker',
+        'vitrina',
+      ]);
 
       // Public: published ticker only, no vitrina (never published).
       const pub = await request(app.getHttpServer())
