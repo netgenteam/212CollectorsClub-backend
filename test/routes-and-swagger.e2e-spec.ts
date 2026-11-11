@@ -93,6 +93,14 @@ describe('Canonical routes & Swagger contract (e2e, Story 11.6)', () => {
     );
   });
 
+  it('exposes Drop212BlockDto with the `enabled` flag (Story 21.2, AC7)', () => {
+    const dto = doc.components.schemas.Drop212BlockDto as {
+      properties?: Record<string, { type?: string }>;
+    };
+    expect(dto).toBeDefined();
+    expect(dto.properties?.enabled?.type).toBe('boolean');
+  });
+
   it('documents the related and wishlist paths', () => {
     expect(doc.paths['/api/v1/products/{idOrSlug}/related']?.get).toBeDefined();
     expect(doc.paths['/api/v1/wishlist']?.get).toBeDefined();

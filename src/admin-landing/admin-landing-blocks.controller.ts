@@ -28,7 +28,10 @@ import {
   LandingPublishAllResponseDto,
 } from './dto/landing-block-response.dto.js';
 import { SegmentDto } from './dto/blocks/common.dto.js';
-import { VitrinaBlockDto } from './dto/blocks/home-blocks.dto.js';
+import {
+  Drop212BlockDto,
+  VitrinaBlockDto,
+} from './dto/blocks/home-blocks.dto.js';
 import { LANDING_BLOCKS } from './landing-blocks.constants.js';
 import { LandingBlocksService } from './landing-blocks.service.js';
 
@@ -59,7 +62,7 @@ const UNKNOWN_BLOCK = {
 @ApiTags('admin-landing')
 // Story 18.9: documents the vitrina block shape (mode/size) even though the
 // body is validated imperatively per block.
-@ApiExtraModels(SegmentDto, VitrinaBlockDto)
+@ApiExtraModels(SegmentDto, VitrinaBlockDto, Drop212BlockDto)
 @ApiBearerAuth('admin-jwt')
 @UseGuards(AdminAuthGuard)
 @Controller('admin/landing-content')
@@ -94,6 +97,8 @@ export class AdminLandingBlocksController {
   @Get('blocks/:block')
   @ApiOperation({
     summary: 'Read one block: published value and pending draft',
+    description:
+      'Story 21.2: drop212 values always carry a boolean `enabled` (legacy published without it => true, never published => false).',
   })
   @ApiParam(BLOCK_PARAM)
   @ApiResponse({ status: HttpStatus.OK, type: LandingBlockDetailDto })
@@ -108,13 +113,13 @@ export class AdminLandingBlocksController {
   @ApiOperation({
     summary: 'Save the DRAFT of one block (does not publish)',
     description:
-      'The body is the block value itself (shape per block, AD-60). Only the draft is stored; the published value is untouched and the public GET does not see it. Last writer wins. Max payload 20 KB; unknown fields are rejected.',
+      'The body is the block value itself (shape per block, AD-60). Only the draft is stored; the published value is untouched and the public GET does not see it. Last writer wins. Max payload 20 KB; unknown fields are rejected. Story 21.2: drop212 accepts an optional strict-boolean `enabled`; when omitted it inherits the published value (legacy => true, never published => false).',
   })
   @ApiParam(BLOCK_PARAM)
   @ApiBody({
     type: Object,
     description:
-      'Block value: ticker {items}, hero {panels}, heroScene {packImageUrl, cardImageUrls}, manifesto {items}, vitrina {eyebrow, titleLines, ctaLabel, productIds, mode?: MANUAL|AUTO|MIXED, size?: 4..12 — see schema VitrinaBlockDto}, drop212 {eyebrow, caption, targetDate, tiers}, simulator {eyebrow, titleLines, description, ctaLabel}.',
+      'Block value: ticker {items}, hero {panels}, heroScene {packImageUrl, cardImageUrls}, manifesto {items}, vitrina {eyebrow, titleLines, ctaLabel, productIds, mode?: MANUAL|AUTO|MIXED, size?: 4..12 — see schema VitrinaBlockDto}, drop212 {eyebrow, caption, targetDate, tiers, enabled?: boolean — see schema Drop212BlockDto; Story 21.2: strict boolean (non-boolean or null => 400); if omitted it inherits the published value, legacy published without it => true, never published => false}, simulator {eyebrow, titleLines, description, ctaLabel}.',
   })
   @ApiResponse({ status: HttpStatus.OK, type: LandingBlockDetailDto })
   @ApiResponse({
@@ -137,7 +142,7 @@ export class AdminLandingBlocksController {
   @ApiOperation({
     summary: 'Publish the draft of one block',
     description:
-      'In one transaction: value = draft, publishedAt = now, draft cleared.',
+      'In one transaction: value = draft, publishedAt = now, draft cleared. Story 21.2: a drop212 draft is published with its resolved boolean `enabled`.',
   })
   @ApiParam(BLOCK_PARAM)
   @ApiResponse({ status: HttpStatus.OK, type: LandingBlockDetailDto })
@@ -158,7 +163,8 @@ export class AdminLandingBlocksController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
     summary: 'Discard the draft of one block',
-    description: 'Idempotent: 204 also when there was no draft.',
+    description:
+      'Idempotent: 204 also when there was no draft. Story 21.2: discarding a drop212 draft also discards its pending `enabled` change.',
   })
   @ApiParam(BLOCK_PARAM)
   @ApiResponse({ status: HttpStatus.NO_CONTENT })
