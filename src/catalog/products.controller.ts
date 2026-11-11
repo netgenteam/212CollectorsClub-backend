@@ -4,7 +4,6 @@ import {
   HttpCode,
   HttpStatus,
   Param,
-  ParseUUIDPipe,
   Query,
 } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -14,6 +13,8 @@ import { PaginatedProductsResponseDto } from './dto/paginated-products-response.
 import { RelatedProductsQueryDto } from './dto/related-products-query.dto.js';
 import { RelatedProductsResponseDto } from './dto/related-products-response.dto.js';
 import { ProductDetailDto } from './dto/product-detail.dto.js';
+import { ParseIdOrSlugPipe } from './pipes/parse-id-or-slug.pipe.js';
+import type { ProductRef } from './pipes/parse-id-or-slug.pipe.js';
 
 @ApiTags('catalog')
 @Controller('products')
@@ -49,7 +50,7 @@ export class ProductsController {
   }
 
   /**
-   * Story 2.3 (FR-7): public Product detail by id — full description,
+   * Story 2.3 (FR-7) + 21.1 (AD-104): public Product detail by id or slug — full description,
    * every `ProductImage`, live `availableStock` (AD-10: direct-to-Postgres
    * read on every call, no caching layer, so this can never be stale), and
    * the joined `Category`. A syntactically invalid id never reaches
@@ -58,14 +59,18 @@ export class ProductsController {
    * Story 2.2's global `ValidationPipe` already established, NFR-3). A
    * well-formed id that matches no row 404s from `CatalogService`.
    */
-  @Get(':id')
+  @Get(':idOrSlug')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Get Product detail',
     description:
       "Returns full detail for a single Product: description, every ProductImage, live availableStock (stock - heldQty, no cache, AD-10), Franchise/ProductType/Rarity and the Product's Category.",
   })
-  @ApiParam({ name: 'id', format: 'uuid', description: 'Product id.' })
+  @ApiParam({
+    name: 'idOrSlug',
+    description: 'Product UUID or slug',
+    schema: { type: 'string' },
+  })
   @ApiResponse({
     status: HttpStatus.OK,
     description: 'Product detail.',
@@ -73,30 +78,36 @@ export class ProductsController {
   })
   @ApiResponse({
     status: HttpStatus.NOT_FOUND,
-    description: 'No Product exists with the given id.',
+    description:
+      'No active Product exists with the given id or slug (inactive and unknown are not distinguished).',
   })
   @ApiResponse({
     status: HttpStatus.BAD_REQUEST,
-    description: 'The given id is not a syntactically valid UUID.',
+    description:
+      'The value is neither a valid UUID nor a valid slug (no errorCode).',
   })
   getProductDetail(
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('idOrSlug', ParseIdOrSlugPipe) ref: ProductRef,
   ): Promise<ProductDetailDto> {
-    return this.catalogService.getProductDetail(id);
+    return this.catalogService.getProductDetail(ref);
   }
 
   /**
    * Story 11.3 (FR-33, AD-20): related products. Declared after `:id`; the
    * extra `/related` segment means the two routes never collide.
    */
-  @Get(':id/related')
+  @Get(':idOrSlug/related')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Get related products',
     description:
       'Active products related to the given one (same franchise + macro-category first, then same category), in-stock first. Excludes the product itself.',
   })
-  @ApiParam({ name: 'id', format: 'uuid', description: 'Product id.' })
+  @ApiParam({
+    name: 'idOrSlug',
+    description: 'Product UUID or slug',
+    schema: { type: 'string' },
+  })
   @ApiResponse({
     status: HttpStatus.OK,
     description: 'Related products (possibly empty).',
@@ -104,16 +115,18 @@ export class ProductsController {
   })
   @ApiResponse({
     status: HttpStatus.NOT_FOUND,
-    description: 'No active Product exists with the given id.',
+    description:
+      'No active Product exists with the given id or slug (inactive and unknown are not distinguished).',
   })
   @ApiResponse({
     status: HttpStatus.BAD_REQUEST,
-    description: 'Invalid UUID or limit outside 1..10.',
+    description:
+      'The value is neither a valid UUID nor a valid slug (no errorCode), or limit outside 1..10.',
   })
   getRelatedProducts(
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('idOrSlug', ParseIdOrSlugPipe) ref: ProductRef,
     @Query() query: RelatedProductsQueryDto,
   ): Promise<RelatedProductsResponseDto> {
-    return this.catalogService.getRelatedProducts(id, query.limit);
+    return this.catalogService.getRelatedProducts(ref, query.limit);
   }
 }

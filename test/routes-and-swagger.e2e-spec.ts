@@ -94,7 +94,7 @@ describe('Canonical routes & Swagger contract (e2e, Story 11.6)', () => {
   });
 
   it('documents the related and wishlist paths', () => {
-    expect(doc.paths['/api/v1/products/{id}/related']?.get).toBeDefined();
+    expect(doc.paths['/api/v1/products/{idOrSlug}/related']?.get).toBeDefined();
     expect(doc.paths['/api/v1/wishlist']?.get).toBeDefined();
     expect(doc.paths['/api/v1/wishlist/items']?.post).toBeDefined();
     expect(

@@ -193,7 +193,7 @@ describe('Related products (e2e, Story 11.3)', () => {
   });
 
   it('400 for a non-UUID id and for limit 0 / 11', async () => {
-    await related('not-a-uuid').expect(400);
+    await related('Not_A_UUID').expect(400);
     await related(ids.base, '?limit=0').expect(400);
     await related(ids.base, '?limit=11').expect(400);
   });

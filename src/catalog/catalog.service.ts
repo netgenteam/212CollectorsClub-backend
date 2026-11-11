@@ -32,6 +32,7 @@ import {
 } from './dto/product-list-item.dto.js';
 import { ProductDetailDto } from './dto/product-detail.dto.js';
 import { ProductTagDto } from './dto/product-tag.dto.js';
+import type { ProductRef } from './pipes/parse-id-or-slug.pipe.js';
 
 // Raw shape of one row from the hand-written SQL in `listProducts` below —
 // only the columns that query selects, before mapping to ProductListItemDto.
@@ -52,6 +53,19 @@ interface ProductSearchRow {
 
 interface CountRow {
   count: unknown;
+}
+
+/** Story 21.1: a bare string keeps meaning "id" (existing callers/tests). */
+function toProductRef(ref: ProductRef | string): ProductRef {
+  return typeof ref === 'string' ? { kind: 'id', value: ref } : ref;
+}
+
+function productWhere(
+  ref: ProductRef,
+): { id: string; isActive: true } | { slug: string; isActive: true } {
+  return ref.kind === 'id'
+    ? { id: ref.value, isActive: true }
+    : { slug: ref.value, isActive: true };
 }
 
 @Injectable()
@@ -390,11 +404,12 @@ export class CatalogService {
    * same category, then name/id. `toListItems` adds one batched image query.
    */
   async getRelatedProducts(
-    id: string,
+    ref: ProductRef | string,
     limit: number,
   ): Promise<RelatedProductsResponseDto> {
+    const r = toProductRef(ref);
     const base = await this.prisma.product.findUnique({
-      where: { id, isActive: true },
+      where: productWhere(r),
       select: {
         id: true,
         franchise: true,
@@ -403,8 +418,9 @@ export class CatalogService {
       },
     });
     if (!base) {
-      throw new NotFoundException(`Product ${id} not found`);
+      throw new NotFoundException(`Product ${r.value} not found`);
     }
+    const id = base.id;
 
     const macroSet: ProductType[] = Object.values(MACRO_CATEGORY_TYPES).find(
       (types) => types.includes(base.productType),
@@ -521,9 +537,10 @@ export class CatalogService {
    * still what makes the query plan a unique lookup) rather than switching
    * to `findFirst`.
    */
-  async getProductDetail(id: string): Promise<ProductDetailDto> {
+  async getProductDetail(ref: ProductRef | string): Promise<ProductDetailDto> {
+    const r = toProductRef(ref);
     const product = await this.prisma.product.findUnique({
-      where: { id, isActive: true },
+      where: productWhere(r),
       include: {
         category: { select: { id: true, name: true, slug: true } },
         images: {
@@ -537,7 +554,7 @@ export class CatalogService {
     });
 
     if (!product) {
-      throw new NotFoundException(`Product ${id} not found`);
+      throw new NotFoundException(`Product ${r.value} not found`);
     }
 
     const availableStock = Math.max(product.stock - product.heldQty, 0);

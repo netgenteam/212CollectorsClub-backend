@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { SLUG_REGEX } from '../../catalog/pipes/parse-id-or-slug.pipe.js';
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
@@ -92,7 +93,7 @@ export class CreateProductDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(200)
-  @Matches(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, {
+  @Matches(SLUG_REGEX, {
     message:
       'slug must contain only lowercase letters, digits and single hyphens between segments (e.g. "blastoise-vmax")',
   })

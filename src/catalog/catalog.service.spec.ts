@@ -511,6 +511,81 @@ describe('CatalogService', () => {
     });
   });
 
+  describe('by slug (Story 21.1, AD-104)', () => {
+    it('getProductDetail resolves by slug with ONE findUnique and no slug->id pre-read', async () => {
+      prisma.product.findUnique.mockResolvedValue({
+        id: 'f65915f5-2931-4e50-af95-630b1fd7b950',
+        name: 'Charizard VMAX',
+        slug: 'charizard-vmax',
+        description: 'd',
+        franchise: 'POKEMON',
+        productType: 'SINGLE_CARD',
+        rarity: 'ULTRA_RARE',
+        priceUsd: '1.00',
+        stock: 1,
+        heldQty: 0,
+        isPreorder: false,
+        releaseDate: null,
+        editionLanguage: null,
+        gradingCompany: null,
+        category: { id: 'c', name: 'C', slug: 'c' },
+        images: [],
+        marketReferences: [],
+      });
+      prisma.$queryRaw.mockResolvedValue([]);
+
+      const result = await service.getProductDetail({
+        kind: 'slug',
+        value: 'charizard-vmax',
+      });
+
+      expect(prisma.product.findUnique).toHaveBeenCalledTimes(1);
+      expect(prisma.product.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { slug: 'charizard-vmax', isActive: true },
+        }),
+      );
+      expect(result.slug).toBe('charizard-vmax');
+    });
+
+    it('getProductDetail 404s with the value in the message (slug or id)', async () => {
+      prisma.product.findUnique.mockResolvedValue(null);
+      await expect(
+        service.getProductDetail({ kind: 'slug', value: 'gone-slug' }),
+      ).rejects.toThrow(new NotFoundException('Product gone-slug not found'));
+    });
+
+    it('getRelatedProducts by slug queries the base once and excludes base.id', async () => {
+      const baseId = '6f0c2b7e-3c1d-4a55-9d0e-1b2c3d4e5f60';
+      prisma.product.findUnique.mockResolvedValue({
+        id: baseId,
+        franchise: 'POKEMON',
+        productType: 'BOOSTER_BOX',
+        categoryId: baseId,
+      });
+      prisma.$queryRaw.mockResolvedValue([]);
+
+      await service.getRelatedProducts({ kind: 'slug', value: 'base-x' }, 4);
+
+      expect(prisma.product.findUnique).toHaveBeenCalledTimes(1);
+      expect(prisma.product.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { slug: 'base-x', isActive: true } }),
+      );
+      const sqlArgs = (
+        prisma.$queryRaw.mock.calls[0][0] as { values: unknown[] }
+      ).values;
+      expect(sqlArgs).toContain(baseId);
+    });
+
+    it('getRelatedProducts 404s for an unknown slug without running raw SQL', async () => {
+      prisma.product.findUnique.mockResolvedValue(null);
+      await expect(
+        service.getRelatedProducts({ kind: 'slug', value: 'nope' }, 4),
+      ).rejects.toThrow(new NotFoundException('Product nope not found'));
+      expect(prisma.$queryRaw).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getRelatedProducts', () => {
     const baseId = '6f0c2b7e-3c1d-4a55-9d0e-1b2c3d4e5f60';
 

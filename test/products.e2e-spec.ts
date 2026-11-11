@@ -299,7 +299,7 @@ describe('ProductsController (e2e)', () => {
 
     it('returns a stable 400 (never a 500) for a syntactically invalid id', () => {
       return request(app.getHttpServer())
-        .get('/api/v1/products/not-a-valid-uuid')
+        .get('/api/v1/products/Not_A_Valid_UUID')
         .expect(400)
         .expect((res) => {
           const body = res.body as { statusCode: number; error: string };
