@@ -153,6 +153,38 @@ describe('evaluateReadiness (AC7, AC8)', () => {
     expect(evaluateReadiness(t, { DOUBLE_RARE: 2 }).ready).toBe(true);
   });
 
+  it('QA 22.3: reverse BEFORE fixed counts against the fixed tier (order-aware)', () => {
+    const t: Template = {
+      slots: [
+        { kind: 'reverse', count: 1 },
+        { kind: 'fixed', tier: 'UNCOMMON', count: 1 },
+        { kind: 'rare', odds: { RARE: 100 } },
+      ],
+    };
+    const counts = { UNCOMMON: 1, RARE: 3 };
+    expect(evaluateReadiness(t, counts)).toEqual({
+      ready: false,
+      missing: [
+        { slot: 'fixed:UNCOMMON', tier: 'UNCOMMON', required: 2, available: 1 },
+      ],
+    });
+    expect(evaluateReadiness(t, { UNCOMMON: 2, RARE: 3 }).ready).toBe(true);
+    // fixed BEFORE reverse: the original minimum is enough.
+    const t2: Template = { slots: [t.slots[1], t.slots[0], t.slots[2]] };
+    expect(evaluateReadiness(t2, counts).ready).toBe(true);
+    // a non-C/U/R fixed tier is out of the reverse's reach.
+    const t3: Template = {
+      slots: [
+        { kind: 'reverse', count: 1 },
+        { kind: 'fixed', tier: 'DOUBLE_RARE', count: 1 },
+        { kind: 'rare', odds: { RARE: 100 } },
+      ],
+    };
+    expect(
+      evaluateReadiness(t3, { COMMON: 1, RARE: 2, DOUBLE_RARE: 1 }).ready,
+    ).toBe(true);
+  });
+
   it('invalid template or odds not summing 100 => TEMPLATE_INVALID', () => {
     const bad = { slots: [{ kind: 'rare', odds: { RARE: 50 } }] };
     expect(evaluateReadiness(bad, base())).toEqual({
@@ -184,6 +216,18 @@ function seededInt(seed: number): (min: number, max: number) => number {
   return (min, max) => min + Math.floor(r() * (max - min));
 }
 
+type Rnd = (min: number, max: number) => number;
+/** Adversarial pickers (first/last/middle candidate); the rare-tier roll (0..10000) stays seeded-random. */
+function adversarial(mode: 'min' | 'max' | 'mid', seed: number): Rnd {
+  const roll = seededInt(seed);
+  return (min, max) => {
+    if (max === 10000) return roll(min, max);
+    if (mode === 'min') return min;
+    if (mode === 'max') return max - 1;
+    return min + Math.floor((max - min) / 2);
+  };
+}
+
 function syntheticPool(counts: TierCounts): SetPool {
   const rows = PACK_TIERS.flatMap((tier) =>
     Array.from({ length: counts[tier] ?? 0 }, (_, i) => ({
@@ -205,6 +249,7 @@ describe('evaluateReadiness property (AC9)', () => {
     const int = (min: number, max: number) =>
       min + Math.floor(rnd() * (max - min + 1));
     let readyCases = 0;
+    let reverseFirstReady = 0;
     for (let iter = 0; iter < 300; iter++) {
       const slots: Slot[] = [];
       let total = 0;
@@ -233,6 +278,10 @@ describe('evaluateReadiness property (AC9)', () => {
         odds[t] = w;
         left -= w;
       });
+      for (let i = slots.length - 1; i > 0; i--) {
+        const j = int(0, i);
+        [slots[i], slots[j]] = [slots[j], slots[i]];
+      }
       slots.push({ kind: 'rare', odds });
       total += 1;
       const tpl: Template = { slots };
@@ -241,11 +290,17 @@ describe('evaluateReadiness property (AC9)', () => {
       const r = evaluateReadiness(tpl, counts);
       if (!r.ready) continue;
       readyCases++;
+      if (slots[0].kind === 'reverse') reverseFirstReady++;
       const pool = syntheticPool(counts);
-      for (let k = 0; k < 1000; k++) {
+      const rnds: Rnd[] = [
+        adversarial('min', iter),
+        adversarial('max', iter),
+        adversarial('mid', iter),
+      ];
+      for (let k = 0; k < 1000 + rnds.length; k++) {
         let pack;
         try {
-          pack = drawPack(pool, tpl, drawRnd);
+          pack = drawPack(pool, tpl, k < 1000 ? drawRnd : rnds[k - 1000]);
         } catch (e) {
           if (e instanceof InsufficientCardsError)
             throw new Error(
@@ -263,6 +318,7 @@ describe('evaluateReadiness property (AC9)', () => {
       }
     }
     expect(readyCases).toBeGreaterThan(20);
+    expect(reverseFirstReady).toBeGreaterThan(0);
   }, 60_000);
 
   it('default template: 1000 draws at the exact boundary counts', () => {

@@ -41,28 +41,40 @@ export function evaluateReadiness(
   const counts = (tier: PackTier): number => countsByTier[tier] ?? 0;
   const missing: ReadinessMissing[] = [];
 
-  // Fixed slots of the same tier share `used` in the engine: aggregate them.
+  // Fixed slots of the same tier share `used` in the engine: aggregate them. Slot ORDER matters
+  // (QA 22.3): a `reverse` slot placed before a fixed one can consume, in the worst case, every
+  // card it needs from that fixed slot's tier (when the tier is COMMON/UNCOMMON/RARE), so a tier T
+  // needs `F[T] + reverses before the LAST fixed slot of T` cards (no ladder fallback is relied on).
   const fixed = Object.fromEntries(PACK_TIERS.map((p) => [p, 0])) as Record<
     PackTier,
     number
   >;
+  const revBeforeLastFixed = Object.fromEntries(
+    PACK_TIERS.map((p) => [p, 0]),
+  ) as Record<PackTier, number>;
   let reverseTotal = 0;
   let odds: Partial<Record<PackTier, number>> = {};
   for (const s of t.slots) {
-    if (s.kind === 'fixed') fixed[s.tier] += s.count;
-    else if (s.kind === 'reverse') reverseTotal += s.count;
+    if (s.kind === 'fixed') {
+      fixed[s.tier] += s.count;
+      revBeforeLastFixed[s.tier] = reverseTotal;
+    } else if (s.kind === 'reverse') reverseTotal += s.count;
     else odds = s.odds;
   }
 
-  // (1) enough cards for each fixed tier.
-  for (const tier of PACK_TIERS)
-    if (fixed[tier] > 0 && counts(tier) < fixed[tier])
+  // (1) enough cards for each fixed tier (+ worst-case reverse consumption before its last slot).
+  for (const tier of PACK_TIERS) {
+    if (fixed[tier] === 0) continue;
+    const required =
+      fixed[tier] + (NON_RARE.includes(tier) ? revBeforeLastFixed[tier] : 0);
+    if (counts(tier) < required)
       missing.push({
         slot: `fixed:${tier}`,
         tier,
-        required: fixed[tier],
+        required,
         available: counts(tier),
       });
+  }
 
   // (2) reverse slots draw from the C/U/R union minus what fixed slots consume.
   const cur = NON_RARE.reduce((a, p) => a + counts(p), 0);
