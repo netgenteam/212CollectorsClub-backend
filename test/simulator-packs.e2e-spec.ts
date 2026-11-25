@@ -13,32 +13,47 @@ import {
   TCG_API_CLIENT,
   type TcgApiClient,
 } from './../src/tcg/tcg-api-client.interface.js';
+import { ApiException } from './../src/common/api-exception.js';
 import { PackGeneratorService } from './../src/simulator/pack-generator.service.js';
 import { SimulatorPoolCache } from './../src/simulator/pool-cache.js';
 import { defaultPokemonTemplate } from './../src/simulator/simulator-defaults.js';
-
 import { snapshotLanding, restoreLanding } from './helpers/db-snapshot.js';
+import {
+  BIG_TIERS,
+  MIN_TIERS,
+  cleanManualSets,
+  seedManualSet,
+} from './helpers/simulator-seed.js';
 
 type App = Parameters<typeof request>[0];
-const P = 'e2e164-';
-const BIG = `${P}big`;
-const SMALL = `${P}small`;
-const TINY = `${P}tiny`;
-const PENDING = `${P}pending`;
-const USER = 'e2e-admin-story-16-4';
-const PASS = 'correct-horse-battery-staple-16-4';
+const P = 'E2E228 ';
+const USER = 'e2e-admin-story-22-8';
+const PASS = 'correct-horse-battery-staple-22-8';
 const CFG = '/api/v1/admin/simulator/config';
+const MANUAL = '/api/v1/admin/simulator/manual-sets';
+const UUID0 = '00000000-0000-4000-8000-000000000000';
+const RARE_TIERS = [
+  'RARE',
+  'DOUBLE_RARE',
+  'ULTRA_RARE',
+  'ILLUSTRATION_RARE',
+  'SPECIAL_ILLUSTRATION_RARE',
+  'HYPER_RARE',
+];
 
 interface PackBody {
   set: { setId: string; gameSlug: string; name: string };
   cards: {
     position: number;
     id: string;
+    name: string;
+    number: string | null;
     rarityTier: string;
+    rarityRaw: string | null;
     isReverse: boolean;
     imageUrl: string | null;
     marketPriceUsd: number | null;
-    product?: { slug: string; priceUsd: number };
+    product: null;
   }[];
   totalValueUsd: number;
   pricedCards: number;
@@ -47,56 +62,46 @@ interface PackBody {
 interface SetsBody {
   data: {
     setId: string;
+    gameSlug: string;
     name: string;
     cardCount: number;
     imageUrl: string | null;
   }[];
 }
+interface Err {
+  errorCode?: string;
+  message?: unknown;
+}
 
-/** Story 16.4 (AD-66/67). Real Postgres; fixtures prefixed `e2e164-` are removed at the end. */
-describe('Simulator public sets and packs (e2e)', () => {
+/**
+ * Story 22.8 (AD-108, FR-154/157): public simulator over ACTIVE + READY manual sets. Sets are
+ * seeded by Prisma (prefix `E2E228 `) and removed at the end; the legacy config row is restored.
+ */
+describe('Simulator public sets and packs over manual sets (e2e, Story 22.8)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
-  let provider: string;
   let token: string;
+  let big: { id: string; cardIds: string[] };
+  let min: { id: string; cardIds: string[] };
+  let inactive: { id: string };
+  let notReady: { id: string };
   let originalConfig: Awaited<ReturnType<typeof snapshotLanding>> = [];
   const CONFIG_ROW = { section: 'pack_simulator', key: 'config' };
   const auth = () => ({ Authorization: `Bearer ${token}` });
+  const server = () => request(app.getHttpServer());
+  const cache = () => app.get(SimulatorPoolCache);
 
-  const clean = async () => {
-    await prisma.product.deleteMany({ where: { slug: { startsWith: P } } });
-    await prisma.masterCard.deleteMany({
-      where: { externalId: { startsWith: P } },
-    });
-    await prisma.tcgIngestCursor.deleteMany({
-      where: { setId: { startsWith: P } },
-    });
-  };
-
-  const card = (
-    set: string,
-    n: number,
-    rarity: string | null,
-    over: Record<string, unknown> = {},
-  ) => ({
-    externalProvider: provider,
-    externalId: `${P}${set}-${n}`,
-    name: `E2E164 Card ${set} ${n}`,
-    cleanName: `e2e164 card ${n}`,
-    searchText: `e2e164 card ${n}`,
-    franchise: 'POKEMON' as const,
-    gameSlug: 'pokemon',
-    setId: set,
-    setName: `Set ${set}`,
-    cardNumber: String(n),
-    rarity,
-    printing: 'Normal',
-    imageSmall: `https://img.test/${set}-${n}-s.jpg`,
-    imageLarge: n % 2 ? `https://img.test/${set}-${n}-l.jpg` : null,
-    marketPriceUsd: n % 7 === 0 ? null : (n * 0.5).toString(),
-    rawApiData: {},
-    ...over,
-  });
+  // A distinct default IP per call keeps this suite far from the per-IP rate limit.
+  let ipSeq = 0;
+  const open = (setId: unknown, ip = `198.51.100.${(ipSeq++ % 250) + 1}`) =>
+    server()
+      .post('/api/v1/simulator/packs')
+      .set('X-Forwarded-For', ip)
+      .send({ setId });
+  const list = async () =>
+    (await server().get('/api/v1/simulator/sets').expect(200)).body as SetsBody;
+  const mine = (b: SetsBody) =>
+    b.data.filter((s) => s.name.startsWith(P)).map((s) => s.name);
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -112,9 +117,7 @@ describe('Simulator public sets and packs (e2e)', () => {
     app.useGlobalPipes(createGlobalValidationPipe());
     await app.init();
     prisma = app.get(PrismaService);
-    provider = app.get<TcgApiClient>(TCG_API_CLIENT).provider;
-    await clean();
-
+    await cleanManualSets(prisma, P);
     originalConfig = await snapshotLanding(prisma, CONFIG_ROW);
 
     const hash = await argon2.hash(PASS, { type: argon2.argon2id });
@@ -127,153 +130,134 @@ describe('Simulator public sets and packs (e2e)', () => {
       },
       update: { passwordHash: hash },
     });
-    const login = await request(app.getHttpServer())
+    const login = await server()
       .post('/api/v1/admin/auth/login')
       .send({ usernameOrEmail: USER, password: PASS })
       .expect(200);
     token = (login.body as { accessToken: string }).accessToken;
 
-    // BIG: 120 cards of varied rarity (some unpriced via n % 7).
-    const rar = (n: number) =>
-      n <= 40
-        ? 'Common'
-        : n <= 70
-          ? 'Uncommon'
-          : n <= 90
-            ? 'Rare'
-            : n <= 100
-              ? 'Double Rare'
-              : n <= 106
-                ? 'Ultra Rare'
-                : n <= 112
-                  ? 'Illustration Rare'
-                  : n <= 117
-                    ? 'Special Illustration Rare'
-                    : 'Hyper Rare';
-    await prisma.masterCard.createMany({
-      data: Array.from({ length: 120 }, (_, i) => card(BIG, i + 1, rar(i + 1))),
+    big = await seedManualSet(prisma, {
+      name: `${P}Big`,
+      tiers: BIG_TIERS,
+      imageUrl: '/uploads/public/simulator/big.png',
     });
-    // SMALL: exactly 1 Common (unpriced) + 1 Rare, to check products/totals.
-    await prisma.masterCard.createMany({
-      data: [
-        card(SMALL, 1, 'Common', { marketPriceUsd: null }),
-        card(SMALL, 2, 'Rare', { marketPriceUsd: '12.34' }),
-      ],
+    min = await seedManualSet(prisma, { name: `${P}Min`, tiers: MIN_TIERS });
+    inactive = await seedManualSet(prisma, {
+      name: `${P}Inactive`,
+      tiers: BIG_TIERS,
+      isActive: false,
     });
-    // TINY: 3 cards -> insufficient for the default template.
-    await prisma.masterCard.createMany({
-      data: [1, 2, 3].map((n) => card(TINY, n, 'Common')),
+    // Active but NOT ready (invariant broken "by manual SQL"): 3 commons only.
+    notReady = await seedManualSet(prisma, {
+      name: `${P}NotReady`,
+      tiers: { COMMON: 3 },
     });
-    await prisma.masterCard.createMany({
-      data: [card(PENDING, 1, 'Common')],
-    });
-    for (const [setId, status] of [
-      [BIG, 'DONE'],
-      [SMALL, 'DONE'],
-      [TINY, 'DONE'],
-      [PENDING, 'DONE'],
-    ] as const)
-      await prisma.tcgIngestCursor.create({
-        data: { gameSlug: 'pokemon', setId, setName: `Set ${setId}`, status },
-      });
-
-    const smallTpl = {
-      slots: [
-        { kind: 'fixed', tier: 'COMMON', count: 1 },
-        { kind: 'rare', odds: { RARE: 100 } },
-      ],
-    };
-    await request(app.getHttpServer())
-      .put(CFG)
-      .set(auth())
-      .send({
-        templates: { pokemon: defaultPokemonTemplate() },
-        sets: [
-          { gameSlug: 'pokemon', setId: BIG, displayName: 'E2E Big' },
-          { gameSlug: 'pokemon', setId: SMALL, template: smallTpl },
-          { gameSlug: 'pokemon', setId: TINY },
-          { gameSlug: 'pokemon', setId: PENDING },
-        ],
-      })
-      .expect(200);
-    // PENDING stops being ingested after being enabled.
-    await prisma.tcgIngestCursor.update({
-      where: { gameSlug_setId: { gameSlug: 'pokemon', setId: PENDING } },
-      data: { status: 'PENDING' },
-    });
-    app.get(SimulatorPoolCache).clear();
+    cache().clear();
   });
 
   afterAll(async () => {
-    await clean();
+    await cleanManualSets(prisma, P);
     await restoreLanding(prisma, CONFIG_ROW, originalConfig);
     await prisma.adminUser.deleteMany({ where: { username: USER } });
     await app.close();
   });
 
-  const open = (setId: unknown, ip = '198.51.100.1') =>
-    request(app.getHttpServer())
-      .post('/api/v1/simulator/packs')
-      .set('X-Forwarded-For', ip)
-      .send({ setId });
-
-  it('GET /simulator/sets: only enabled + DONE sets, cache header, image of the priciest card', async () => {
-    const res = await request(app.getHttpServer())
-      .get('/api/v1/simulator/sets')
-      .expect(200);
+  it('GET /simulator/sets: only active AND ready sets, same shape, cache header', async () => {
+    const res = await server().get('/api/v1/simulator/sets').expect(200);
     expect(res.headers['cache-control']).toBe('public, max-age=60');
-    const data = (res.body as SetsBody).data.filter((s) =>
-      s.setId.startsWith(P),
-    );
-    expect(data.map((s) => s.setId).sort()).toEqual([BIG, SMALL, TINY].sort());
-    const big = data.find((s) => s.setId === BIG)!;
-    expect(big).toMatchObject({ name: 'E2E Big', cardCount: 120 });
-    // priciest card of BIG is #120 (even -> no imageLarge -> imageSmall)
-    expect(big.imageUrl).toBe(`https://img.test/${BIG}-120-s.jpg`);
-  });
-
-  it('POST /simulator/packs validates setId (400)', async () => {
-    await open('').expect(400);
-    await open('has space').expect(400);
-    await open('x'.repeat(65)).expect(400);
-    await open(123).expect(400);
-    await request(app.getHttpServer())
-      .post('/api/v1/simulator/packs')
-      .send({})
-      .expect(400);
-  });
-
-  it('404 SIMULATOR_SET_NOT_FOUND is identical for unknown, not enabled and not-DONE sets', async () => {
-    await prisma.tcgIngestCursor.upsert({
-      where: { gameSlug_setId: { gameSlug: 'pokemon', setId: `${P}off` } },
-      create: {
-        gameSlug: 'pokemon',
-        setId: `${P}off`,
-        setName: 'x',
-        status: 'DONE',
-      },
-      update: {},
+    const body = res.body as SetsBody;
+    expect(mine(body).sort()).toEqual([`${P}Big`, `${P}Min`]);
+    const b = body.data.find((s) => s.setId === big.id)!;
+    expect(Object.keys(b).sort()).toEqual([
+      'cardCount',
+      'gameSlug',
+      'imageUrl',
+      'name',
+      'setId',
+    ]);
+    expect(b).toEqual({
+      setId: big.id,
+      gameSlug: 'pokemon',
+      name: `${P}Big`,
+      cardCount: 120,
+      imageUrl: '/uploads/public/simulator/big.png',
     });
-    const bodies = [];
-    for (const id of [`${P}nope`, `${P}off`, PENDING]) {
-      const r = await open(id).expect(404);
-      bodies.push(r.body);
-    }
-    expect((bodies[0] as { errorCode: string }).errorCode).toBe(
-      'SIMULATOR_SET_NOT_FOUND',
+    expect(body.data.find((s) => s.setId === min.id)).toMatchObject({
+      cardCount: 15,
+      imageUrl: null,
+    });
+  });
+
+  it('list uses ONE aggregated count query for all active sets (no per-set queries)', async () => {
+    cache().clear();
+    const raw = vi.spyOn(prisma, '$queryRaw');
+    const sets = vi.spyOn(prisma.simulatorSet, 'findMany');
+    const cards = vi.spyOn(prisma.simulatorCard, 'findMany');
+    await list();
+    await list(); // 60 s cache
+    expect(raw).toHaveBeenCalledTimes(1);
+    expect(sets).toHaveBeenCalledTimes(1);
+    expect(cards).not.toHaveBeenCalled();
+    raw.mockRestore();
+    sets.mockRestore();
+    cards.mockRestore();
+  });
+
+  it('admin writes are visible on the very next request (no TTL wait): deactivate / activate / edit / delete', async () => {
+    const extra = await seedManualSet(prisma, {
+      name: `${P}Extra`,
+      tiers: MIN_TIERS,
+      isActive: false,
+    });
+    await list(); // warm the 60 s cache
+    expect(mine(await list())).not.toContain(`${P}Extra`);
+    await server()
+      .patch(`${MANUAL}/${extra.id}`)
+      .set(auth())
+      .send({ isActive: true })
+      .expect(200);
+    expect(mine(await list())).toContain(`${P}Extra`);
+    await open(extra.id).expect(200);
+    await server()
+      .patch(`${MANUAL}/${extra.id}`)
+      .set(auth())
+      .send({ name: `${P}Extra renamed` })
+      .expect(200);
+    expect(mine(await list())).toContain(`${P}Extra renamed`);
+    expect(((await open(extra.id).expect(200)).body as PackBody).set.name).toBe(
+      `${P}Extra renamed`,
     );
+    await server()
+      .patch(`${MANUAL}/${extra.id}`)
+      .set(auth())
+      .send({ isActive: false })
+      .expect(200);
+    expect(mine(await list())).not.toContain(`${P}Extra renamed`);
+    await open(extra.id).expect(404); // pool was cached: deactivation still wins at once
+    await server().delete(`${MANUAL}/${extra.id}`).set(auth()).expect(204);
+    expect(mine(await list())).not.toContain(`${P}Extra renamed`);
+    await open(extra.id).expect(404);
+  });
+
+  it('POST /simulator/packs validates setId (400, no errorCode): empty, non UUID, wrong type, empty body', async () => {
+    for (const v of ['', 'has space', 'e2e164-big', 'x'.repeat(65), 123]) {
+      const r = await open(v).expect(400);
+      expect((r.body as Err).errorCode).toBeUndefined();
+    }
+    await server().post('/api/v1/simulator/packs').send({}).expect(400);
+  });
+
+  it('404 SIMULATOR_SET_NOT_FOUND is identical for unknown, inactive and not-ready sets', async () => {
+    const bodies = [];
+    for (const id of [UUID0, inactive.id, notReady.id]) {
+      bodies.push((await open(id).expect(404)).body);
+    }
+    expect((bodies[0] as Err).errorCode).toBe('SIMULATOR_SET_NOT_FOUND');
     expect(bodies[1]).toEqual(bodies[0]);
     expect(bodies[2]).toEqual(bodies[0]);
   });
 
-  it('422 SIMULATOR_SET_INSUFFICIENT_CARDS for a set that cannot fill the template', async () => {
-    const r = await open(TINY).expect(422);
-    expect((r.body as { errorCode: string }).errorCode).toBe(
-      'SIMULATOR_SET_INSUFFICIENT_CARDS',
-    );
-  });
-
-  it('200 pack: shape, 10 distinct cards, rare last, value in cents, 0 TCG calls, nothing persisted, no N+1', async () => {
+  it('200 pack: contract shape, 10 distinct cards of the set, rare last, reverse before it, 0 TCG calls, nothing persisted', async () => {
     const tcg = app.get<TcgApiClient>(TCG_API_CLIENT);
     const spies = (['listSets', 'listSetCards'] as const).map((m) =>
       vi.spyOn(tcg, m),
@@ -282,35 +266,45 @@ describe('Simulator public sets and packs (e2e)', () => {
       prisma.product.count(),
       prisma.order.count(),
     ]);
-    await open(BIG).expect(200); // warm pool cache
-    const raw = vi.spyOn(prisma, '$queryRaw');
-    const findCursor = vi.spyOn(prisma.tcgIngestCursor, 'findFirst');
-    const res = await open(BIG).expect(200);
-    // Warm cache: only the single products query; no cursor/pool queries.
-    expect(raw).toHaveBeenCalledTimes(1);
-    expect(findCursor).not.toHaveBeenCalled();
-    raw.mockRestore();
-    findCursor.mockRestore();
-
+    const res = await open(big.id).expect(200);
     const body = res.body as PackBody;
+    expect(Object.keys(body).sort()).toEqual([
+      'cards',
+      'pricedCards',
+      'set',
+      'totalValueUsd',
+      'unpricedCards',
+    ]);
     expect(body.set).toEqual({
-      setId: BIG,
+      setId: big.id,
       gameSlug: 'pokemon',
-      name: 'E2E Big',
+      name: `${P}Big`,
     });
+    // Same keys/types as the legacy public DTO (frontend contract).
+    expect(Object.keys(body.cards[0]).sort()).toEqual([
+      'id',
+      'imageUrl',
+      'isReverse',
+      'marketPriceUsd',
+      'name',
+      'number',
+      'position',
+      'product',
+      'rarityRaw',
+      'rarityTier',
+    ]);
     expect(body.cards).toHaveLength(10);
     expect(body.cards.map((c) => c.position)).toEqual([
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
     ]);
     expect(new Set(body.cards.map((c) => c.id)).size).toBe(10);
-    expect([
-      'RARE',
-      'DOUBLE_RARE',
-      'ULTRA_RARE',
-      'ILLUSTRATION_RARE',
-      'SPECIAL_ILLUSTRATION_RARE',
-      'HYPER_RARE',
-    ]).toContain(body.cards[9].rarityTier);
+    for (const c of body.cards) {
+      expect(big.cardIds).toContain(c.id);
+      expect(c.rarityRaw).toBe(c.rarityTier);
+      expect(c.product).toBeNull();
+      expect(typeof c.name).toBe('string');
+    }
+    expect(RARE_TIERS).toContain(body.cards[9].rarityTier);
     expect(body.cards.slice(7, 9).every((c) => c.isReverse)).toBe(true);
     const cents = body.cards.reduce(
       (a, c) =>
@@ -319,112 +313,161 @@ describe('Simulator public sets and packs (e2e)', () => {
     );
     expect(body.totalValueUsd).toBe(cents / 100);
     expect(body.pricedCards + body.unpricedCards).toBe(10);
-    expect(
-      body.cards.every((c) => c.imageUrl?.startsWith('https://img.test/')),
-    ).toBe(true);
-
     for (const s of spies) expect(s).not.toHaveBeenCalled();
     expect(await prisma.product.count()).toBe(products0);
     expect(await prisma.order.count()).toBe(orders0);
   });
 
-  it('links only an active, in-stock Product (stock > heldQty), cheapest first; unpriced counts in unpricedCards', async () => {
-    const category = await prisma.category.findFirstOrThrow();
-    const cards = await prisma.masterCard.findMany({
-      where: { setId: SMALL },
-      orderBy: { cardNumber: 'asc' },
-    });
-    const mk = (
-      slug: string,
-      masterCardId: string,
-      priceUsd: string,
-      stock: number,
-      heldQty: number,
-      isActive = true,
-    ) =>
-      prisma.product.create({
-        data: {
-          name: slug,
-          slug: `${P}${slug}`,
-          description: 'd',
-          franchise: 'POKEMON',
-          productType: 'SINGLE_CARD',
-          rarity: 'COMMON',
-          priceUsd,
-          stock,
-          heldQty,
-          isActive,
-          masterCardId,
-          categoryId: category.id,
-        },
-      });
-    // Common: only fully-held and inactive products -> no link.
-    await mk('c-held', cards[0].id, '1.00', 5, 5);
-    await mk('c-inactive', cards[0].id, '1.00', 5, 0, false);
-    // Rare: cheapest has no available stock, then two valid ones.
-    await mk('r-cheap-nostock', cards[1].id, '2.00', 0, 0);
-    await mk('r-mid', cards[1].id, '20.00', 3, 1);
-    await mk('r-high', cards[1].id, '30.00', 9, 0);
-
-    const res = await open(SMALL).expect(200);
-    const body = res.body as PackBody;
-    expect(body.cards).toHaveLength(2);
-    expect(body.cards[0].product).toBeUndefined();
-    expect(body.cards[1].rarityTier).toBe('RARE');
-    expect(body.cards[1].product).toEqual({ slug: `${P}r-mid`, priceUsd: 20 });
-    expect(body.totalValueUsd).toBe(12.34);
-    expect(body.pricedCards).toBe(1);
-    expect(body.unpricedCards).toBe(1);
+  it('warm cache: ONE primary-key read per opening, no card query, no Products query', async () => {
+    await open(big.id).expect(200);
+    const one = vi.spyOn(prisma.simulatorSet, 'findUnique');
+    const cards = vi.spyOn(prisma.simulatorCard, 'findMany');
+    const raw = vi.spyOn(prisma, '$queryRaw');
+    await open(big.id).expect(200);
+    expect(one).toHaveBeenCalledTimes(1);
+    expect(cards).not.toHaveBeenCalled();
+    expect(raw).not.toHaveBeenCalled();
+    one.mockRestore();
+    cards.mockRestore();
+    raw.mockRestore();
   });
 
-  it('p95 latency < 300 ms over 100 openings of a >= 100-card set', async () => {
+  it('pool cache is keyed by version: editing a card never serves the old pool', async () => {
+    const set = await seedManualSet(prisma, {
+      name: `${P}Versioned`,
+      tiers: MIN_TIERS,
+    });
+    const first = (await open(set.id).expect(200)).body as PackBody;
+    const victim = first.cards[0];
+    // Bypass 22.5 and the cache listener on purpose: only `version` changes.
+    await prisma.simulatorCard.update({
+      where: { id: victim.id },
+      data: { name: 'RENAMED-BY-SQL' },
+    });
+    const stillOld = (await open(set.id).expect(200)).body as PackBody;
+    expect(stillOld.cards.find((c) => c.id === victim.id)?.name).toBe(
+      victim.name,
+    );
+    await prisma.simulatorSet.update({
+      where: { id: set.id },
+      data: { version: { increment: 1 } },
+    });
+    for (let i = 0; i < 30; i++) {
+      const b = (await open(set.id, `198.51.100.${10 + i}`).expect(200))
+        .body as PackBody;
+      const c = b.cards.find((x) => x.id === victim.id);
+      if (c) expect(c.name).toBe('RENAMED-BY-SQL');
+    }
+  });
+
+  it('an active set that lost cards by manual SQL answers 404 and logs the broken invariant', async () => {
+    const set = await seedManualSet(prisma, {
+      name: `${P}Broken`,
+      tiers: MIN_TIERS,
+    });
+    await prisma.simulatorCard.deleteMany({
+      where: { setId: set.id, rarityTier: { not: 'COMMON' } },
+    });
+    await prisma.simulatorSet.update({
+      where: { id: set.id },
+      data: { version: { increment: 1 } },
+    });
+    cache().clear();
+    expect(mine(await list())).not.toContain(`${P}Broken`);
+    const r = await open(set.id).expect(404);
+    expect((r.body as Err).errorCode).toBe('SIMULATOR_SET_NOT_FOUND');
+  });
+
+  it('PUT /admin/simulator/config still validates but no longer affects the public list', async () => {
+    const before = await list();
+    await server()
+      .put(CFG)
+      .set(auth())
+      .send({ templates: { pokemon: defaultPokemonTemplate() }, sets: [] })
+      .expect(200);
+    expect(await list()).toEqual(before);
+    await server()
+      .put(CFG)
+      .set(auth())
+      .send({ templates: { pokemon: { slots: [] } }, sets: [] })
+      .expect(400);
+    await server().get(CFG).set(auth()).expect(200);
+    await server().get('/api/v1/admin/simulator/sets').set(auth()).expect(200);
+  });
+
+  it('1000 openings (minimum-ready and roomy set): 10 cards, 0 duplicates, rare last, never insufficient', async () => {
     const gen = app.get(PackGeneratorService);
-    await gen.open(BIG);
+    const tally = new Map<string, number>();
+    for (const setId of [min.id, big.id]) {
+      for (let i = 0; i < 1000; i++) {
+        const p = await gen.open(setId);
+        expect(p.cards).toHaveLength(10);
+        expect(new Set(p.cards.map((c) => c.id)).size).toBe(10);
+        const last = p.cards[9].rarityTier;
+        expect(RARE_TIERS).toContain(last);
+        if (setId === big.id) tally.set(last, (tally.get(last) ?? 0) + 1);
+      }
+    }
+    // Rare slot odds 70/15/6/6/2/1 over 1000 draws: wide statistical tolerance.
+    const frac = (t: string) => (tally.get(t) ?? 0) / 1000;
+    expect(frac('RARE')).toBeGreaterThan(0.62);
+    expect(frac('RARE')).toBeLessThan(0.78);
+    expect(frac('DOUBLE_RARE')).toBeGreaterThan(0.1);
+    expect(frac('DOUBLE_RARE')).toBeLessThan(0.21);
+    expect(frac('HYPER_RARE')).toBeLessThan(0.04);
+  }, 60_000);
+
+  it('p95 < 300 ms preparing a pack with a warm pool over 200 openings', async () => {
+    const gen = app.get(PackGeneratorService);
+    await gen.open(big.id);
     const times: number[] = [];
-    for (let i = 0; i < 100; i++) {
+    for (let i = 0; i < 200; i++) {
       const t = performance.now();
-      await gen.open(BIG);
+      await gen.open(big.id);
       times.push(performance.now() - t);
     }
     times.sort((a, b) => a - b);
-    expect(times[94]).toBeLessThan(300);
+    expect(times[189]).toBeLessThan(300);
   });
 
-  it('config save flushes the cache: saving the config clears the pool cache', async () => {
-    const before = await request(app.getHttpServer())
-      .get(CFG)
-      .set(auth())
-      .expect(200);
-    const cfg = before.body as { sets: { setId: string }[] };
-    cfg.sets = cfg.sets.filter((x) => x.setId !== PENDING); // not DONE: save would 422
-    await request(app.getHttpServer())
-      .put(CFG)
-      .set(auth())
-      .send(cfg)
-      .expect(200);
-    expect(app.get(SimulatorPoolCache).size()).toBe(0);
-  });
-
-  it('rejects __proto__/constructor/prototype game slugs with 400 over HTTP', async () => {
-    for (const slug of ['__proto__', 'constructor', 'prototype']) {
-      const tpl = JSON.stringify(defaultPokemonTemplate());
-      const r = await request(app.getHttpServer())
-        .put(CFG)
-        .set(auth())
-        .set('Content-Type', 'application/json')
-        .send(`{"templates":{"${slug}":${tpl}},"sets":[]}`)
-        .expect(400);
-      expect((r.body as { errorCode: string }).errorCode).toBe(
-        'SIMULATOR_CONFIG_INVALID',
+  it('opening while the set is being deactivated: every response is a valid 200 or a 404, never 500', async () => {
+    const set = await seedManualSet(prisma, {
+      name: `${P}Race`,
+      tiers: BIG_TIERS,
+    });
+    const gen = app.get(PackGeneratorService);
+    await gen.open(set.id); // warm
+    const attempt = () =>
+      gen.open(set.id).then(
+        (b) => ({ status: 200, body: b }),
+        (e: unknown) => ({
+          status: e instanceof ApiException ? e.getStatus() : 500,
+          body: null,
+        }),
       );
+    const [patched, ...results] = await Promise.all([
+      server()
+        .patch(`${MANUAL}/${set.id}`)
+        .set(auth())
+        .send({ isActive: false }),
+      ...Array.from({ length: 24 }, attempt),
+    ]);
+    expect(patched.status).toBe(200);
+    for (const r of results) {
+      expect([200, 404]).toContain(r.status);
+      if (r.status === 200) {
+        expect(r.body!.cards).toHaveLength(10);
+        expect(new Set(r.body!.cards.map((c) => c.id)).size).toBe(10);
+      }
     }
+    await open(set.id).expect(404);
   });
 
   it('rate limit: the 31st request in a minute from one IP is 429 with Retry-After; another IP is unaffected', async () => {
     const ip = '203.0.113.164';
-    for (let i = 0; i < 30; i++) await open(BIG, ip).expect(200);
-    const blocked = await open(BIG, ip).expect(429);
+    for (let i = 0; i < 30; i++) await open(big.id, ip).expect(200);
+    const blocked = await open(big.id, ip).expect(429);
     expect(Number(blocked.headers['retry-after'])).toBeGreaterThan(0);
-    await open(BIG, '203.0.113.165').expect(200);
+    await open(big.id, '203.0.113.165').expect(200);
   });
 });

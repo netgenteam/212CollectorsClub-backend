@@ -13,6 +13,11 @@ import {
   TCG_API_CLIENT,
   type TcgApiClient,
 } from './../src/tcg/tcg-api-client.interface.js';
+import {
+  BIG_TIERS,
+  cleanManualSets,
+  seedManualSet,
+} from './helpers/simulator-seed.js';
 import { SimulatorPoolCache } from './../src/simulator/pool-cache.js';
 import { defaultPokemonTemplate } from './../src/simulator/simulator-defaults.js';
 import { validBlock } from './../src/admin-landing/landing-blocks.fixtures.js';
@@ -23,6 +28,7 @@ import { registerConsent } from './helpers/legal-consent.js';
 type App = Parameters<typeof request>[0];
 const P = 'e2e1611-';
 const SET = `${P}set`;
+const MANUAL_PREFIX = 'E2E1611 Manual ';
 const USER = 'e2e-admin-story-16-11a';
 const PASS = 'correct-horse-battery-staple-16-11a';
 const CUSTOMER_EMAIL = 'e2e-customer-story-16-11a@212collectorsclub.test';
@@ -56,6 +62,7 @@ describe('Epic 16 regression (e2e)', () => {
   const HOME = { section: 'home' };
   const CONFIG = { section: 'pack_simulator', key: 'config' };
   const productIds: string[] = [];
+  let manualSetId = '';
 
   const auth = () => ({ Authorization: `Bearer ${token}` });
   const server = () => request(app.getHttpServer());
@@ -65,7 +72,7 @@ describe('Epic 16 regression (e2e)', () => {
     server()
       .post('/api/v1/simulator/packs')
       .set('X-Forwarded-For', ip)
-      .send({ setId: SET });
+      .send({ setId: manualSetId });
 
   const mkProduct = async (o: { isActive?: boolean; stock: number }) => {
     const p = await prisma.product.create({
@@ -228,6 +235,14 @@ describe('Epic 16 regression (e2e)', () => {
         sets: [{ gameSlug: 'pokemon', setId: SET, displayName: 'E2E 16.11a' }],
       })
       .expect(200);
+    // Story 22.8: the PUBLIC simulator reads manual sets; the legacy fixtures above only feed the
+    // (deprecated) admin config/sets endpoints.
+    manualSetId = (
+      await seedManualSet(prisma, {
+        name: `${MANUAL_PREFIX}Set`,
+        tiers: BIG_TIERS,
+      })
+    ).id;
     app.get(SimulatorPoolCache).clear();
   });
 
@@ -237,6 +252,7 @@ describe('Epic 16 regression (e2e)', () => {
       await prisma.category.deleteMany({ where: { slug: 'e2e-16-11a' } });
     await restoreLanding(prisma, HOME, homeSnapshot);
     await restoreLanding(prisma, CONFIG, configSnapshot);
+    await cleanManualSets(prisma, MANUAL_PREFIX);
     await prisma.customer.deleteMany({ where: { email: CUSTOMER_EMAIL } });
     await prisma.adminUser.deleteMany({ where: { username: USER } });
     await app.close();
@@ -315,7 +331,7 @@ describe('Epic 16 regression (e2e)', () => {
   it('(d) sets count unique cards; a pack has 10 distinct cards, rare last; the 31st request/min is 429', async () => {
     const sets = (await server().get('/api/v1/simulator/sets').expect(200))
       .body as { data: { setId: string; cardCount: number }[] };
-    expect(sets.data.find((s) => s.setId === SET)?.cardCount).toBe(120);
+    expect(sets.data.find((s) => s.setId === manualSetId)?.cardCount).toBe(120);
     const admin = (await server().get(`${SIM}/sets`).set(auth()).expect(200))
       .body as { data: { setId: string; cardCount: number }[] };
     expect(admin.data.find((s) => s.setId === SET)?.cardCount).toBe(120);

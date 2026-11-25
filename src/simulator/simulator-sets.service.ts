@@ -7,7 +7,12 @@ import {
 } from '../tcg/tcg-api-client.interface.js';
 import { SimulatorPoolCache } from './pool-cache.js';
 import { SimulatorConfigService } from './simulator-config.service.js';
-import { mapPackTier, type PackTier } from './pack-tiers.js';
+import { mapPackTier, PACK_TIERS, type PackTier } from './pack-tiers.js';
+import { countCardsByTier } from './manual/assert-ready.js';
+import { evaluateReadiness } from './manual/readiness.js';
+
+/** A106: fixed while a single (Pokemon) template exists. */
+export const MANUAL_GAME_SLUG = 'pokemon';
 
 export interface SimulatorSetSummary {
   gameSlug: string;
@@ -48,73 +53,44 @@ export class SimulatorSetsService {
   ) {
     poolCache.onClear(() => {
       this.publicCache = null;
+      this.publicGen++;
     });
   }
 
   private publicCache: { at: number; data: PublicSimulatorSet[] } | null = null;
+  /** Bumped on every clear so an in-flight list built before a write never repopulates the cache. */
+  private publicGen = 0;
 
-  /** Public list (AD-66): enabled AND cursor DONE; in-memory cache 60 s. */
+  /**
+   * Public list (AD-108, story 22.8): ACTIVE manual sets that are also READY; in-memory cache 60 s,
+   * dropped by `poolCache.clear()` on every write. Two queries: active sets + ONE aggregated count.
+   */
   async listPublic(): Promise<PublicSimulatorSet[]> {
     const c = this.publicCache;
     if (c && Date.now() - c.at < PUBLIC_TTL_MS) return c.data;
-    const cfg = await this.config.getEffective();
-    let data: PublicSimulatorSet[] = [];
-    if (cfg.sets.length > 0) {
-      const cursors = await this.prisma.tcgIngestCursor.findMany({
-        where: {
-          status: 'DONE',
-          OR: cfg.sets.map((s) => ({ gameSlug: s.gameSlug, setId: s.setId })),
-        },
-        select: { gameSlug: true, setId: true, setName: true },
+    const gen = this.publicGen;
+    const sets = await this.prisma.simulatorSet.findMany({
+      where: { isActive: true },
+      select: { id: true, name: true, imageUrl: true, template: true },
+    });
+    const counts = await countCardsByTier(
+      this.prisma,
+      sets.map((s) => s.id),
+    );
+    const data: PublicSimulatorSet[] = [];
+    for (const s of sets) {
+      const tiers = counts.get(s.id) ?? {};
+      if (!evaluateReadiness(s.template, tiers).ready) continue;
+      data.push({
+        setId: s.id,
+        gameSlug: MANUAL_GAME_SLUG,
+        name: s.name,
+        cardCount: PACK_TIERS.reduce((a, t) => a + (tiers[t] ?? 0), 0),
+        imageUrl: s.imageUrl,
       });
-      if (cursors.length > 0) {
-        // One query: unique card count (same key as the draw: cardNumber ?? id,
-        // so reverse printings do not inflate it) + image of the top-priced card.
-        const rows = await this.prisma.$queryRaw<
-          {
-            gameSlug: string;
-            setId: string;
-            imageLarge: string | null;
-            imageSmall: string | null;
-            n: number;
-          }[]
-        >(Prisma.sql`
-          SELECT DISTINCT ON ("gameSlug", "setId") "gameSlug", "setId",
-                 "imageLarge", "imageSmall",
-                 (SELECT count(DISTINCT COALESCE(m2."cardNumber", m2.id::text))
-                    FROM "Master_Cards" m2
-                   WHERE m2."externalProvider" = ${this.tcg.provider}
-                     AND m2.name !~* '^basic .* energy$'
-                     AND m2."gameSlug" = "Master_Cards"."gameSlug"
-                     AND m2."setId" = "Master_Cards"."setId")::int AS n
-          FROM "Master_Cards"
-          WHERE "externalProvider" = ${this.tcg.provider}
-            AND name !~* '^basic .* energy$'
-            AND ("gameSlug", "setId") IN (${Prisma.join(
-              cursors.map((k) => Prisma.sql`(${k.gameSlug}, ${k.setId})`),
-            )})
-          ORDER BY "gameSlug", "setId", "marketPriceUsd" DESC NULLS LAST, id`);
-        const info = new Map(rows.map((r) => [`${r.gameSlug}:${r.setId}`, r]));
-        data = cursors
-          .map((k) => {
-            const conf = cfg.sets.find(
-              (s) => s.gameSlug === k.gameSlug && s.setId === k.setId,
-            );
-            const r = info.get(`${k.gameSlug}:${k.setId}`);
-            return {
-              setId: k.setId,
-              gameSlug: k.gameSlug,
-              name: conf?.displayName ?? k.setName,
-              cardCount: r?.n ?? 0,
-              imageUrl:
-                conf?.imageUrl ?? r?.imageLarge ?? r?.imageSmall ?? null,
-            };
-          })
-          .filter((s) => s.cardCount > 0)
-          .sort((a, b) => a.name.localeCompare(b.name));
-      }
     }
-    this.publicCache = { at: Date.now(), data };
+    data.sort((a, b) => a.name.localeCompare(b.name));
+    if (gen === this.publicGen) this.publicCache = { at: Date.now(), data };
     return data;
   }
 

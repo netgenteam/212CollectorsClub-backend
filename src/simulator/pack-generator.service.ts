@@ -1,21 +1,19 @@
-import { HttpStatus, Inject, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ApiException } from '../common/api-exception.js';
-import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
-import {
-  TCG_API_CLIENT,
-  type TcgApiClient,
-} from '../tcg/tcg-api-client.interface.js';
-import { SimulatorConfigService } from './simulator-config.service.js';
-import { defaultPokemonTemplate, type Template } from './simulator-defaults.js';
+import type { Template } from './simulator-defaults.js';
 import {
   InsufficientCardsError,
-  buildPool,
   drawPack,
-  type PoolRow,
   type RandomInt,
 } from './pack-draw.js';
 import { SimulatorPoolCache, type CachedSet } from './pool-cache.js';
+import { buildPoolFromManual } from './manual/manual-pool.js';
+import { MANUAL_GAME_SLUG } from './simulator-sets.service.js';
+import { checkOddsSum, parseTemplate } from './simulator-config.validation.js';
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface PackCardDto {
   position: number;
@@ -27,7 +25,8 @@ export interface PackCardDto {
   isReverse: boolean;
   imageUrl: string | null;
   marketPriceUsd: number | null;
-  product?: { slug: string; priceUsd: number };
+  /** Always null for manual sets (no Products link). */
+  product: null;
 }
 
 export interface PackResponseDto {
@@ -47,76 +46,79 @@ const notFound = () =>
 
 @Injectable()
 export class PackGeneratorService {
+  private readonly logger = new Logger(PackGeneratorService.name);
+
   constructor(
     private readonly prisma: PrismaService,
-    private readonly config: SimulatorConfigService,
     private readonly cache: SimulatorPoolCache,
-    @Inject(TCG_API_CLIENT) private readonly tcg: TcgApiClient,
   ) {}
 
-  /** Cached per-set pool; ONE bounded query (only the 8 needed columns of ONE set). */
-  private async loadSet(gameSlug: string, setId: string): Promise<CachedSet> {
-    const key = `${gameSlug}:${setId}`;
+  /** Cached pool keyed by `manual:<setId>:<version>`: a new version never reuses an old pool. */
+  private async loadPool(
+    setId: string,
+    version: number,
+  ): Promise<CachedSet['pool']> {
+    const key = `manual:${setId}:${version}`;
     const hit = this.cache.get(key);
-    if (hit) return hit;
-    const cursor = await this.prisma.tcgIngestCursor.findFirst({
-      where: { status: 'DONE', gameSlug, setId },
-      select: { setName: true },
+    if (hit) return hit.pool;
+    const rows = await this.prisma.simulatorCard.findMany({
+      where: { setId },
+      select: {
+        id: true,
+        name: true,
+        rarityTier: true,
+        number: true,
+        imageUrl: true,
+        marketPriceUsd: true,
+      },
     });
-    if (!cursor) throw notFound();
-    const rows = await this.prisma.$queryRaw<PoolRow[]>(Prisma.sql`
-      SELECT id::text AS id, name, "cardNumber", rarity, printing,
-             "imageSmall", "imageLarge",
-             round("marketPriceUsd" * 100)::int AS "priceCents"
-      FROM "Master_Cards"
-      WHERE "externalProvider" = ${this.tcg.provider}
-        AND "gameSlug" = ${gameSlug} AND "setId" = ${setId}`);
-    const value = {
-      gameSlug,
+    const pool = buildPoolFromManual(rows);
+    this.cache.set(key, {
+      gameSlug: MANUAL_GAME_SLUG,
       setId,
-      setName: cursor.setName,
-      pool: buildPool(rows),
-    };
-    this.cache.set(key, value);
-    return this.cache.get(key) ?? { ...value, at: Date.now() };
+      setName: '',
+      pool,
+    });
+    return pool;
   }
 
   async open(setId: string, rnd?: RandomInt): Promise<PackResponseDto> {
-    const cfg = await this.config.getEffective();
-    const entries = cfg.sets.filter((s) => s.setId === setId);
-    if (entries.length === 0) throw notFound();
-    let cached: CachedSet | undefined;
-    let entry = entries[0];
-    for (const e of entries) {
-      try {
-        cached = await this.loadSet(e.gameSlug, e.setId);
-        entry = e;
-        break;
-      } catch (err) {
-        if (!(err instanceof ApiException)) throw err;
-      }
+    if (!UUID_RE.test(setId)) throw notFound();
+    const set = await this.prisma.simulatorSet.findUnique({
+      where: { id: setId },
+      select: {
+        isActive: true,
+        version: true,
+        name: true,
+        template: true,
+      },
+    });
+    if (!set || !set.isActive) throw notFound();
+    let template: Template;
+    try {
+      template = parseTemplate(set.template, 'template');
+      checkOddsSum(template, 'template');
+    } catch (err) {
+      if (!(err instanceof ApiException)) throw err;
+      this.logger.error(`Manual set ${setId} has an invalid template`);
+      throw notFound();
     }
-    if (!cached) throw notFound();
-    const template: Template | undefined =
-      entry.template ??
-      cfg.templates[entry.gameSlug] ??
-      (entry.gameSlug === 'pokemon' ? defaultPokemonTemplate() : undefined);
-    if (!template) throw notFound();
+    const pool = await this.loadPool(setId, set.version);
 
     let drawn;
     try {
-      drawn = drawPack(cached.pool, template, rnd);
+      drawn = drawPack(pool, template, rnd);
     } catch (err) {
-      if (err instanceof InsufficientCardsError)
-        throw new ApiException(
-          HttpStatus.UNPROCESSABLE_ENTITY,
-          'SIMULATOR_SET_INSUFFICIENT_CARDS',
-          'This set does not have enough cards to open a pack.',
+      if (err instanceof InsufficientCardsError) {
+        // Broken invariant (A105): an active set must always be openable.
+        this.logger.error(
+          `Active manual set ${setId} (v${set.version}) cannot fill its template`,
         );
+        throw notFound();
+      }
       throw err;
     }
 
-    const products = await this.findProducts(drawn.map((d) => d.card.id));
     let totalCents = 0;
     let priced = 0;
     const cards: PackCardDto[] = drawn.map(({ card, isReverse }, i) => {
@@ -124,7 +126,6 @@ export class PackGeneratorService {
         totalCents += card.priceCents;
         priced++;
       }
-      const product = products.get(card.id);
       return {
         position: i + 1,
         id: card.id,
@@ -135,39 +136,15 @@ export class PackGeneratorService {
         isReverse,
         imageUrl: card.imageUrl,
         marketPriceUsd: card.priceCents != null ? card.priceCents / 100 : null,
-        ...(product ? { product } : {}),
+        product: null,
       };
     });
     return {
-      set: {
-        setId,
-        gameSlug: cached.gameSlug,
-        name: entry.displayName ?? cached.setName,
-      },
+      set: { setId, gameSlug: MANUAL_GAME_SLUG, name: set.name },
       cards,
       totalValueUsd: totalCents / 100,
       pricedCards: priced,
       unpricedCards: cards.length - priced,
     };
-  }
-
-  /** ONE query for all drawn cards (no N+1): cheapest active, in-stock product per card. */
-  private async findProducts(
-    ids: string[],
-  ): Promise<Map<string, { slug: string; priceUsd: number }>> {
-    const rows = await this.prisma.$queryRaw<
-      { slug: string; priceUsd: Prisma.Decimal; masterCardId: string }[]
-    >(Prisma.sql`
-      SELECT DISTINCT ON ("masterCardId") slug, "priceUsd", "masterCardId"::text AS "masterCardId"
-      FROM "Products"
-      WHERE "masterCardId" = ANY(${ids}::uuid[])
-        AND "isActive" AND stock - "heldQty" > 0
-      ORDER BY "masterCardId", "priceUsd"`);
-    return new Map(
-      rows.map((r) => [
-        r.masterCardId,
-        { slug: r.slug, priceUsd: Number(r.priceUsd) },
-      ]),
-    );
   }
 }

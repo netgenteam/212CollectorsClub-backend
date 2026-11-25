@@ -37,9 +37,10 @@ export class AdminSimulatorController {
 
   @Get('config')
   @ApiOperation({
+    deprecated: true,
     summary: 'Effective simulator config',
     description:
-      'Returns { templates, sets } stored in LandingConfigEntry(pack_simulator, config), or the defaults (pokemon template) when none is saved.',
+      'Retiro futuro (A107). Returns { templates, sets } stored in LandingConfigEntry(pack_simulator, config), or the defaults (pokemon template) when none is saved.',
   })
   @ApiResponse({ status: HttpStatus.OK })
   @ApiResponse({
@@ -53,9 +54,10 @@ export class AdminSimulatorController {
   @Put('config')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
+    deprecated: true,
     summary: 'Replace the simulator config (applied immediately, no draft)',
     description:
-      'Templates: slots fixed(tier,count 1..8) | reverse(count 1..4) | rare(odds RARE..HYPER_RARE, sum 100 ±0.001), exactly one rare slot and it must be last, 1..15 cards. Up to 50 sets. imageUrl only /uploads/public/landing/… paths.',
+      'Retiro futuro (A107); PUT /config valida pero ya no afecta al público. Templates: slots fixed(tier,count 1..8) | reverse(count 1..4) | rare(odds RARE..HYPER_RARE, sum 100 ±0.001), exactly one rare slot and it must be last, 1..15 cards. Up to 50 sets. imageUrl only /uploads/public/landing/… paths.',
   })
   @ApiBody({
     schema: {
@@ -89,9 +91,10 @@ export class AdminSimulatorController {
 
   @Get('sets')
   @ApiOperation({
+    deprecated: true,
     summary: 'Ingested (cursor DONE) sets with tier coverage diagnostics',
     description:
-      'Per set: cardCount, enabled, tierCoverage, unmappedRarities (raw rarities mapPackTier cannot map) and hasReversePrintings. Cards filtered by the active TCG client provider.',
+      'Retiro futuro (A107). Per set: cardCount, enabled, tierCoverage, unmappedRarities (raw rarities mapPackTier cannot map) and hasReversePrintings. Cards filtered by the active TCG client provider.',
   })
   @ApiResponse({ status: HttpStatus.OK })
   @ApiResponse({

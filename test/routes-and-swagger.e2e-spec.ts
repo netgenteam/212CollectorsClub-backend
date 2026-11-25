@@ -15,7 +15,10 @@ interface Param {
 }
 interface OpenApiDoc {
   components: { schemas: Record<string, { enum?: string[] }> };
-  paths: Record<string, Record<string, { parameters?: Param[] }>>;
+  paths: Record<
+    string,
+    Record<string, { parameters?: Param[]; deprecated?: boolean }>
+  >;
 }
 
 // Story 11.6 (FR-35, FR-37, AD-23, AD-24): canonical routes + published
@@ -145,5 +148,14 @@ describe('Canonical routes & Swagger contract (e2e, Story 11.6)', () => {
         expect(schema?.items).toMatchObject({ type: 'string', format: 'uuid' });
       }
     }
+  });
+
+  it('Story 22.8 (A107): the legacy simulator config endpoints are marked deprecated, the public ones are not', () => {
+    const p = doc.paths;
+    expect(p['/api/v1/admin/simulator/config'].get.deprecated).toBe(true);
+    expect(p['/api/v1/admin/simulator/config'].put.deprecated).toBe(true);
+    expect(p['/api/v1/admin/simulator/sets'].get.deprecated).toBe(true);
+    expect(p['/api/v1/simulator/sets'].get.deprecated).toBeUndefined();
+    expect(p['/api/v1/simulator/packs'].post.deprecated).toBeUndefined();
   });
 });

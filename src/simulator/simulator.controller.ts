@@ -37,7 +37,10 @@ export class SimulatorController {
 
   @Get('sets')
   @Header('Cache-Control', 'public, max-age=60')
-  @ApiOperation({ summary: 'Public sets available in the pack simulator' })
+  @ApiOperation({
+    summary:
+      'Active and ready manual sets available in the pack simulator (Story 22.8)',
+  })
   async listSets(): Promise<{ data: PublicSimulatorSet[] }> {
     return { data: await this.sets.listPublic() };
   }
@@ -57,7 +60,7 @@ export class SimulatorController {
       'Rate-limited per IP (SIMULATOR_RATE_LIMIT_PER_MIN, default 30/min).',
   })
   @ApiResponse({ status: 404, description: 'SIMULATOR_SET_NOT_FOUND' })
-  @ApiResponse({ status: 422, description: 'SIMULATOR_SET_INSUFFICIENT_CARDS' })
+  @ApiResponse({ status: 400, description: 'setId is not a UUID' })
   @ApiResponse({
     status: 429,
     description: 'Rate limit exceeded (Retry-After).',
