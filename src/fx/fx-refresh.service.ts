@@ -39,6 +39,47 @@ export type FxRefreshResult =
   | { status: 'MANUAL' }
   | { status: 'SKIPPED' };
 
+/** Story 22.2 (AD-110): `all` = the 3 live sources (cron, boot, POST refresh); `active` = only the active one (PUT settings). */
+export type FxRefreshScope = 'all' | 'active';
+
+export const FX_LIVE_SOURCES = ['BCV_USD', 'BCV_EUR', 'PARALELO_USD'] as const;
+
+/** What one attempt left in `Fx_Source_States`. */
+export interface FxStatePatch {
+  now: Date;
+  /** A valid, accepted reading was obtained this attempt (sets `lastSuccessAt`). */
+  success: boolean;
+  /** null clears `lastError`/`lastErrorAt`. */
+  error: string | null;
+  /** `'keep'` leaves the stored candidate untouched; null clears it. */
+  rejected: 'keep' | null | Prisma.InputJsonObject;
+}
+
+type RawExecutor = Pick<Prisma.TransactionClient, '$executeRaw'>;
+
+/** `INSERT ... ON CONFLICT (source) DO UPDATE` of one source's state (never Prisma `upsert`). */
+export async function upsertSourceState(
+  db: RawExecutor,
+  source: FxRateSource,
+  p: FxStatePatch,
+): Promise<void> {
+  const keep = p.rejected === 'keep';
+  const rejectedJson =
+    p.rejected === null || keep ? null : JSON.stringify(p.rejected);
+  const error = p.error === null ? null : p.error.slice(0, 500);
+  await db.$executeRaw`
+    INSERT INTO "Fx_Source_States"
+      ("source", "lastAttemptAt", "lastSuccessAt", "lastError", "lastErrorAt", "rejectedReading")
+    VALUES (${source}::"FxRateSource", ${p.now}, ${p.success ? p.now : null}, ${error},
+      ${error === null ? null : p.now}, ${rejectedJson}::jsonb)
+    ON CONFLICT ("source") DO UPDATE SET
+      "lastAttemptAt" = EXCLUDED."lastAttemptAt",
+      "lastSuccessAt" = COALESCE(EXCLUDED."lastSuccessAt", "Fx_Source_States"."lastSuccessAt"),
+      "lastError" = EXCLUDED."lastError",
+      "lastErrorAt" = EXCLUDED."lastErrorAt",
+      "rejectedReading" = CASE WHEN ${keep} THEN "Fx_Source_States"."rejectedReading" ELSE EXCLUDED."rejectedReading" END`;
+}
+
 /** Who asked for the refresh: the scheduler (cron / boot) or an admin pressing "refresh". */
 export type FxRefreshOrigin = 'AUTO_REFRESH' | 'ADMIN_REFRESH';
 
@@ -238,7 +279,11 @@ export class FxRefreshService implements OnApplicationBootstrap {
    */
   async refresh(
     source?: FxRateSource,
-    opts: { origin?: FxRefreshOrigin; adminId?: string } = {},
+    opts: {
+      origin?: FxRefreshOrigin;
+      adminId?: string;
+      scope?: FxRefreshScope;
+    } = {},
   ): Promise<FxRefreshResult> {
     const setting = await this.prisma.fxRateSetting.findUnique({
       where: { id: SINGLETON_FX_RATE_ID },
@@ -247,12 +292,52 @@ export class FxRefreshService implements OnApplicationBootstrap {
     if (!setting) return { status: 'SKIPPED' };
     const active = setting.source;
     if (source && source !== active) return { status: 'SKIPPED' };
-    if (active === 'MANUAL') return { status: 'MANUAL' };
+    const scope = opts.scope ?? 'all';
+    const live = active !== 'MANUAL';
 
-    // Network OUTSIDE the transaction. The provider never throws, but guard
-    // anyway so a bug there cannot escape.
-    const result = await this.fetchReading(active);
+    // Story 22.2 (AD-110): network OUTSIDE any transaction, the sources in parallel (each call is capped at
+    // 5 s + one retry and never throws; guarded anyway so a bug there cannot escape).
+    const targets: FxRateSource[] =
+      scope === 'all' ? [...FX_LIVE_SOURCES] : live ? [active] : [];
+    const readings = new Map<FxRateSource, FxProviderResult>();
+    await Promise.all(
+      targets.map(async (t) => {
+        readings.set(t, await this.fetchReading(t));
+      }),
+    );
 
+    // Phase A: the active source (exactly the 22.1 flow). MANUAL: nothing to apply.
+    let main: FxRefreshResult = { status: 'MANUAL' };
+    let failure: unknown;
+    let failed = false;
+    if (live) {
+      try {
+        main = await this.refreshActive(
+          active,
+          readings.get(active) as FxProviderResult,
+          opts,
+        );
+      } catch (err) {
+        failed = true;
+        failure = err;
+      }
+    }
+    // Phase B: the other sources (state + snapshots only). Independent of A's outcome.
+    if (scope === 'all') {
+      await this.refreshInactive(
+        FX_LIVE_SOURCES.filter((x) => x !== active),
+        readings,
+      );
+    }
+    if (failed) throw failure;
+    return main;
+  }
+
+  private async refreshActive(
+    active: FxRateSource,
+    result: FxProviderResult,
+    opts: { origin?: FxRefreshOrigin; adminId?: string },
+  ): Promise<FxRefreshResult> {
     const now = new Date();
     try {
       return await this.applyReading(active, result, now, opts);
@@ -276,10 +361,147 @@ export class FxRefreshService implements OnApplicationBootstrap {
               `could not record the refresh failure: ${String(e)}`,
             ),
           );
+        await upsertSourceState(this.prisma, active, {
+          now: new Date(),
+          success: false,
+          error,
+          rejected: 'keep',
+        }).catch((e: unknown) =>
+          this.logger.error(`could not record the source state: ${String(e)}`),
+        );
         return { status: 'FAILED', source: active, error };
       }
       throw err;
     }
+  }
+
+  /**
+   * Story 22.2 (AD-110) phase B: one transaction WITHOUT audit under the SAME advisory try-lock; the active
+   * source is re-read under the lock (a source that became active meanwhile is skipped, phase A owns it).
+   * Never moves `vesPerUsd`, prices or emits events. Never throws: a failure here must not hide phase A.
+   */
+  private async refreshInactive(
+    sources: readonly FxRateSource[],
+    readings: Map<FxRateSource, FxProviderResult>,
+  ): Promise<void> {
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const [{ locked }] = await tx.$queryRaw<{ locked: boolean }[]>`
+          SELECT pg_try_advisory_xact_lock(hashtextextended('fx:refresh', 0)) AS locked`;
+        if (!locked) return; // the next cycle will do it
+        const rows = await tx.$queryRaw<
+          { source: FxRateSource; maxVariationPct: Prisma.Decimal }[]
+        >`SELECT "source", "maxVariationPct" FROM "Fx_Rate_Settings" WHERE "id" = ${SINGLETON_FX_RATE_ID}`;
+        const row = rows[0];
+        if (!row) return;
+        const now = new Date();
+        for (const src of sources) {
+          const result = readings.get(src);
+          if (!result || src === row.source) continue;
+          await this.applyInactive(
+            tx,
+            src,
+            result,
+            now,
+            row.maxVariationPct.toNumber(),
+          );
+        }
+      });
+    } catch (err) {
+      this.logger.error(`FX inactive-source phase failed: ${String(err)}`);
+    }
+  }
+
+  private async applyInactive(
+    tx: Prisma.TransactionClient,
+    src: FxRateSource,
+    result: FxProviderResult,
+    now: Date,
+    maxVariationPct: number,
+  ): Promise<void> {
+    if (!result.ok) {
+      await upsertSourceState(tx, src, {
+        now,
+        success: false,
+        error: result.error,
+        rejected: 'keep',
+      });
+      return;
+    }
+    const reading = result.reading;
+    const state = await tx.fxSourceState.findUnique({
+      where: { source: src },
+      select: { rejectedReading: true },
+    });
+    const last = await tx.fxRateSnapshot.findFirst({
+      where: { source: src },
+      orderBy: [{ providerUpdatedAt: 'desc' }, { fetchedAt: 'desc' }],
+      select: { rate: true, providerUpdatedAt: true },
+    });
+    const maxAge = this.getReferenceMaxAgeHours();
+    const reference = selectReference(
+      last
+        ? {
+            rate: last.rate.toNumber(),
+            providerUpdatedAt: last.providerUpdatedAt,
+          }
+        : null,
+      now,
+      maxAge,
+    );
+    const sameKey = Number.isNaN(reading.providerUpdatedAt.getTime())
+      ? null
+      : await tx.fxRateSnapshot.findFirst({
+          where: { source: src, providerUpdatedAt: reading.providerUpdatedAt },
+          select: { rate: true, providerUpdatedAt: true },
+        });
+    const candidate = parseCandidate(state?.rejectedReading, src);
+    const verdict = decideReading({
+      reading,
+      reference,
+      candidate,
+      maxVariationPct,
+      now,
+      collision: sameKey
+        ? {
+            rate: sameKey.rate.toNumber(),
+            providerUpdatedAt: sameKey.providerUpdatedAt,
+          }
+        : null,
+      candidateMaxAgeHours: maxAge,
+    });
+    if (!verdict.accept) {
+      const keepCandidate =
+        candidate &&
+        verdict.reason === 'VARIATION_EXCEEDED' &&
+        !(
+          reading.providerUpdatedAt.getTime() >
+          candidate.providerUpdatedAt.getTime()
+        );
+      await upsertSourceState(tx, src, {
+        now,
+        success: false,
+        error: `Reading rejected: ${verdict.reason}`,
+        rejected: keepCandidate
+          ? {
+              ...(state?.rejectedReading as Prisma.InputJsonObject),
+              at: now.toISOString(),
+            }
+          : buildRejectedReading(src, reading, verdict.reason, now),
+      });
+      return;
+    }
+    const rate = new Prisma.Decimal(reading.rate).toDecimalPlaces(4);
+    await tx.$executeRaw`
+      INSERT INTO "Fx_Rate_Snapshots" ("id", "source", "rate", "providerUpdatedAt", "fetchedAt")
+      VALUES (gen_random_uuid(), ${src}::"FxRateSource", ${rate}, ${reading.providerUpdatedAt}, ${now})
+      ON CONFLICT ("source", "providerUpdatedAt") DO NOTHING`;
+    await upsertSourceState(tx, src, {
+      now,
+      success: true,
+      error: null,
+      rejected: null,
+    });
   }
 
   private applyReading(
@@ -302,7 +524,23 @@ export class FxRefreshService implements OnApplicationBootstrap {
       // Source changed (or row vanished) while we were fetching: drop it.
       if (!row || row.source !== active) return { status: 'SKIPPED' } as const;
 
+      // Story 22.2 (AD-110): the candidate lives in Fx_Source_States (singleton fallback for the first
+      // cycle after the migration, when the row does not exist yet).
+      const stateRow = await tx.fxSourceState.findUnique({
+        where: { source: active },
+        select: { rejectedReading: true },
+      });
+      const candidateRaw = stateRow
+        ? stateRow.rejectedReading
+        : row.rejectedReading;
+
       if (!result.ok) {
+        await upsertSourceState(tx, active, {
+          now,
+          success: false,
+          error: result.error,
+          rejected: 'keep',
+        });
         await tx.fxRateSetting.update({
           where: { id: SINGLETON_FX_RATE_ID },
           data: {
@@ -346,7 +584,7 @@ export class FxRefreshService implements OnApplicationBootstrap {
             },
             select: { rate: true, providerUpdatedAt: true },
           });
-      const candidate = parseCandidate(row.rejectedReading, active);
+      const candidate = parseCandidate(candidateRaw, active);
 
       let verdict = decideReading({
         reading,
@@ -382,10 +620,16 @@ export class FxRefreshService implements OnApplicationBootstrap {
           );
         const rejectedJson: Prisma.InputJsonObject = keepCandidate
           ? {
-              ...(row.rejectedReading as Prisma.InputJsonObject),
+              ...(candidateRaw as Prisma.InputJsonObject),
               at: now.toISOString(),
             }
           : buildRejectedReading(active, reading, verdict.reason, now);
+        await upsertSourceState(tx, active, {
+          now,
+          success: false,
+          error: `Reading rejected: ${verdict.reason}`,
+          rejected: rejectedJson,
+        });
         await tx.fxRateSetting.update({
           where: { id: SINGLETON_FX_RATE_ID },
           data: {
@@ -419,6 +663,12 @@ export class FxRefreshService implements OnApplicationBootstrap {
             rejectedReading: Prisma.DbNull,
           },
         });
+        await upsertSourceState(tx, active, {
+          now,
+          success: true,
+          error: null,
+          rejected: null,
+        });
         return { status: 'NOOP', source: active } as const;
       }
 
@@ -437,6 +687,12 @@ export class FxRefreshService implements OnApplicationBootstrap {
         INSERT INTO "Fx_Rate_Snapshots" ("id", "source", "rate", "providerUpdatedAt", "fetchedAt")
         VALUES (gen_random_uuid(), ${active}::"FxRateSource", ${rate}, ${reading.providerUpdatedAt}, ${now})
         ON CONFLICT ("source", "providerUpdatedAt") DO NOTHING`;
+      await upsertSourceState(tx, active, {
+        now,
+        success: true,
+        error: null,
+        rejected: null,
+      });
       if (!row.vesPerUsd.equals(rate)) {
         audit.add({
           ...SYSTEM_ACTOR,

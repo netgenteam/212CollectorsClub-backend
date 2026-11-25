@@ -489,6 +489,21 @@ enum FxRateSource {
   MANUAL
 }
 
+/// Story 22.2 (AD-110): per-source attempt/error state for the three live sources (BCV_USD, BCV_EUR,
+/// PARALELO_USD). Written with `INSERT ... ON CONFLICT (source) DO UPDATE` (no seed). The active source also
+/// keeps `lastError`/`rejectedReading` in the `Fx_Rate_Settings` singleton (contract unchanged).
+model FxSourceState {
+  source          FxRateSource @id
+  lastAttemptAt   DateTime     @default(now()) @db.Timestamptz
+  lastSuccessAt   DateTime?    @db.Timestamptz
+  lastError       String?
+  lastErrorAt     DateTime?    @db.Timestamptz
+  /// `{source, rate, rawRate, providerUpdatedAt, reason, at}` of the last rejected reading (confirmation candidate).
+  rejectedReading Json?
+
+  @@map("Fx_Source_States")
+}
+
 /// Story 18.3 (AD-79): what an audit row records.
 enum FxSettingAction {
   SETTINGS_UPDATED

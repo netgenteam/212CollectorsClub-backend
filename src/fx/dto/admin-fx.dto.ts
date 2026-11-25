@@ -102,6 +102,40 @@ export class FxLiveSourcesDto {
   PARALELO_USD: FxSourceLiveDto | null;
 }
 
+/** Story 22.2 (AD-110, A116): attempt/error state of ONE live source (all null when it was never attempted). */
+export class FxSourceStateDto {
+  @ApiProperty({ type: String, format: 'date-time', nullable: true })
+  lastAttemptAt: string | null;
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description: 'Last cycle that obtained a valid, accepted reading.',
+  })
+  lastSuccessAt: string | null;
+  @ApiProperty({ type: String, nullable: true })
+  lastError: string | null;
+  @ApiProperty({ type: String, format: 'date-time', nullable: true })
+  lastErrorAt: string | null;
+  @ApiProperty({
+    type: 'object',
+    additionalProperties: true,
+    nullable: true,
+    description:
+      '{source, rate, rawRate, providerUpdatedAt, reason, at} of the last rejected reading of this source.',
+  })
+  rejectedReading: Record<string, unknown> | null;
+}
+
+export class FxSourceStatesDto {
+  @ApiProperty({ type: FxSourceStateDto })
+  BCV_USD: FxSourceStateDto;
+  @ApiProperty({ type: FxSourceStateDto })
+  BCV_EUR: FxSourceStateDto;
+  @ApiProperty({ type: FxSourceStateDto })
+  PARALELO_USD: FxSourceStateDto;
+}
+
 export class FxStatusResponseDto {
   @ApiProperty({ enum: FxRateSource, enumName: 'FxRateSource' })
   source: FxRateSource;
@@ -137,6 +171,12 @@ export class FxStatusResponseDto {
     description: 'Last snapshot of each source (no network call).',
   })
   sources: FxLiveSourcesDto;
+  @ApiProperty({
+    type: FxSourceStatesDto,
+    description:
+      'Backwards-compatible addition (Story 22.2): per-source attempt/error state; always the 3 keys, fields null when the source was never attempted. `sources[k]` is unchanged.',
+  })
+  sourceStates: FxSourceStatesDto;
 }
 
 export class RefreshFxResponseDto extends FxStatusResponseDto {

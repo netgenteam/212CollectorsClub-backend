@@ -52,7 +52,6 @@ const VIT_ROW = { section: 'home', key: 'vitrina' };
 const DAY = 86_400_000;
 const daysAgo = (d: number) => new Date(Date.now() - d * DAY);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const D2 = new Date(FAKE_FX_DEFAULT_DATE.getTime() + 3600 * 1000);
 
 /** Every table whose content must be byte-identical before and after. */
 const TABLES = [
@@ -477,6 +476,7 @@ describe('Epic 18 regression (e2e, Story 18.12)', { timeout: 120_000 }, () => {
       });
     }
     // The suite owns the FX snapshots while it runs (restored in afterAll).
+    await prisma.fxSourceState.deleteMany();
     await prisma.fxRateSnapshot.deleteMany();
     await mkProduct('FX', { franchise: 'NARUTO', stock: 5000, price: '12.34' });
 
@@ -673,15 +673,23 @@ describe('Epic 18 regression (e2e, Story 18.12)', { timeout: 120_000 }, () => {
     });
 
     it('provider down / NaN / 0 / +16 % never change the rate; status reflects it and Pago Movil keeps working', async () => {
+      await prisma.fxSourceState.deleteMany();
       await prisma.fxRateSnapshot.deleteMany();
-      await putFx({ source: 'BCV_USD' }).expect(200); // rate 889.2600, snapshot at D1
+      // Story 22.1/22.2: only a snapshot within 96 h of its provider date is a variation reference, so the
+      // dates here are relative to now (the fixed fake dates are weeks old).
+      const r1 = new Date(Date.now() - 2 * 86_400_000);
+      const r2 = new Date(Date.now() - 86_400_000);
+      fake.reset().succeed(FAKE_FX_FIXTURES.BCV_USD, r1);
+      await putFx({ source: 'BCV_USD' }).expect(200); // rate 889.2600, snapshot at r1
       const base = FAKE_FX_FIXTURES.BCV_USD.toFixed(4);
-      const snaps = await prisma.fxRateSnapshot.count();
+      const usdSnaps = () =>
+        prisma.fxRateSnapshot.count({ where: { source: 'BCV_USD' } });
+      const snaps = await usdSnaps();
       const scenarios: Array<[string, () => void, boolean]> = [
         ['API down', () => fake.fail('boom'), false],
-        ['NaN', () => fake.nan(D2), false],
-        ['zero', () => fake.zero(D2), false],
-        ['+16 %', () => fake.variation(FAKE_FX_FIXTURES.BCV_USD, 16, D2), true],
+        ['NaN', () => fake.nan(r2), false],
+        ['zero', () => fake.zero(r2), false],
+        ['+16 %', () => fake.variation(FAKE_FX_FIXTURES.BCV_USD, 16, r2), true],
       ];
       for (const [name, arm, keepsReading] of scenarios) {
         fake.reset();
@@ -700,13 +708,13 @@ describe('Epic 18 regression (e2e, Story 18.12)', { timeout: 120_000 }, () => {
           ((await current().expect(200)).body as { vesPerUsd: string })
             .vesPerUsd,
         ).toBe(base);
-        expect(await prisma.fxRateSnapshot.count()).toBe(snaps);
+        expect(await usdSnaps()).toBe(snaps);
         const pm = await checkout('pago_movil');
         expect([name, pm.status]).toEqual([name, 201]);
         expect((pm.body as CheckoutBody).fxRateVesPerUsd).toBe(Number(base));
       }
       // Recovery: a sane, newer reading clears the error and moves the rate.
-      fake.reset().succeed(900, D2);
+      fake.reset().succeed(900, r2);
       const ok = await refreshFx().expect(200);
       expect(ok.body).toMatchObject({
         result: 'UPDATED',
@@ -742,6 +750,7 @@ describe('Epic 18 regression (e2e, Story 18.12)', { timeout: 120_000 }, () => {
     });
 
     it('Pago Movil order stores fxRateSource/totalVes and never changes with the source; older orders have fxRateSource null', async () => {
+      await prisma.fxSourceState.deleteMany();
       await prisma.fxRateSnapshot.deleteMany();
       await setRow('BCV_USD', '889.2600');
       const legacyId = await mkOrder('PAID', [
@@ -794,6 +803,7 @@ describe('Epic 18 regression (e2e, Story 18.12)', { timeout: 120_000 }, () => {
   describe('AC3: concurrencia real (Promise.all)', () => {
     it('5 POST /admin/fx/refresh => exactly one snapshot and at most one with effect', async () => {
       fake.reset();
+      await prisma.fxSourceState.deleteMany();
       await prisma.fxRateSnapshot.deleteMany();
       await prisma.fxRateSnapshot.create({
         data: {
@@ -831,7 +841,10 @@ describe('Epic 18 regression (e2e, Story 18.12)', { timeout: 120_000 }, () => {
           where: { source: 'BCV_USD', providerUpdatedAt: FAKE_FX_DEFAULT_DATE },
         }),
       ).toBe(1);
-      expect(await prisma.fxRateSnapshot.count()).toBe(2);
+      // 22.2: BCV_USD has the seeded + the new snapshot; the other two sources get one each.
+      expect(
+        await prisma.fxRateSnapshot.count({ where: { source: 'BCV_USD' } }),
+      ).toBe(2);
       expect((await statusFx()).rate).toBe('889.2600');
     });
 

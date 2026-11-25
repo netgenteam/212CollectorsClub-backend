@@ -37,6 +37,7 @@ describe('FX refresh (e2e, Story 18.1)', () => {
     prisma.fxRateSnapshot.count({ where: { source: source as 'BCV_USD' } });
 
   const reset = async (source = 'BCV_USD') => {
+    await prisma.fxSourceState.deleteMany();
     await prisma.fxRateSnapshot.deleteMany();
     await prisma.$executeRaw`
       UPDATE "Fx_Rate_Settings" SET "vesPerUsd" = 100, "source" = ${source}::"FxRateSource",
@@ -175,21 +176,26 @@ describe('FX refresh (e2e, Story 18.1)', () => {
     }
   });
 
-  it('MANUAL never queries the provider', async () => {
+  it('MANUAL never applies a reading (22.2: the 3 sources are still recorded in phase B)', async () => {
     await prisma.$executeRaw`UPDATE "Fx_Rate_Settings" SET "source" = 'MANUAL', "manualVesPerUsd" = 50 WHERE "id" = 'default'`;
     fake.succeed(999, D0);
     expect((await fx.refresh()).status).toBe('MANUAL');
-    expect(fake.calls).toHaveLength(0);
+    expect([...fake.calls].sort()).toEqual([
+      'BCV_EUR',
+      'BCV_USD',
+      'PARALELO_USD',
+    ]);
     expect((await setting()).vesPerUsd.toFixed(4)).toBe('100.0000');
   });
 
   it('a source change does not compare against another source (AC6)', async () => {
     fake.succeed(100, D0);
-    await fx.refresh();
+    // scope 'active': phase B would also record a BCV_EUR snapshot (22.2), which this test must not have.
+    await fx.refresh(undefined, { scope: 'active' });
     await prisma.$executeRaw`UPDATE "Fx_Rate_Settings" SET "source" = 'BCV_EUR', "providerUpdatedAt" = NULL WHERE "id" = 'default'`;
     // 5x the USD rate and an older date: accepted, EUR has no history.
     fake.succeed(500, new Date(D0.getTime() - 3600_000));
-    expect(await fx.refresh()).toMatchObject({
+    expect(await fx.refresh(undefined, { scope: 'active' })).toMatchObject({
       status: 'UPDATED',
       source: 'BCV_EUR',
     });
@@ -197,7 +203,9 @@ describe('FX refresh (e2e, Story 18.1)', () => {
     expect(await snaps('BCV_EUR')).toBe(1);
     // ...but the next EUR reading IS compared with the EUR snapshot.
     fake.variation(500, 20, D2);
-    expect(await fx.refresh()).toMatchObject({ status: 'REJECTED' });
+    expect(await fx.refresh(undefined, { scope: 'active' })).toMatchObject({
+      status: 'REJECTED',
+    });
   });
 
   it('refresh(source) for a non-active source is skipped', async () => {
@@ -218,7 +226,11 @@ describe('FX refresh (e2e, Story 18.1)', () => {
       expect(fake.calls).toHaveLength(0);
       process.env.FX_REFRESH_ENABLED = 'true';
       await expect(fx.handleCron()).resolves.toBeUndefined();
-      expect(fake.calls).toEqual(['BCV_USD']);
+      expect([...fake.calls].sort()).toEqual([
+        'BCV_EUR',
+        'BCV_USD',
+        'PARALELO_USD',
+      ]);
       fake.fail('down');
       await expect(fx.handleCron()).resolves.toBeUndefined();
     });
@@ -312,11 +324,11 @@ describe('FX refresh (e2e, Story 18.1)', () => {
       expect(await rateEvents(since)).toEqual([]);
     });
 
-    it('no external I/O inside the transaction: the provider is read BEFORE it opens (one read per refresh, none while the audit lock is taken)', async () => {
+    it('no external I/O inside the transaction: the provider is read BEFORE it opens (one read per source per refresh, none while the audit lock is taken)', async () => {
       fake.succeed(950, D0);
       const calls = fake.calls.length;
       await fx.refresh();
-      expect(fake.calls.length - calls).toBe(1);
+      expect(fake.calls.length - calls).toBe(3); // 22.2: one per live source
     });
 
     it('if the audit write fails the refresh rolls back as a whole (old rate, no snapshot), leaves a TRACE in lastError and the next cycle applies it', async () => {

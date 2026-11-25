@@ -114,6 +114,7 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
     // real ones are restored verbatim in afterAll). Foreign snapshots dated
     // after the fake provider's fixtures would turn every fresh reading into
     // DATE_REGRESSION; each test seeds the snapshots it needs.
+    await prisma.fxSourceState.deleteMany();
     await prisma.fxRateSnapshot.deleteMany();
     const category = await prisma.category.findFirstOrThrow();
     productId = (
@@ -153,10 +154,12 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
   // Each test starts from an empty snapshot table and seeds what it needs
   // (a previous test may have left a future-dated one on purpose).
   beforeEach(async () => {
+    await prisma.fxSourceState.deleteMany();
     await prisma.fxRateSnapshot.deleteMany();
   });
 
   afterAll(async () => {
+    await prisma.fxSourceState.deleteMany();
     await prisma.fxRateSnapshot.deleteMany();
     await prisma.order.deleteMany({
       where: { lines: { some: { productId } } },
@@ -446,6 +449,7 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
   it('refresh of the new source FAILS: no order and no /fx/current exposes a mixed pair (with and without a snapshot)', async () => {
     const fake = app.get(FakeFxProvider).reset();
     const valid = validPairs();
+    await prisma.fxSourceState.deleteMany();
     await prisma.fxRateSnapshot.deleteMany();
     await setRow('BCV_USD', '889.2600');
     fake.fail('provider down');
@@ -496,6 +500,7 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
   it('refresh of the new source is REJECTED (DATE_REGRESSION): pair stays coherent in orders and /fx/current', async () => {
     const fake = app.get(FakeFxProvider).reset();
     const valid = validPairs();
+    await prisma.fxSourceState.deleteMany();
     await prisma.fxRateSnapshot.deleteMany();
     await setRow('BCV_USD', '889.2600');
     // Story 22.1: a CURRENT snapshot (within 96 h) newer than the provider reading => it regresses.

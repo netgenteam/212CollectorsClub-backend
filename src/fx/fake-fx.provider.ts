@@ -69,6 +69,12 @@ export class FakeFxProvider implements FxProvider {
     return this;
   }
 
+  /** Story 22.2: failure for ONE source only (the others keep answering). */
+  failFor(source: FxProviderSource, error = 'HTTP 500'): this {
+    this.bySource.set(source, { ok: false, error });
+    return this;
+  }
+
   /** Valid reading. */
   succeed(rate = FAKE_FX_DEFAULT_RATE, at = FAKE_FX_DEFAULT_DATE): this {
     this.result = this.ok(rate, at);

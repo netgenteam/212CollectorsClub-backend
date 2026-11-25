@@ -131,6 +131,8 @@ export type FxState = {
    */
   rawSetting?: string | null;
   rawSnapshots?: string;
+  /** Story 22.2: `Fx_Source_States` rows, `to_jsonb` text. */
+  rawStates?: string;
 };
 
 /** Story 18.1: snapshot of the real FX rate row and its snapshot history. */
@@ -149,6 +151,11 @@ export async function snapshotFx(prisma: PrismaService): Promise<FxState> {
         SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t."id"), '[]'::jsonb)::text AS j
         FROM "Fx_Rate_Snapshots" t`
     )[0].j,
+    rawStates: (
+      await prisma.$queryRaw<{ j: string }[]>`
+        SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t."source"), '[]'::jsonb)::text AS j
+        FROM "Fx_Source_States" t`
+    )[0].j,
   };
 }
 
@@ -160,6 +167,12 @@ export async function restoreFx(
   prisma: PrismaService,
   s: FxState,
 ): Promise<void> {
+  await prisma.fxSourceState.deleteMany();
+  if (s.rawStates !== undefined) {
+    await prisma.$executeRaw`
+      INSERT INTO "Fx_Source_States"
+      SELECT * FROM jsonb_populate_recordset(null::"Fx_Source_States", ${s.rawStates}::jsonb)`;
+  }
   await prisma.fxRateSnapshot.deleteMany();
   if (s.rawSnapshots !== undefined) {
     await prisma.$executeRaw`

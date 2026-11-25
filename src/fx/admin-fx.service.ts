@@ -19,6 +19,7 @@ import type {
   FxHistoryQueryDto,
   FxHistoryResponseDto,
   FxLiveSourcesDto,
+  FxSourceStatesDto,
   FxSettingsResponseDto,
   FxStatusResponseDto,
   RefreshFxResponseDto,
@@ -29,6 +30,7 @@ import type { FxProviderResult } from './fx-provider.js';
 import {
   FxRefreshService,
   buildRejectedReading,
+  upsertSourceState,
 } from './fx-refresh.service.js';
 import { evaluateReading, selectReference } from './fx-validation.js';
 import type { FxRejectReason } from './fx-validation.js';
@@ -147,6 +149,8 @@ export class AdminFxService {
           this.refresher.refresh(dto.source, {
             origin: 'ADMIN_REFRESH',
             adminId: adminUserId,
+            // Story 22.2: only the active source, so the PUT keeps its 45 s budget.
+            scope: 'active',
           }),
           left(),
         );
@@ -219,6 +223,7 @@ export class AdminFxService {
             data.maxVariationPct = new Prisma.Decimal(dto.maxVariationPct);
           }
           let refresh = 'MANUAL';
+          let stateRejected: Prisma.InputJsonObject | null = null;
           let reason: string | null = null;
           let snapshotRow: {
             rate: Prisma.Decimal;
@@ -308,6 +313,7 @@ export class AdminFxService {
               data.lastError = lastError;
               data.lastErrorAt = now;
               data.rejectedReading = rejected ?? Prisma.DbNull;
+              stateRejected = rejected;
             }
           }
           if (dto.source === 'MANUAL' || (changed && !data.lastError)) {
@@ -319,6 +325,16 @@ export class AdminFxService {
             where: { id: SINGLETON_FX_RATE_ID },
             data,
           });
+          // Story 22.2: keep the per-source state coherent with the singleton on a switch (the candidate is
+          // read from Fx_Source_States, so a stale row must not outlive an admin decision).
+          if (changed && dto.source !== 'MANUAL') {
+            await upsertSourceState(tx, dto.source, {
+              now,
+              success: !data.lastError,
+              error: (data.lastError as string | null | undefined) ?? null,
+              rejected: data.lastError ? (stateRejected ?? 'keep') : null,
+            });
+          }
           if (snapshotRow) {
             await tx.$executeRaw`
             INSERT INTO "Fx_Rate_Snapshots" ("id", "source", "rate", "providerUpdatedAt", "fetchedAt")
@@ -375,7 +391,10 @@ export class AdminFxService {
 
   async getStatus(): Promise<FxStatusResponseDto> {
     const s = await this.loadSetting();
-    const sources = await this.liveSources();
+    const [sources, sourceStates] = await Promise.all([
+      this.liveSources(),
+      this.sourceStates(),
+    ]);
     const fetched = s.rateFetchedAt ?? s.updatedAt;
     const age = Date.now() - fetched.getTime();
     const limit = s.maxAgeHours * HOUR_MS;
@@ -391,6 +410,7 @@ export class AdminFxService {
       rejectedReading:
         (s.rejectedReading as Record<string, unknown> | null) ?? null,
       sources,
+      sourceStates,
     };
   }
 
@@ -461,6 +481,12 @@ export class AdminFxService {
           lastErrorAt: null,
           rejectedReading: Prisma.DbNull,
         },
+      });
+      await upsertSourceState(tx, row.source, {
+        now,
+        success: true,
+        error: null,
+        rejected: null,
       });
       // Same (source, providerUpdatedAt) already stored (DATE_NOT_NEWER): the
       // explicit admin decision also corrects the stored rate (AD-79).
@@ -633,26 +659,51 @@ export class AdminFxService {
     };
   }
 
+  /** Last snapshot of each live source: ONE query (DISTINCT ON), no N+1. */
   private async liveSources(): Promise<FxLiveSourcesDto> {
-    const snaps = await Promise.all(
-      LIVE_SOURCES.map((source) =>
-        this.prisma.fxRateSnapshot.findFirst({
-          where: { source },
-          orderBy: [{ providerUpdatedAt: 'desc' }, { fetchedAt: 'desc' }],
-        }),
-      ),
-    );
+    const rows = await this.prisma.$queryRaw<
+      {
+        source: FxRateSource;
+        rate: Prisma.Decimal;
+        providerUpdatedAt: Date;
+        fetchedAt: Date;
+      }[]
+    >`
+      SELECT DISTINCT ON ("source") "source", "rate", "providerUpdatedAt", "fetchedAt"
+      FROM "Fx_Rate_Snapshots"
+      WHERE "source" IN ('BCV_USD'::"FxRateSource", 'BCV_EUR'::"FxRateSource", 'PARALELO_USD'::"FxRateSource")
+      ORDER BY "source", "providerUpdatedAt" DESC, "fetchedAt" DESC`;
     const out = {} as FxLiveSourcesDto;
-    LIVE_SOURCES.forEach((source, i) => {
-      const r = snaps[i];
+    for (const source of LIVE_SOURCES) {
+      const r = rows.find((x) => x.source === source);
       out[source] = r
         ? {
-            rate: r.rate.toFixed(4),
+            rate: new Prisma.Decimal(r.rate).toFixed(4),
             providerUpdatedAt: r.providerUpdatedAt.toISOString(),
             fetchedAt: r.fetchedAt.toISOString(),
           }
         : null;
+    }
+    return out;
+  }
+
+  /** Story 22.2 (A116): always the 3 keys; one `findMany` over `Fx_Source_States`. */
+  private async sourceStates(): Promise<FxSourceStatesDto> {
+    const rows = await this.prisma.fxSourceState.findMany({
+      where: { source: { in: [...LIVE_SOURCES] } },
     });
+    const out = {} as FxSourceStatesDto;
+    for (const source of LIVE_SOURCES) {
+      const r = rows.find((x) => x.source === source);
+      out[source] = {
+        lastAttemptAt: r?.lastAttemptAt.toISOString() ?? null,
+        lastSuccessAt: r?.lastSuccessAt?.toISOString() ?? null,
+        lastError: r?.lastError ?? null,
+        lastErrorAt: r?.lastErrorAt?.toISOString() ?? null,
+        rejectedReading:
+          (r?.rejectedReading as Record<string, unknown> | null) ?? null,
+      };
+    }
     return out;
   }
 

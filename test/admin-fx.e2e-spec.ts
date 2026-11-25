@@ -76,6 +76,7 @@ describe('Admin FX API (e2e, Story 18.2)', () => {
       .body as Status;
 
   const reset = async (source = 'BCV_USD') => {
+    await prisma.fxSourceState.deleteMany();
     await prisma.fxRateSnapshot.deleteMany();
     await prisma.fxSettingAudit.deleteMany();
     await prisma.$executeRaw`
@@ -581,7 +582,12 @@ describe('Admin FX API (e2e, Story 18.2)', () => {
         .set(auth())
         .expect(200);
       expect((res.body as Status).result).toBe('MANUAL');
-      expect(fake.calls).toEqual([]);
+      // 22.2: the active MANUAL applies nothing, but the 3 live sources are still recorded.
+      expect([...fake.calls].sort()).toEqual([
+        'BCV_EUR',
+        'BCV_USD',
+        'PARALELO_USD',
+      ]);
     });
   });
 
@@ -678,7 +684,10 @@ describe('Admin FX API (e2e, Story 18.2)', () => {
       expect((await setting()).vesPerUsd.toFixed(4)).toBe('100.0000');
       await server().post(`${BASE}/accept-rejected`).set(auth()).expect(200);
       expect((await setting()).vesPerUsd.toFixed(4)).toBe('105.0000');
-      const s = await prisma.fxRateSnapshot.findMany();
+      // 22.2: the other two sources also keep their (same-date) snapshots.
+      const s = await prisma.fxRateSnapshot.findMany({
+        where: { source: 'BCV_USD' },
+      });
       expect(s).toHaveLength(1);
       expect(s[0].rate.toFixed(4)).toBe('105.0000');
     });

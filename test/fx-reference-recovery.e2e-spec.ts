@@ -23,6 +23,7 @@ describe('FX reference recovery and confirmation (e2e, Story 22.1)', () => {
     prisma.$queryRaw<{ after: Record<string, unknown> }[]>`
       SELECT "after" FROM "Audit_Events" WHERE "action" = 'FX_RATE_CHANGED' ORDER BY "seq" DESC LIMIT 5`;
   const reset = async () => {
+    await prisma.fxSourceState.deleteMany();
     await prisma.fxRateSnapshot.deleteMany();
     await prisma.$executeRaw`
       UPDATE "Fx_Rate_Settings" SET "vesPerUsd" = 200, "source" = 'BCV_USD'::"FxRateSource",
