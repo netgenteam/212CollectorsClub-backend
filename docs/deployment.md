@@ -2809,3 +2809,74 @@ El guard CSRF del BFF (`212CollectorsClub-frontend/lib/security/csrf.ts`) caía 
 ### 23.7 Lo comprobado y lo que no
 
 Las cifras de pruebas y lo verificado a mano (arranque real de `node dist/main` con cada variable mala, contenedor como `node`, `SIGTERM`, migración desde la imagen contra un Postgres desechable, recorrido del navegador con la CSP) están en el reporte de la story. **No verificado:** un Dokploy real, un VPS con systemd, Stripe real, certificados reales.
+
+## 24. Epic 22: sets manuales del simulador y corrección de tasas (Story 22.9)
+
+Contrato para el frontend (rutas, errores, CSV, imágenes, compatibilidad): [`docs/api-simulator-manual-sets.md`](./api-simulator-manual-sets.md). **El frontend debe adaptarse con ese contrato** (panel admin nuevo y `SimCard.product` admite `null`); hasta entonces el panel viejo del simulador sigue sin afectar al público.
+
+### 24.1 Variables nuevas (todas opcionales; la fuente es `.env.example`)
+
+| Variable | Default | Efecto |
+|---|---|---|
+| `SIMULATOR_MAX_SETS` | 50 | Máximo de sets manuales (`422 SIMULATOR_SET_LIMIT`). |
+| `SIMULATOR_MAX_CARDS_PER_SET` | 2000 | Máximo de cartas por set (`422 SIMULATOR_SET_CARD_LIMIT`). |
+| `SIMULATOR_CSV_MAX_BYTES` | 1048576 | Tamaño máximo del CSV (`413 SIMULATOR_CSV_TOO_LARGE`). |
+| `SIMULATOR_CSV_MAX_ROWS` | 2000 | Filas de datos máximas por CSV. |
+| `SIMULATOR_IMAGE_MAX_BYTES` | 2097152 (2 MB) | Tamaño máximo de imagen (`413 SIMULATOR_IMAGE_TOO_LARGE`); si falta usa `LANDING_IMAGE_MAX_BYTES`. |
+| `FX_VARIATION_REFERENCE_MAX_AGE_HOURS` | 96 | Antigüedad máxima (por fecha del proveedor) del snapshot que sirve de referencia de variación; rango 24..720, inválido = default + `warn`. |
+
+Un valor numérico inválido de las `SIMULATOR_*` se ignora (default). Se leen al arrancar: cambiarlas exige reiniciar. Las imágenes subidas van a `uploads/public/simulator/` (el mismo volumen persistente que `uploads/public/landing/`; sin recolección de huérfanas: borrar un set o carta no borra su archivo).
+
+### 24.2 Consulta previa al despliegue (R1 / A118): el nombre exacto de «simulador prueba»
+
+La migración de sets manuales convierte en un set **inactivo y sin cartas** el set de la config vieja cuyo nombre cumpla `lower(btrim(nombre)) = 'simulador prueba'` (nombre = `displayName` o, si no hay, el `setName` del cursor `Tcg_Ingest_Cursors`). **No colapsa espacios internos**: «Simulador  Prueba» (dos espacios) o «simulador-prueba» no coinciden. Ese set no existe en la BD local; vive solo en la desplegada. **Antes de desplegar**, en la BD de ese entorno:
+
+```sql
+SELECT jsonb_pretty(value) FROM "Landing_Config_Entries" WHERE section = 'pack_simulator' AND key = 'config';
+```
+
+Revisa `sets[].displayName` (y, si falta, el `setName` del cursor: `SELECT "gameSlug","setId","setName" FROM "Tcg_Ingest_Cursors";`). Predicción exacta de lo que convertirá la migración (debe devolver 1 fila):
+
+```sql
+SELECT el->>'displayName' AS nombre
+  FROM "Landing_Config_Entries" e,
+       LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(e.value->'sets') = 'array' THEN e.value->'sets' ELSE '[]'::jsonb END) el
+ WHERE e.section = 'pack_simulator' AND e.key = 'config'
+   AND lower(btrim(el->>'displayName')) = 'simulador prueba';
+```
+
+Si no coincide (otro nombre, espacios internos, solo existe vía cursor con otro `setName`) la migración no hace nada y **no falla**: crea «simulador prueba» a mano desde el admin (`POST /admin/simulator/manual-sets`, §1 del contrato) con la plantilla que quieras y súbele cartas. La config vieja no se modifica nunca.
+
+### 24.3 Orden de despliegue
+
+1. Backup de la BD (`pg_dump`).
+2. Consulta previa (24.2).
+3. `prisma migrate deploy` (paso explícito del deploy, como siempre). Aplica **las migraciones del Epic 22 en orden de timestamp**; las conocidas son:
+   1. `20261115100000_add_simulator_manual_sets`: `Simulator_Sets`, `Simulator_Cards`, enum `SimulatorRarityTier` y paso de datos de «simulador prueba» (aditiva).
+   2. `20261116100000_add_fx_source_states`: `Fx_Source_States` (aditiva).
+   3. `20261125100000_add_simulator_card_number_key` (story 22.10, commit `393c06a`: número de carta único sin distinguir mayúsculas, columna `numberKey`). Si falla (P3018, mensaje «Story 22.10 migration aborted ... set <id>: numbers [A1, a1]») es porque un set ya tenía dos cartas cuyos números solo difieren en mayúsculas: **la BD queda intacta** (nada se borra ni se reescribe). Renombra o borra la carta duplicada en ese set, luego `pnpm prisma migrate resolve --rolled-back 20261125100000_add_simulator_card_number_key` y `pnpm prisma migrate deploy`. En una BD donde las tablas se acaban de crear (despliegue nuevo) no puede ocurrir.
+4. Reiniciar el backend con las envs (24.1; ninguna es obligatoria).
+5. **Primer ciclo FX tras desplegar: aplica la tasa real sin intervención.** Un snapshot residual viejo (p. ej. `5100.5` del 2026-11-01) ya no es referencia vigente (> 96 h), así que la primera lectura válida se acepta (`NO_REFERENCE`) y `vesPerUsd` pasa a la tasa real; el ciclo corre al arrancar y cada 30 min (`FX_REFRESH_CRON`). Si prefieres no esperar: `POST /admin/fx/refresh`.
+
+### 24.4 Verificación posterior
+
+| Comprobación | Esperado |
+|---|---|
+| `GET /api/v1/admin/fx/status` | `rate` distinto de `200` (la tasa real), `sources` con las 3 fuentes y `sourceStates` con las 3 claves; `lastError: null` salvo fallo real del proveedor. |
+| `GET /api/v1/admin/simulator/manual-sets` | Aparece «simulador prueba» **inactivo** con 0 cartas (si 24.2 coincidía; si no, créalo a mano). |
+| `GET /api/v1/simulator/sets` | `{"data":[]}` hasta que actives un set listo (`readiness.ready`). |
+| `prisma migrate status` | «Database schema is up to date!». |
+| Log del arranque | Sin `Invalid FX_VARIATION_REFERENCE_MAX_AGE_HOURS`. |
+
+### 24.5 Volver atrás
+
+El código nuevo es compatible con la BD anterior solo hacia adelante: **primero** vuelve a desplegar la versión anterior del backend y **después**, si hace falta, revierte el SQL (las migraciones son aditivas: dejar las tablas no estorba y es lo recomendado). El rollback SQL de cada migración está en su propio archivo y se probó sobre un clon (test `test/epic22-migrations.e2e-spec.ts`):
+
+- `20261116100000`: `DROP TABLE "Fx_Source_States";` (el ciclo vuelve a usar `Fx_Rate_Settings` como candidata de confirmación).
+- `20261115100000`: `DROP TABLE "Simulator_Cards", "Simulator_Sets"; DROP TYPE "SimulatorRarityTier";` (la config vieja no se tocó: no hay que restaurar datos). Se pierden los sets y cartas manuales creados: haz antes un `pg_dump` de esas tablas si ya hay contenido.
+- `20261125100000` (22.10, si se aplicó): `DROP INDEX "Simulator_Cards_setId_numberKey_key"; CREATE UNIQUE INDEX "Simulator_Cards_setId_number_key" ON "Simulator_Cards"("setId", "number"); ALTER TABLE "Simulator_Cards" DROP COLUMN "numberKey";` Revertirla **antes** que la de sets manuales.
+- Tras un `DROP` manual, borra la fila correspondiente de `_prisma_migrations` (`DELETE FROM _prisma_migrations WHERE migration_name = '...'`) para que `migrate deploy` pueda reaplicarla.
+
+### 24.6 Riesgos conocidos
+
+R1 nombre exacto (24.2); R3 la confirmación FX acepta un valor repetido en dos fechas distintas (mitigado: evento `FX_RATE_CHANGED` auditado con `confirmedAfterRejection`, y `accept-rejected`/`MANUAL` disponibles); R4 sin referencia vigente (feed parado > 96 h) no hay guard de variación (lo cubre `stale/hardStale`); R6 imágenes sin recolección de huérfanas.

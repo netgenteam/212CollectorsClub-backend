@@ -67,6 +67,7 @@ export async function seedManualSet(
         name: `${o.name} card ${n}`,
         rarityTier: tier,
         number: String(n),
+        numberKey: String(n),
         imageUrl: `/uploads/public/simulator/${n}.png`,
         marketPriceUsd: n % 7 === 0 ? null : (n * 0.5).toFixed(2),
       });

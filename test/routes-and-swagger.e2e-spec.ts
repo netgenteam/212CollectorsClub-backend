@@ -158,4 +158,50 @@ describe('Canonical routes & Swagger contract (e2e, Story 11.6)', () => {
     expect(p['/api/v1/simulator/sets'].get.deprecated).toBeUndefined();
     expect(p['/api/v1/simulator/packs'].post.deprecated).toBeUndefined();
   });
+
+  it('Story 22.9 (AC3): manual-sets, cards, cards/import and images are published with their errorCodes', () => {
+    const b = '/api/v1/admin/simulator/manual-sets';
+    const need: Array<[string, string, string[]]> = [
+      [b, 'get', ['INVALID_ADMIN_TOKEN']],
+      [b, 'post', ['SIMULATOR_SET_NAME_TAKEN', 'SIMULATOR_SET_LIMIT']],
+      [`${b}/{id}`, 'get', ['SIMULATOR_SET_NOT_FOUND']],
+      [`${b}/{id}`, 'patch', ['SIMULATOR_SET_NOT_READY', 'SIMULATOR_SET_BUSY']],
+      [`${b}/{id}`, 'delete', ['SIMULATOR_SET_ACTIVE']],
+      [`${b}/{id}/cards`, 'get', ['SIMULATOR_SET_NOT_FOUND']],
+      [
+        `${b}/{id}/cards`,
+        'post',
+        ['SIMULATOR_SET_CARD_LIMIT', 'SIMULATOR_CARD_NUMBER_TAKEN'],
+      ],
+      [`${b}/{id}/cards/{cardId}`, 'patch', ['SIMULATOR_CARD_NOT_FOUND']],
+      [`${b}/{id}/cards/{cardId}`, 'delete', ['SIMULATOR_SET_NOT_READY']],
+      [
+        `${b}/{id}/cards/import`,
+        'post',
+        [
+          'SIMULATOR_CSV_INVALID',
+          'SIMULATOR_CSV_TOO_LARGE',
+          'SIMULATOR_CSV_REQUIRED',
+          'SIMULATOR_CSV_MULTIPART_INVALID',
+          'MALFORMED_CSV',
+        ],
+      ],
+      [
+        '/api/v1/admin/simulator/images',
+        'post',
+        [
+          'SIMULATOR_IMAGE_REQUIRED',
+          'SIMULATOR_IMAGE_TOO_LARGE',
+          'SIMULATOR_IMAGE_DIMENSIONS',
+          'SIMULATOR_IMAGE_MULTIPART_INVALID',
+          'UNSUPPORTED_FILE_TYPE',
+        ],
+      ],
+    ];
+    for (const [path, m, needles] of need) {
+      expect(doc.paths[path]?.[m], `${m} ${path}`).toBeDefined();
+      const text = JSON.stringify(doc.paths[path][m]);
+      for (const n of needles) expect(text, `${m} ${path}`).toContain(n);
+    }
+  });
 });
