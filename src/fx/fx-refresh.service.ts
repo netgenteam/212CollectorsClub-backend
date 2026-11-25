@@ -18,8 +18,13 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { FX_PROVIDER } from './fx-provider.js';
 import type { FxProvider, FxProviderResult } from './fx-provider.js';
 import {
-  evaluateReading,
+  FX_REFERENCE_MAX_AGE_HOURS_DEFAULT,
+  FX_REFERENCE_MAX_AGE_HOURS_MAX,
+  FX_REFERENCE_MAX_AGE_HOURS_MIN,
+  decideReading,
   isSameReading,
+  selectReference,
+  type FxCandidate,
   type FxRejectReason,
 } from './fx-validation.js';
 
@@ -42,6 +47,7 @@ interface LockedSetting {
   vesPerUsd: Prisma.Decimal;
   maxVariationPct: Prisma.Decimal;
   providerUpdatedAt: Date | null;
+  rejectedReading: unknown;
 }
 
 /** `rejectedReading` payload, always tagged with the source it belongs to. */
@@ -60,6 +66,35 @@ export function buildRejectedReading(
       : reading.providerUpdatedAt.toISOString(),
     reason,
     at: now.toISOString(),
+  };
+}
+
+/** Parses the singleton's `rejectedReading` into a confirmation candidate (same source only). */
+export function parseCandidate(
+  raw: unknown,
+  source: FxRateSource,
+): FxCandidate | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as {
+    source?: string;
+    rate?: unknown;
+    providerUpdatedAt?: unknown;
+    reason?: unknown;
+    at?: unknown;
+  };
+  if (r.source && r.source !== source) return null;
+  if (typeof r.rate !== 'number' || !Number.isFinite(r.rate)) return null;
+  if (typeof r.providerUpdatedAt !== 'string' || typeof r.at !== 'string') {
+    return null;
+  }
+  const pu = new Date(r.providerUpdatedAt);
+  const at = new Date(r.at);
+  if (Number.isNaN(pu.getTime()) || Number.isNaN(at.getTime())) return null;
+  return {
+    rate: r.rate,
+    providerUpdatedAt: pu,
+    reason: typeof r.reason === 'string' ? r.reason : '',
+    at,
   };
 }
 
@@ -84,6 +119,32 @@ export class FxRefreshService implements OnApplicationBootstrap {
     @Inject(FX_PROVIDER) private readonly provider: FxProvider,
     private readonly audit: AuditService,
   ) {}
+
+  /**
+   * Story 22.1 (A114): hours a snapshot stays a valid variation reference.
+   * `FX_VARIATION_REFERENCE_MAX_AGE_HOURS`, default 96, range 24..720;
+   * an invalid value falls back to the default with a warning.
+   */
+  getReferenceMaxAgeHours(): number {
+    const raw = this.config.get<string | number | undefined>(
+      'FX_VARIATION_REFERENCE_MAX_AGE_HOURS',
+    );
+    if (raw === undefined || raw === null || String(raw).trim() === '') {
+      return FX_REFERENCE_MAX_AGE_HOURS_DEFAULT;
+    }
+    const n = Number(String(raw).trim());
+    if (
+      !Number.isFinite(n) ||
+      n < FX_REFERENCE_MAX_AGE_HOURS_MIN ||
+      n > FX_REFERENCE_MAX_AGE_HOURS_MAX
+    ) {
+      this.logger.warn(
+        `Invalid FX_VARIATION_REFERENCE_MAX_AGE_HOURS=${String(raw)} (allowed ${FX_REFERENCE_MAX_AGE_HOURS_MIN}..${FX_REFERENCE_MAX_AGE_HOURS_MAX}); using ${FX_REFERENCE_MAX_AGE_HOURS_DEFAULT}`,
+      );
+      return FX_REFERENCE_MAX_AGE_HOURS_DEFAULT;
+    }
+    return n;
+  }
 
   /** `FX_REFRESH_ENABLED=false` disables it; default on (off under NODE_ENV=test). */
   isEnabled(): boolean {
@@ -233,7 +294,7 @@ export class FxRefreshService implements OnApplicationBootstrap {
       if (!locked) return { status: 'IN_PROGRESS' } as const;
 
       const rows = await tx.$queryRaw<LockedSetting[]>`
-        SELECT "source", "vesPerUsd", "maxVariationPct", "providerUpdatedAt"
+        SELECT "source", "vesPerUsd", "maxVariationPct", "providerUpdatedAt", "rejectedReading"
         FROM "Fx_Rate_Settings"
         WHERE "id" = ${SINGLETON_FX_RATE_ID}
         FOR UPDATE`;
@@ -262,33 +323,75 @@ export class FxRefreshService implements OnApplicationBootstrap {
         orderBy: [{ providerUpdatedAt: 'desc' }, { fetchedAt: 'desc' }],
         select: { rate: true, providerUpdatedAt: true },
       });
-      // AC6: compare only against the active source's own history; with none
-      // the reading is accepted (explicit admin action).
-      const current = last
+      const lastView = last
         ? {
             rate: last.rate.toNumber(),
             providerUpdatedAt: last.providerUpdatedAt,
           }
         : null;
+      // Story 22.1 (AD-109): only a CURRENT snapshot (by provider date) is a
+      // variation reference; a stale residual no longer blocks recovery.
+      const reference = selectReference(
+        lastView,
+        now,
+        this.getReferenceMaxAgeHours(),
+      );
+      // Exact (source, providerUpdatedAt) key, whatever its age.
+      const sameKey = Number.isNaN(reading.providerUpdatedAt.getTime())
+        ? null
+        : await tx.fxRateSnapshot.findFirst({
+            where: {
+              source: active,
+              providerUpdatedAt: reading.providerUpdatedAt,
+            },
+            select: { rate: true, providerUpdatedAt: true },
+          });
+      const candidate = parseCandidate(row.rejectedReading, active);
 
-      const verdict = evaluateReading({
+      let verdict = decideReading({
         reading,
-        current,
+        reference,
+        candidate,
         maxVariationPct: row.maxVariationPct.toNumber(),
         now,
+        collision: sameKey
+          ? {
+              rate: sameKey.rate.toNumber(),
+              providerUpdatedAt: sameKey.providerUpdatedAt,
+            }
+          : null,
+        candidateMaxAgeHours: this.getReferenceMaxAgeHours(),
       });
-      if (!verdict.ok) {
+      // The active reading never goes back before the applied one.
+      if (
+        verdict.accept &&
+        row.providerUpdatedAt &&
+        reading.providerUpdatedAt.getTime() < row.providerUpdatedAt.getTime()
+      ) {
+        verdict = { accept: false, reason: 'DATE_REGRESSION' };
+      }
+      if (!verdict.accept) {
+        // A newer rejected reading replaces the candidate; an equal or older
+        // one only refreshes its `at`.
+        const keepCandidate =
+          candidate &&
+          verdict.reason === 'VARIATION_EXCEEDED' &&
+          !(
+            reading.providerUpdatedAt.getTime() >
+            candidate.providerUpdatedAt.getTime()
+          );
+        const rejectedJson: Prisma.InputJsonObject = keepCandidate
+          ? {
+              ...(row.rejectedReading as Prisma.InputJsonObject),
+              at: now.toISOString(),
+            }
+          : buildRejectedReading(active, reading, verdict.reason, now);
         await tx.fxRateSetting.update({
           where: { id: SINGLETON_FX_RATE_ID },
           data: {
             lastError: `Reading rejected: ${verdict.reason}`,
             lastErrorAt: now,
-            rejectedReading: buildRejectedReading(
-              active,
-              reading,
-              verdict.reason,
-              now,
-            ),
+            rejectedReading: rejectedJson,
           },
         });
         return {
@@ -297,6 +400,8 @@ export class FxRefreshService implements OnApplicationBootstrap {
           reason: verdict.reason,
         } as const;
       }
+      const confirmed = verdict.via === 'CONFIRMED';
+      const current = lastView;
 
       const rate = new Prisma.Decimal(reading.rate).toDecimalPlaces(4);
       const alreadyApplied =
@@ -344,6 +449,13 @@ export class FxRefreshService implements OnApplicationBootstrap {
             source: active,
             origin: opts.origin ?? 'AUTO_REFRESH',
             ...(opts.adminId ? { triggeredBy: opts.adminId } : {}),
+            ...(confirmed && candidate
+              ? {
+                  confirmedAfterRejection: true,
+                  candidateProviderUpdatedAt:
+                    candidate.providerUpdatedAt.toISOString(),
+                }
+              : {}),
           }),
         });
       }

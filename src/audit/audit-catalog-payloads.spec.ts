@@ -177,6 +177,13 @@ const SAMPLES: Record<AuditAction, AuditPayload[]> = {
   FX_SOURCE_CHANGED: [{ source: 'MANUAL', previousSource: 'BCV' }],
   FX_RATE_CHANGED: [
     { rate: '365.4000', previousRate: '360.1000', source: 'MANUAL' },
+    {
+      rate: '920.1000',
+      source: 'BCV_USD',
+      origin: 'AUTO_REFRESH',
+      confirmedAfterRejection: true,
+      candidateProviderUpdatedAt: '2026-11-24T14:00:00.000Z',
+    },
   ],
   VITRINA_CONFIG_CHANGED: [
     {

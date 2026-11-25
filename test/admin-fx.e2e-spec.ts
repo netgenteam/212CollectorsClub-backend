@@ -20,9 +20,11 @@ const USER = 'e2e-admin-story-18-2';
 const EMAIL = 'e2e-admin-story-18-2@212collectorsclub.test';
 const PASS = 'correct-horse-battery-staple-18-2';
 const BASE = '/api/v1/admin/fx';
-const D0 = new Date('2026-10-30T12:00:00.000Z');
-const D1 = new Date('2026-10-31T12:00:00.000Z');
-const D2 = new Date('2026-11-01T06:00:00.000Z');
+// Story 22.1: only a snapshot within 96 h of provider date is a variation reference, so dates are relative to now.
+const DAY = 86_400_000;
+const D0 = new Date(Date.now() - 3 * DAY);
+const D1 = new Date(Date.now() - 2 * DAY);
+const D2 = new Date(Date.now() - 1 * DAY);
 
 interface Err {
   errorCode?: string;
@@ -327,14 +329,10 @@ describe('Admin FX API (e2e, Story 18.2)', () => {
         data: {
           source: 'PARALELO_USD',
           rate: '950.1000',
-          providerUpdatedAt: new Date('2026-10-30T12:00:00.000Z'),
+          providerUpdatedAt: D1,
         },
       });
-      fake.succeedFor(
-        'PARALELO_USD',
-        950.1,
-        new Date('2026-10-01T12:00:00.000Z'),
-      );
+      fake.succeedFor('PARALELO_USD', 950.1, D0);
       const res = await put({ source: 'PARALELO_USD' }).expect(200);
       expect(res.body).toMatchObject({
         source: 'PARALELO_USD',

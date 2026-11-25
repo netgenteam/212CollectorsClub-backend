@@ -8,9 +8,11 @@ import { FX_PROVIDER } from './../src/fx/fx-provider.js';
 import { snapshotFx, restoreFx, type FxState } from './helpers/db-snapshot.js';
 import { blockAuditAction } from './helpers/block-audit-action.js';
 
-const D0 = new Date('2026-10-30T12:00:00.000Z');
-const D1 = new Date('2026-10-31T12:00:00.000Z');
-const D2 = new Date('2026-11-01T06:00:00.000Z');
+// Story 22.1: only a snapshot within 96 h of provider date is a variation reference, so dates are relative to now.
+const DAY = 86_400_000;
+const D0 = new Date(Date.now() - 3 * DAY);
+const D1 = new Date(Date.now() - 2 * DAY);
+const D2 = new Date(Date.now() - 1 * DAY);
 
 /**
  * Story 18.1 (AD-79): FxRefreshService against the real DB with the fake
@@ -184,9 +186,9 @@ describe('FX refresh (e2e, Story 18.1)', () => {
   it('a source change does not compare against another source (AC6)', async () => {
     fake.succeed(100, D0);
     await fx.refresh();
-    await prisma.$executeRaw`UPDATE "Fx_Rate_Settings" SET "source" = 'BCV_EUR' WHERE "id" = 'default'`;
+    await prisma.$executeRaw`UPDATE "Fx_Rate_Settings" SET "source" = 'BCV_EUR', "providerUpdatedAt" = NULL WHERE "id" = 'default'`;
     // 5x the USD rate and an older date: accepted, EUR has no history.
-    fake.succeed(500, new Date(D0.getTime() - 86400_000));
+    fake.succeed(500, new Date(D0.getTime() - 3600_000));
     expect(await fx.refresh()).toMatchObject({
       status: 'UPDATED',
       source: 'BCV_EUR',

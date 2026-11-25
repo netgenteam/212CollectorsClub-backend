@@ -498,12 +498,17 @@ describe('Checkout FX source + GET /fx/current (e2e, Story 18.3)', () => {
     const valid = validPairs();
     await prisma.fxRateSnapshot.deleteMany();
     await setRow('BCV_USD', '889.2600');
-    // Future-dated snapshot => the fixture reading (2026-11-01) regresses.
+    // Story 22.1: a CURRENT snapshot (within 96 h) newer than the provider reading => it regresses.
+    fake.succeedFor(
+      'PARALELO_USD',
+      FAKE_FX_FIXTURES.PARALELO_USD,
+      new Date(Date.now() - 3 * 3600 * 1000),
+    );
     await prisma.fxRateSnapshot.create({
       data: {
         source: 'PARALELO_USD',
         rate: FAKE_FX_FIXTURES.PARALELO_USD.toFixed(4),
-        providerUpdatedAt: new Date(Date.now() + 2 * 3600 * 1000),
+        providerUpdatedAt: new Date(Date.now() - 3600 * 1000),
       },
     });
     const res = await putSettings({ source: 'PARALELO_USD' }).expect(200);

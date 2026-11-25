@@ -30,7 +30,7 @@ import {
   FxRefreshService,
   buildRejectedReading,
 } from './fx-refresh.service.js';
-import { evaluateReading } from './fx-validation.js';
+import { evaluateReading, selectReference } from './fx-validation.js';
 import type { FxRejectReason } from './fx-validation.js';
 
 /**
@@ -235,6 +235,11 @@ export class AdminFxService {
               where: { source: dto.source },
               orderBy: [{ providerUpdatedAt: 'desc' }, { fetchedAt: 'desc' }],
             });
+            const referenceRow = selectReference(
+              last,
+              now,
+              this.refresher.getReferenceMaxAgeHours(),
+            );
             const maxVar =
               dto.maxVariationPct ?? current.maxVariationPct.toNumber();
             let applied = false;
@@ -243,10 +248,12 @@ export class AdminFxService {
             if (reading?.ok) {
               const verdict = evaluateReading({
                 reading: reading.reading,
-                current: last
+                // Story 22.1 (AD-109): only a CURRENT snapshot is a reference,
+                // so a stale residual cannot block the switch.
+                current: referenceRow
                   ? {
-                      rate: last.rate.toNumber(),
-                      providerUpdatedAt: last.providerUpdatedAt,
+                      rate: referenceRow.rate.toNumber(),
+                      providerUpdatedAt: referenceRow.providerUpdatedAt,
                     }
                   : null,
                 maxVariationPct: maxVar,

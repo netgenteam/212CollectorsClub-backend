@@ -1,4 +1,9 @@
-import { evaluateReading, isSameReading } from './fx-validation.js';
+import {
+  decideReading,
+  evaluateReading,
+  isSameReading,
+  selectReference,
+} from './fx-validation.js';
 
 const now = new Date('2026-11-01T12:00:00Z');
 const t = (min: number) => new Date(now.getTime() + min * 60_000);
@@ -96,5 +101,136 @@ describe('evaluateReading (Story 18.1)', () => {
       reason: 'DATE_NOT_NEWER',
     });
     expect(ev(100.00004, cur.providerUpdatedAt)).toEqual({ ok: true });
+  });
+});
+
+describe('selectReference (Story 22.1, AC1)', () => {
+  const H = 3600_000;
+  const snap = (ms: number | null) => ({
+    rate: 100,
+    providerUpdatedAt: ms === null ? null : new Date(now.getTime() + ms),
+  });
+  it.each([
+    ['exact 96 h edge is current', -96 * H, true],
+    ['96 h + 1 ms is not', -96 * H - 1, false],
+    ['now', 0, true],
+    ['+5 min future is current', 5 * 60_000, true],
+    ['+6 min future is null', 6 * 60_000, false],
+    ['24 days old is null', -24 * 24 * H, false],
+  ])('%s', (_n, ms, ok) => {
+    const s = snap(ms);
+    expect(selectReference(s, now, 96)).toBe(ok ? s : null);
+  });
+  it('no snapshot => null', () => {
+    expect(selectReference(null, now, 96)).toBeNull();
+    expect(selectReference(snap(null), now, 96)).toBeNull();
+  });
+});
+
+describe('decideReading (Story 22.1, AC2-3)', () => {
+  const H = 3600_000;
+  const ref = { rate: 100, providerUpdatedAt: t(-60) };
+  const cand = (
+    over: Partial<{ rate: number; at: Date; pu: Date; reason: string }> = {},
+  ) => ({
+    rate: over.rate ?? 200,
+    providerUpdatedAt: over.pu ?? t(-30),
+    reason: over.reason ?? 'VARIATION_EXCEEDED',
+    at: over.at ?? t(-20),
+  });
+  const dec = (
+    rate: number,
+    o: Partial<Parameters<typeof decideReading>[0]> & { at?: Date } = {},
+  ) =>
+    decideReading({
+      reading: { rate, providerUpdatedAt: o.at ?? t(-10) },
+      reference: 'reference' in o ? o.reference! : ref,
+      candidate: o.candidate ?? null,
+      maxVariationPct: 15,
+      now,
+      collision: o.collision,
+    });
+
+  it('no reference => ACCEPT(NO_REFERENCE) even for a huge variation', () => {
+    expect(dec(5000, { reference: null })).toEqual({
+      accept: true,
+      via: 'NO_REFERENCE',
+    });
+  });
+  it('within limit => WITHIN_LIMIT', () => {
+    expect(dec(110)).toEqual({ accept: true, via: 'WITHIN_LIMIT' });
+  });
+  it('isolated variation without candidate => REJECT VARIATION_EXCEEDED', () => {
+    expect(dec(200)).toEqual({ accept: false, reason: 'VARIATION_EXCEEDED' });
+  });
+  it('date regression / not newer against the reference', () => {
+    expect(dec(100, { at: t(-120) })).toEqual({
+      accept: false,
+      reason: 'DATE_REGRESSION',
+    });
+    expect(dec(101, { at: t(-60) })).toEqual({
+      accept: false,
+      reason: 'DATE_NOT_NEWER',
+    });
+  });
+  it('confirmation: +0.5 % exact confirms, +0.51 % rejects', () => {
+    expect(dec(201, { candidate: cand() })).toEqual({
+      accept: true,
+      via: 'CONFIRMED',
+    });
+    expect(dec(199, { candidate: cand() })).toEqual({
+      accept: true,
+      via: 'CONFIRMED',
+    });
+    expect(dec(201.02, { candidate: cand() })).toEqual({
+      accept: false,
+      reason: 'VARIATION_EXCEEDED',
+    });
+  });
+  it('same providerUpdatedAt as the candidate does not confirm', () => {
+    expect(dec(200, { candidate: cand({ pu: t(-10) }) })).toEqual({
+      accept: false,
+      reason: 'VARIATION_EXCEEDED',
+    });
+  });
+  it('candidate 97 h old rejects; 96 h confirms', () => {
+    expect(
+      dec(200, { candidate: cand({ at: new Date(now.getTime() - 97 * H) }) }),
+    ).toEqual({ accept: false, reason: 'VARIATION_EXCEEDED' });
+    expect(
+      dec(200, { candidate: cand({ at: new Date(now.getTime() - 96 * H) }) }),
+    ).toEqual({ accept: true, via: 'CONFIRMED' });
+  });
+  it('candidate with another reason does not confirm', () => {
+    expect(
+      dec(200, { candidate: cand({ reason: 'DATE_REGRESSION' }) }),
+    ).toEqual({ accept: false, reason: 'VARIATION_EXCEEDED' });
+  });
+  it('exact key collision with another rate => DATE_NOT_NEWER, even with no reference', () => {
+    expect(
+      dec(150, {
+        reference: null,
+        collision: { rate: 100, providerUpdatedAt: t(-10) },
+      }),
+    ).toEqual({ accept: false, reason: 'DATE_NOT_NEWER' });
+  });
+  it('structural failures always reject, even with a matching candidate / no reference', () => {
+    const c = cand({ rate: 0 });
+    expect(dec(0, { candidate: c })).toEqual({
+      accept: false,
+      reason: 'NOT_POSITIVE',
+    });
+    expect(dec(NaN, { reference: null })).toEqual({
+      accept: false,
+      reason: 'NOT_FINITE',
+    });
+    expect(dec(200, { candidate: cand(), at: t(6) })).toEqual({
+      accept: false,
+      reason: 'FUTURE_DATE',
+    });
+    expect(dec(1e15, { reference: null })).toEqual({
+      accept: false,
+      reason: 'OUT_OF_RANGE',
+    });
   });
 });

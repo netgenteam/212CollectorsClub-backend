@@ -84,3 +84,115 @@ export function isSameReading(
     current.rate.toFixed(4) === reading.rate.toFixed(4)
   );
 }
+
+/** Story 22.1 (AD-109): default age (hours) up to which a snapshot is a valid reference. */
+export const FX_REFERENCE_MAX_AGE_HOURS_DEFAULT = 96;
+export const FX_REFERENCE_MAX_AGE_HOURS_MIN = 24;
+export const FX_REFERENCE_MAX_AGE_HOURS_MAX = 720;
+
+/** Confirmation tolerance between a candidate and a new reading (0.5 %). */
+export const FX_CONFIRMATION_TOLERANCE_PCT = 0.5;
+
+/**
+ * Story 22.1 (AD-109): the snapshot is a CURRENT reference only when
+ * `now - maxAge <= providerUpdatedAt <= now + 5 min`. Measures the provider
+ * date, not `fetchedAt`. Pure (injected clock).
+ */
+export function selectReference<T extends { providerUpdatedAt: Date | null }>(
+  latestSnapshot: T | null | undefined,
+  now: Date,
+  maxAgeHours: number,
+): T | null {
+  if (!latestSnapshot?.providerUpdatedAt) return null;
+  const at = latestSnapshot.providerUpdatedAt.getTime();
+  if (Number.isNaN(at)) return null;
+  const min = now.getTime() - maxAgeHours * 3600 * 1000;
+  const max = now.getTime() + FUTURE_TOLERANCE_MS;
+  return at >= min && at <= max ? latestSnapshot : null;
+}
+
+export interface FxCandidate {
+  rate: number;
+  providerUpdatedAt: Date;
+  reason: string;
+  /** When the candidate was recorded as rejected. */
+  at: Date;
+}
+
+export type FxDecision =
+  | { accept: true; via: 'NO_REFERENCE' | 'WITHIN_LIMIT' | 'CONFIRMED' }
+  | { accept: false; reason: FxRejectReason };
+
+export interface FxDecisionInput {
+  reading: { rate: number; providerUpdatedAt: Date };
+  /** Current reference (see {@link selectReference}); null = none. */
+  reference: { rate: number; providerUpdatedAt: Date | null } | null;
+  /** Previous rejected reading (VARIATION_EXCEEDED) of the same source. */
+  candidate: FxCandidate | null;
+  maxVariationPct: number;
+  now: Date;
+  /**
+   * Snapshot with the EXACT (source, providerUpdatedAt) key of the reading,
+   * whatever its age: a different rate there is always DATE_NOT_NEWER.
+   */
+  collision?: { rate: number; providerUpdatedAt: Date | null } | null;
+  /** Candidate max age in hours (default 96). */
+  candidateMaxAgeHours?: number;
+}
+
+/**
+ * Story 22.1 (AD-109): PURE decision on a reading: structural checks always
+ * reject; date/variation only against a current reference; a variation-only
+ * rejection is CONFIRMED by a second consistent reading with a newer date.
+ */
+export function decideReading(input: FxDecisionInput): FxDecision {
+  const { reading, reference, candidate, maxVariationPct, now, collision } =
+    input;
+  const structural = evaluateReading({
+    reading,
+    current: null,
+    maxVariationPct,
+    now,
+  });
+  if (!structural.ok) return { accept: false, reason: structural.reason };
+
+  const at = reading.providerUpdatedAt.getTime();
+  const rate = new Prisma.Decimal(reading.rate).toDecimalPlaces(4);
+  if (
+    collision?.providerUpdatedAt &&
+    collision.providerUpdatedAt.getTime() === at &&
+    !new Prisma.Decimal(collision.rate).toDecimalPlaces(4).equals(rate)
+  ) {
+    return { accept: false, reason: 'DATE_NOT_NEWER' };
+  }
+
+  if (!reference) return { accept: true, via: 'NO_REFERENCE' };
+  const verdict = evaluateReading({
+    reading,
+    current: reference,
+    maxVariationPct,
+    now,
+  });
+  if (verdict.ok) return { accept: true, via: 'WITHIN_LIMIT' };
+  if (verdict.reason !== 'VARIATION_EXCEEDED') {
+    return { accept: false, reason: verdict.reason };
+  }
+
+  if (
+    candidate &&
+    candidate.reason === 'VARIATION_EXCEEDED' &&
+    candidate.rate > 0 &&
+    Number.isFinite(candidate.rate) &&
+    now.getTime() - candidate.at.getTime() <=
+      (input.candidateMaxAgeHours ?? FX_REFERENCE_MAX_AGE_HOURS_DEFAULT) *
+        3600 *
+        1000 &&
+    at > candidate.providerUpdatedAt.getTime()
+  ) {
+    const cand = new Prisma.Decimal(candidate.rate);
+    const delta = rate.minus(cand).abs();
+    const limit = cand.times(FX_CONFIRMATION_TOLERANCE_PCT).div(100);
+    if (delta.lte(limit)) return { accept: true, via: 'CONFIRMED' };
+  }
+  return { accept: false, reason: 'VARIATION_EXCEEDED' };
+}
