@@ -28,7 +28,7 @@ interface Status {
     {
       lastError: string | null;
       lastSuccessAt: string | null;
-      rejectedReading: { reason: string } | null;
+      rejectedReading: { reason: string; rate: number; rawRate: string } | null;
     }
   >;
 }
@@ -172,6 +172,13 @@ describe('FX Epic 22 regression (e2e, Story 22.9 AC4/AC5)', () => {
     expect(st.sourceStates.BCV_USD.rejectedReading?.reason).toBe(
       'VARIATION_EXCEEDED',
     );
+    // Documented types (contract section 8): status/sources rate = decimal string; rejectedReading.rate = number.
+    expect(typeof st.rate).toBe('string');
+    expect(typeof st.sources.BCV_USD?.rate).toBe('string');
+    expect(st.sourceStates.BCV_USD.rejectedReading).toMatchObject({
+      rate: 200,
+      rawRate: '200',
+    });
     fake.succeedFor('BCV_USD', 200.4, ago(3));
     expect(await fx.refresh()).toMatchObject({
       status: 'UPDATED',

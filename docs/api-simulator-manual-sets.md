@@ -11,7 +11,7 @@
 ## 0. Convenciones generales
 
 - **Base:** `/api/v1` (todas las rutas de este documento). Swagger: `GET /api/docs-json` (no se monta con `NODE_ENV=production` salvo `SWAGGER_ENABLED=true`).
-- **Auth admin:** `Authorization: Bearer <accessToken>` obtenido en `POST /api/v1/admin/auth/login` (`{usernameOrEmail, password}`). Sin token o con token inválido: `401` con `errorCode: INVALID_ADMIN_TOKEN`.
+- **Auth admin:** `Authorization: Bearer <accessToken>` obtenido en `POST /api/v1/admin/auth/login` (`{usernameOrEmail, password}`). El login devuelve `{accessToken, tokenType: "Bearer", expiresIn: 28800}`: el token **expira a las 8 h (28800 s)**; pasado ese tiempo (o tras un logout) cualquier ruta responde `401` con `errorCode: INVALID_ADMIN_TOKEN` y hay que volver a iniciar sesión. Sin token o con token inválido: la misma respuesta `401`.
 - **Ids** UUID; fechas ISO UTC; importes en **USD** (número JSON con a lo sumo 2 decimales).
 - **Dos formas de error** (el frontend debe manejar ambas):
   1. Error de negocio: `{ "statusCode": 422, "errorCode": "SIMULATOR_SET_NOT_READY", "message": "...", "details": { ... } }` (`details` solo en algunos).
@@ -54,7 +54,7 @@ Todas con `AdminAuthGuard` salvo las públicas. «Resp.» es el status de éxito
 | `GET /api/v1/simulator/sets` | pública | - | - | 200 `{data: [...]}` (cabecera `Cache-Control: public, max-age=60`) |
 | `POST /api/v1/simulator/packs` | pública (límite por IP) | - | `{setId}` (UUID) | 200 sobre |
 
-Notas: un cambio sin efecto efectivo (`PATCH {}` o con los mismos valores) responde 200 con el recurso y no escribe nada. En `PATCH` del set, `isActive` activa/desactiva (idempotente). Cambiar el nombre/otros campos y `isActive` a la vez es válido. `name` de set y de carta: 1..120 caracteres (se recorta); `number` ≤ 30 (vacío = `null`); `imageUrl` ≤ 300 (§6.3).
+Notas: un cambio sin efecto efectivo (`PATCH {}` o con los mismos valores) responde 200 con el recurso y no escribe nada. En `PATCH` del set, `isActive` activa/desactiva (idempotente). Cambiar el nombre/otros campos y `isActive` a la vez es válido. `name` de set y de carta: 1..120 caracteres (se recorta; en el set además se **colapsan los espacios internos**: `"Mi  set"` se guarda y devuelve como `"Mi set"`); `number` ≤ 30 (vacío = `null`); `imageUrl` ≤ 300 (§6.3).
 
 ### 2.1 `SetDto`
 
@@ -228,6 +228,10 @@ Notas: un cambio sin efecto efectivo (`PATCH {}` o con los mismos valores) respo
 | `SIMULATOR_ODDS_INVALID_SUM` | 400 | `{path, sum}` | Las probabilidades del slot `rare` no suman 100 (±0,001). |
 <!-- catalog:end -->
 
+**Texto con aspecto de dato personal o secreto (400 estándar con `message` como CADENA, no arreglo, y sin `errorCode`).** En JSON (no en CSV, donde es `UNSAFE_TEXT` por fila, §5.1) se rechazan con ese 400: `number` de carta (alta y `PATCH`), `imageUrl` de carta y de set, y `name` de **set**, cuando parecen un correo, teléfono, documento de identidad, tarjeta o secreto. Ejemplo: `{"message":"number must not contain emails, phone numbers, ID documents, card numbers or secrets","error":"Bad Request","statusCode":400}` (el texto cambia el nombre del campo: `name must not contain ...`, `imageUrl must not contain ...`). El `name` de una **carta** no pasa por este filtro (se guarda tal cual). Atención al manejo en el cliente: este 400 trae `message` string, el de validación de campos trae arreglo.
+
+El filtro de fórmulas (`=`, `+`, `-`, `@` al inicio) rige **solo en el CSV** (`FORMULA`): por JSON, `name` y `number` que empiecen por `=` se aceptan.
+
 Otros: `400` de validación estándar (sin `errorCode`: nombre vacío o de más de 120, `rarityTier` desconocido, `marketPriceUsd` inválido, `imageUrl` inválida, uuid mal formado, `limit` > 100, `active` no booleano, `dryRun` distinto de `true`/`false`); `503 AUDIT_UNAVAILABLE` (§0). El `message` de cada error es texto en inglés para depurar: el panel debe mapear por `errorCode`.
 
 Ejemplo (activar sin suficiencia; set con solo `Charizard ex` DOUBLE_RARE y `Pikachu` COMMON de la plantilla CSV):
@@ -272,7 +276,7 @@ Ejemplo de validación estándar (sin `errorCode`):
 
 ### 4.2 Plantilla (`template`)
 
-`{ "slots": [...] }` con slots en orden: `{kind:"fixed", tier, count 1..8}`, `{kind:"reverse", count 1..4}` y **exactamente un** `{kind:"rare", odds}` que debe ser **el último** (`odds` con claves de `RARE` a `HYPER_RARE`, valores ≥ 0 que suman 100 ±0,001). Entre 1 y 15 cartas en total (el slot `rare` cuenta 1). La plantilla por defecto es 4 COMMON + 3 UNCOMMON + 2 reverse + 1 rara = 10 cartas (ejemplo de §2.1). Un `reverse` toma cartas de la unión COMMON+UNCOMMON+RARE (las cartas manuales no tienen «impresión», así que `isReverse` solo marca el slot).
+`{ "slots": [...] }` con slots en orden: `{kind:"fixed", tier, count 1..8}`, `{kind:"reverse", count 1..4}` y **exactamente un** `{kind:"rare", odds}` que debe ser **el último** (`odds` con claves de `RARE` a `HYPER_RARE`, valores ≥ 0 que suman 100 ±0,001; **puede omitir tiers**: `{"RARE": 100}` es válido y el POST lo devuelve tal cual, solo los tiers presentes con probabilidad > 0 exigen cartas). Entre 1 y 15 cartas en total (el slot `rare` cuenta 1). La plantilla por defecto es 4 COMMON + 3 UNCOMMON + 2 reverse + 1 rara = 10 cartas (ejemplo de §2.1). Un `reverse` toma cartas de la unión COMMON+UNCOMMON+RARE (las cartas manuales no tienen «impresión», así que `isReverse` solo marca el slot).
 
 ### 4.3 Regla de suficiencia (en lenguaje llano) y cómo leer `readiness.missing`
 
@@ -481,6 +485,8 @@ Cambio **aditivo**: `sources` conserva forma y claves (`BCV_USD`, `BCV_EUR`, `PA
   "PARALELO_USD": { "...": "misma forma" }
 }
 ```
+
+**Tipos (importante para el cliente):** `rate` en el status raíz y en `sources[k]` es un **string decimal** con 4 decimales (`"922.5637"`), igual que `vesPerUsd` en `/admin/fx/settings`; dentro de `sourceStates[k].rejectedReading`, en cambio, `rate` es un **número** (`1034.5`) y `rawRate` un **string** (`"1034.5"`), `providerUpdatedAt` y `at` son strings ISO. Estos tipos los fija `test/fx-epic22-regression.e2e-spec.ts` (el ejemplo de arriba no está marcado como ejecutable porque depende de un rechazo del proveedor).
 
 Los errores por fuente viajan en `sourceStates`, **no** dentro de `sources[k]`. El resto del status (`source`, `rate`, `providerUpdatedAt`, `fetchedAt`, `stale`, `hardStale`, `lastError`, `rejectedReading`) no cambia y describe la fuente **activa**. `POST /admin/fx/refresh` ahora refresca las **3** fuentes y devuelve el status más `result` (`UPDATED | NOOP | MANUAL | REJECTED | FAILED | SKIPPED`, de la activa). Con la fuente `MANUAL` activa se registran las 3 lecturas pero la tasa no cambia.
 

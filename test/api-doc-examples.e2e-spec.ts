@@ -779,4 +779,60 @@ describe('API contract document (e2e, Story 22.9 AC2/AC3)', () => {
       expect(c.body.details).toEqual({ maxBytes: 1024 * 1024 });
     });
   });
+
+  describe('section 3 / 4.2 clarifications of the document', () => {
+    it('PII-looking number/imageUrl/set name => 400 with a STRING message and no errorCode; formulas pass over JSON', async () => {
+      const id = await mkSet({ name: 'doc 22.9 por defecto pii' });
+      const bad = [
+        () =>
+          server()
+            .post(`${BASE}/${id}/cards`)
+            .set(auth())
+            .send({ name: 'a', rarityTier: 'COMMON', number: 'a@b.com' }),
+        () =>
+          server().post(`${BASE}/${id}/cards`).set(auth()).send({
+            name: 'a',
+            rarityTier: 'COMMON',
+            imageUrl: 'https://x.com/a@b.com.png',
+          }),
+        () => server().post(BASE).set(auth()).send({ name: 'x@y.com' }),
+      ];
+      for (const r of bad) {
+        const res = await r();
+        expect(res.status).toBe(400);
+        const b = res.body as { message: unknown; errorCode?: string };
+        expect(typeof b.message).toBe('string');
+        expect(b.message).toMatch(
+          /must not contain emails, phone numbers, ID documents, card numbers or secrets/,
+        );
+        expect(b.errorCode).toBeUndefined();
+      }
+      await server()
+        .post(`${BASE}/${id}/cards`)
+        .set(auth())
+        .send({ name: '=x', rarityTier: 'COMMON', number: '=1+1' })
+        .expect(201);
+    });
+
+    it('set name collapses inner spaces; partial odds are valid; login expiresIn is 28800', async () => {
+      const r = await server()
+        .post(BASE)
+        .set(auth())
+        .send({
+          name: 'doc 22.9  por   defecto  spaces',
+          template: { slots: [{ kind: 'rare', odds: { RARE: 100 } }] },
+        })
+        .expect(201);
+      const b = r.body as { name: string; template: unknown };
+      expect(b.name).toBe('doc 22.9 por defecto spaces');
+      expect(b.template).toEqual({
+        slots: [{ kind: 'rare', odds: { RARE: 100 } }],
+      });
+      const login = await server()
+        .post('/api/v1/admin/auth/login')
+        .send({ usernameOrEmail: USER, password: PASS })
+        .expect(200);
+      expect((login.body as { expiresIn: number }).expiresIn).toBe(28800);
+    });
+  });
 });
