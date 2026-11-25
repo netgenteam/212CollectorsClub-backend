@@ -2,7 +2,6 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsIn,
   IsInt,
-  IsNumber,
   IsOptional,
   IsString,
   Matches,
@@ -14,6 +13,7 @@ import {
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 import { PACK_TIERS, type PackTier } from '../pack-tiers.js';
+import { IsPriceUsd, PRICE_USD_MAX } from './price-usd.validator.js';
 import { IsSimulatorImageUrl } from './image-url.validator.js';
 import { PageMetaDto } from './manual-sets.dto.js';
 
@@ -21,7 +21,7 @@ export const CARDS_MAX_LIMIT = 100;
 export const CARDS_DEFAULT_LIMIT = 50;
 export const CARD_NAME_MAX = 120;
 export const CARD_NUMBER_MAX = 30;
-export const PRICE_MAX = 99_999_999.99; // Decimal(10,2)
+export const PRICE_MAX = PRICE_USD_MAX; // Decimal(10,2)
 
 // eslint-disable-next-line no-control-regex
 const NO_NUL = /^[^\u0000]*$/;
@@ -110,9 +110,7 @@ export class CreateManualCardDto {
     description: 'USD, up to 2 decimals (JSON number).',
   })
   @ValidateIf(notNullish)
-  @IsNumber({ allowNaN: false, allowInfinity: false, maxDecimalPlaces: 2 })
-  @Min(0)
-  @Max(PRICE_MAX)
+  @IsPriceUsd()
   marketPriceUsd?: number | null;
 }
 
@@ -150,9 +148,7 @@ export class UpdateManualCardDto {
     maximum: PRICE_MAX,
   })
   @ValidateIf(notNullish)
-  @IsNumber({ allowNaN: false, allowInfinity: false, maxDecimalPlaces: 2 })
-  @Min(0)
-  @Max(PRICE_MAX)
+  @IsPriceUsd()
   marketPriceUsd?: number | null;
 }
 

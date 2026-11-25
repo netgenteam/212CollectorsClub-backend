@@ -212,6 +212,10 @@ describe('Admin manual simulator cards (e2e, Story 22.5)', () => {
       ['3 decimals', { marketPriceUsd: 1.234 }],
       ['string price', { marketPriceUsd: 'abc' }],
       ['string 1e3', { marketPriceUsd: '1e3' }],
+      ['1e-7', { marketPriceUsd: 1e-7 }],
+      ['1e-10', { marketPriceUsd: 1e-10 }],
+      ['1.5e-7', { marketPriceUsd: 1.5e-7 }],
+      ['1e21', { marketPriceUsd: 1e21 }],
       ['http image', { imageUrl: 'http://x.io/a.png' }],
       ['bad own path', { imageUrl: '/uploads/public/other/a.png' }],
       ['PII number', { number: 'V-12345678' }],
@@ -341,6 +345,8 @@ describe('Admin manual simulator cards (e2e, Story 22.5)', () => {
       await patch(s, c.id as string, { rarityTier: null }).expect(400);
       await patch(s, c.id as string, { rarityTier: 'promo' }).expect(400);
       await patch(s, c.id as string, { marketPriceUsd: 1.001 }).expect(400);
+      for (const v of [1e-7, 1e-10, 1.5e-7, 1e21])
+        await patch(s, c.id as string, { marketPriceUsd: v }).expect(400);
       await patch(s, c.id as string, { number: 'V-12345678' }).expect(400);
       await del(s, c.id as string).expect(204);
       await del(s, c.id as string).expect(404);

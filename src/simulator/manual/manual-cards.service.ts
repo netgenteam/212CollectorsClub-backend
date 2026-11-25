@@ -1,4 +1,4 @@
-import { BadRequestException, HttpStatus, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable } from '@nestjs/common';
 import { Prisma } from '../../generated/prisma/client.js';
 import { ApiException } from '../../common/api-exception.js';
 import {
@@ -61,15 +61,6 @@ function assertSafeFields(dto: {
   if (dto.imageUrl) assertAuditSafeText('imageUrl', dto.imageUrl);
 }
 
-/** Defends the "<= 2 decimals" rule for forms that slip past `maxDecimalPlaces` (e.g. 1e-7). */
-function assertPrice(v: number | null | undefined): void {
-  if (v === null || v === undefined) return;
-  if (Math.abs(v * 100 - Math.round(v * 100)) > 1e-6)
-    throw new BadRequestException(
-      'marketPriceUsd must have at most 2 decimal places',
-    );
-}
-
 /** Prisma `contains` does not escape LIKE wildcards: `%`, `_` and `\\` must match literally. */
 const escapeLike = (s: string): string => s.replace(/[\\%_]/g, '\\$&');
 
@@ -128,7 +119,6 @@ export class ManualCardsService {
     admin: Admin,
   ): Promise<CardDto> {
     assertSafeFields(dto);
-    assertPrice(dto.marketPriceUsd);
     const max = maxCardsPerSet();
     const row = await this.run(async (tx, budget, audit) => {
       await this.lockSet(tx, budget, setId);
@@ -173,7 +163,6 @@ export class ManualCardsService {
     admin: Admin,
   ): Promise<CardDto> {
     assertSafeFields(dto);
-    assertPrice(dto.marketPriceUsd);
     const out = await this.run(async (tx, budget, audit) => {
       const set = await this.lockSet(tx, budget, setId);
       const cur = await this.findCard(tx, setId, cardId);

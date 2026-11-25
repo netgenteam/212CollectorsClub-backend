@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
+import { createGlobalValidationPipe } from '../../common/global-validation-pipe.js';
+import { isValidPriceUsd } from './price-usd.validator.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { ApiException } from '../../common/api-exception.js';
 import { assertAuditSafeText } from './set-name.js';
@@ -257,5 +259,34 @@ describe('ManualCardsService invariants (AC5-AC8, mocked tx)', () => {
       undefined,
     );
     expect(JSON.stringify(h.events)).not.toContain('12345678');
+  });
+});
+
+describe('marketPriceUsd exponent forms never reach a 500 (QA 22.5 B1), real global pipe', () => {
+  const pipe = createGlobalValidationPipe();
+  const meta = (type: 'body', metatype: unknown) =>
+    ({ type, metatype }) as never;
+  const bad = [1e-7, 1e-10, 1.5e-7, 1e21, -1e-7, 1.234, 1e9, Infinity];
+  it.each(bad)(
+    'Create/Update DTO reject %s with 400 (not TypeError)',
+    async (v) => {
+      for (const cls of [CreateManualCardDto, UpdateManualCardDto])
+        await expect(
+          pipe.transform(
+            { name: 'x', rarityTier: 'COMMON', marketPriceUsd: v },
+            meta('body', cls),
+          ),
+        ).rejects.toMatchObject({ status: 400 });
+    },
+  );
+  it('valid prices still pass through the pipe', async () => {
+    for (const v of [0, 0.1, 0.29, 1.005 * 0 + 12.34, 99999999.99])
+      await expect(
+        pipe.transform(
+          { name: 'x', rarityTier: 'COMMON', marketPriceUsd: v },
+          meta('body', CreateManualCardDto),
+        ),
+      ).resolves.toBeDefined();
+    expect(isValidPriceUsd('5')).toBe(false);
   });
 });
