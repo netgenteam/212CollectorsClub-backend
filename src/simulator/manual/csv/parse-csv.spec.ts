@@ -166,6 +166,26 @@ describe('parseCsv (Story 22.7)', () => {
     ]);
   });
 
+  it('DUPLICATE_NUMBER ignores case (22.10): file and set keys are lower-case', () => {
+    const csv = `${H}\na,common,A1,,\nb,common,a1,,\nc,common,TG12,,\nd,common,tg12,,\ne,common,A 1,,\n`;
+    expect(codes(csv)).toEqual([
+      '3:number:DUPLICATE_NUMBER',
+      '5:number:DUPLICATE_NUMBER',
+    ]);
+    const r = withExistingDuplicates(
+      parseCsv(buf(`${H}\na,common,A1,,\nb,common,B2,,\n`)),
+      new Set(['a1']),
+    );
+    expect(r.errors.map((e) => `${e.row}:${e.code}`)).toEqual([
+      '2:DUPLICATE_NUMBER',
+    ]);
+    expect(r.rows.map((x) => x.number)).toEqual(['B2']);
+    // the number is kept as written
+    expect(parseCsv(buf(`${H}\na,common,Tg12,,\n`)).rows[0].number).toBe(
+      'Tg12',
+    );
+  });
+
   it('DUPLICATE_NUMBER on the 2nd appearance and against the set', () => {
     const csv = `${H}\na,common,1,,\nb,common,1,,\nc,common,2,,\nd,common,,,\ne,common,,,\n`;
     expect(codes(csv)).toEqual(['3:number:DUPLICATE_NUMBER']);

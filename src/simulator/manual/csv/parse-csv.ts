@@ -1,4 +1,5 @@
 import { CsvError, parse } from 'csv-parse/sync';
+import { numberKeyOf } from '../card-number.js';
 import { sanitizeAuditPayload } from '../../../audit/audit-payload.js';
 import { PACK_TIERS, mapPackTier, type PackTier } from '../../pack-tiers.js';
 import { isValidImageUrl } from '../image-url.validator.js';
@@ -125,7 +126,7 @@ const auditUnsafe = (field: string, v: string): boolean =>
 
 /**
  * Parses and validates a whole CSV. Never throws on admin input: every problem becomes a
- * `{row, field, code, message}` entry (all rows, one pass). `existingNumbers` = numbers already in
+ * `{row, field, code, message}` entry (all rows, one pass). `existingNumbers` = number KEYS (lower-case) already in
  * the set (clash reported on the file row, `DUPLICATE_NUMBER`).
  */
 export function parseCsv(
@@ -263,7 +264,8 @@ export function parseCsv(
       else {
         number = rawNumber;
         numbers.push({ row, number });
-        if (seen.has(number))
+        const key = numberKeyOf(number);
+        if (seen.has(key))
           errors.push(
             err(
               row,
@@ -272,7 +274,7 @@ export function parseCsv(
               'number repeated in the file.',
             ),
           );
-        else if (opts.existingNumbers?.has(number))
+        else if (opts.existingNumbers?.has(key))
           errors.push(
             err(
               row,
@@ -281,7 +283,7 @@ export function parseCsv(
               'number already exists in the set.',
             ),
           );
-        seen.add(number);
+        seen.add(key);
       }
     }
 
@@ -348,7 +350,7 @@ export function withExistingDuplicates(
       .map((e) => e.row),
   );
   const extra = result.numbers
-    .filter((n) => existing.has(n.number) && !flagged.has(n.row))
+    .filter((n) => existing.has(numberKeyOf(n.number)) && !flagged.has(n.row))
     .map((n) =>
       err(
         n.row,

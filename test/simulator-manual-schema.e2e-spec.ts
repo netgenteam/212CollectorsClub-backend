@@ -38,8 +38,8 @@ describe('Simulator_Sets / Simulator_Cards constraints (AC1, AC3)', () => {
     price: string | null = null,
   ) =>
     client.query(
-      `INSERT INTO "Simulator_Cards" ("id","setId","name","rarityTier","number","marketPriceUsd","updatedAt")
-       VALUES (gen_random_uuid(), $1::uuid, 'C', 'COMMON', $2, $3::numeric, now())`,
+      `INSERT INTO "Simulator_Cards" ("id","setId","name","rarityTier","number","numberKey","marketPriceUsd","updatedAt")
+       VALUES (gen_random_uuid(), $1::uuid, 'C', 'COMMON', $2::varchar, lower($2::varchar), $3::numeric, now())`,
       [setId, number, price],
     );
 
@@ -62,10 +62,12 @@ describe('Simulator_Sets / Simulator_Cards constraints (AC1, AC3)', () => {
     expect(r.rows[0]).toEqual({ isActive: false, version: 1 });
   });
 
-  it('duplicate (setId, number) violates uniqueness; two NULL numbers are allowed', async () => {
+  it('duplicate (setId, lower(number)) violates uniqueness (case-insensitive, 22.10); two NULL numbers are allowed', async () => {
     const id = await newSet(`${TAG}-num`);
     await newCard(id, '001');
     await expect(newCard(id, '001')).rejects.toMatchObject({ code: '23505' });
+    await newCard(id, 'tg12');
+    await expect(newCard(id, 'TG12')).rejects.toMatchObject({ code: '23505' });
     await newCard(id, null);
     await newCard(id, null);
     const other = await newSet(`${TAG}-num2`);

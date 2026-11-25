@@ -1,4 +1,5 @@
 import { HttpStatus, Injectable } from '@nestjs/common';
+import { numberKeyOf } from './card-number.js';
 import { ApiException } from '../../common/api-exception.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { csvInvalid } from './csv/csv-invalid.js';
@@ -72,12 +73,15 @@ export class ManualCardsImportService {
       // informational read (unlocked) so ONE pass reports clashes with the set too;
       // the authoritative check repeats under the set lock when importing
       const existing = await this.prisma.simulatorCard.findMany({
-        where: { setId, number: { in: parsed.numbers.map((n) => n.number) } },
-        select: { number: true },
+        where: {
+          setId,
+          numberKey: { in: parsed.numbers.map((n) => numberKeyOf(n.number)) },
+        },
+        select: { numberKey: true },
       });
       parsed = withExistingDuplicates(
         parsed,
-        new Set(existing.flatMap((c) => (c.number ? [c.number] : []))),
+        new Set(existing.flatMap((c) => (c.numberKey ? [c.numberKey] : []))),
       );
     }
     if (parsed.errors.length > 0) throw csvInvalid(parsed.errors);

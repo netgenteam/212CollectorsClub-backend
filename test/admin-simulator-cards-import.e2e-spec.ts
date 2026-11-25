@@ -107,8 +107,15 @@ describe('Admin manual simulator cards CSV import (e2e, Story 22.7)', () => {
           name: `s${i}`,
           rarityTier: 'COMMON' as const,
           number: `s${i}`,
+          numberKey: `s${i}`,
         })),
-        { setId, name: 'r', rarityTier: 'RARE' as const, number: 'r' },
+        {
+          setId,
+          name: 'r',
+          rarityTier: 'RARE' as const,
+          number: 'r',
+          numberKey: 'r',
+        },
       ],
     });
 
@@ -472,6 +479,48 @@ describe('Admin manual simulator cards CSV import (e2e, Story 22.7)', () => {
         expect(await count(s)).toBe(6);
       } finally {
         delete process.env.SIMULATOR_MAX_CARDS_PER_SET;
+      }
+    });
+
+    it('22.10: numbers clash ignoring case, in the file and against the set; kept as written', async () => {
+      const s = await mkSet();
+      await seed(s, 1); // number 's0', numberKey 's0'
+      const bad = await imp(
+        s,
+        `${H}\na,common,A1,,\nb,common,a1,,\nc,common,S0,,\nd,common,TG12,,\n`,
+      );
+      expect(bad.status).toBe(422);
+      expect(
+        (bad.body as Body).details?.errors?.map((e) => `${e.row}:${e.code}`),
+      ).toEqual(['3:DUPLICATE_NUMBER', '4:DUPLICATE_NUMBER']);
+      const dry = await imp(
+        s,
+        `${H}\na,common,A1,,\nb,common,a1,,\n`,
+        '?dryRun=true',
+      );
+      expect(dry.status).toBe(422);
+      const ok = await imp(s, `${H}\na,common,Tg12,,\nb,common,A1,,\n`);
+      expect(ok.status).toBe(201);
+      const rows = await prisma.simulatorCard.findMany({
+        where: { setId: s, name: { in: ['a', 'b'] } },
+        orderBy: { name: 'asc' },
+      });
+      expect(rows.map((r) => [r.number, r.numberKey])).toEqual([
+        ['Tg12', 'tg12'],
+        ['A1', 'a1'],
+      ]);
+      const again = await imp(s, `${H}\nz,common,tG12,,\n`);
+      expect(again.status).toBe(422);
+    });
+
+    it('22.10: concurrent imports A1 vs a1: one wins, the other 422 DUPLICATE_NUMBER, never 500', async () => {
+      for (let round = 0; round < 3; round++) {
+        const s = await mkSet();
+        const rs = await Promise.all(
+          ['A1', 'a1'].map((n) => imp(s, `${H}\nx,common,${n},,\n`)),
+        );
+        expect(rs.map((r) => r.status).sort()).toEqual([201, 422]);
+        expect(await count(s)).toBe(1);
       }
     });
 

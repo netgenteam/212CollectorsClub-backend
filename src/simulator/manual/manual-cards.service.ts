@@ -1,4 +1,5 @@
 import { HttpStatus, Injectable } from '@nestjs/common';
+import { numberKeyOf, numberKeyOrNull } from './card-number.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { ApiException } from '../../common/api-exception.js';
 import {
@@ -140,6 +141,7 @@ export class ManualCardsService {
           name: dto.name,
           rarityTier: dto.rarityTier,
           number,
+          numberKey: numberKeyOrNull(number),
           imageUrl: dto.imageUrl ?? null,
           marketPriceUsd: priceToDb(dto.marketPriceUsd),
         },
@@ -177,6 +179,7 @@ export class ManualCardsService {
         if (dto.number !== null)
           await this.assertNumberFree(tx, setId, dto.number, cardId);
         data.number = dto.number;
+        data.numberKey = numberKeyOrNull(dto.number);
       }
       if (dto.imageUrl !== undefined && dto.imageUrl !== cur.imageUrl)
         data.imageUrl = dto.imageUrl;
@@ -251,18 +254,20 @@ export class ManualCardsService {
           `A set holds at most ${max} cards.`,
           { max, current, incoming: rows.length },
         );
-      const wanted = rows.flatMap((r) => (r.number ? [r.number] : []));
+      const wanted = rows.flatMap((r) =>
+        r.number ? [numberKeyOf(r.number)] : [],
+      );
       if (wanted.length > 0) {
         const clash = new Set(
           (
             await tx.simulatorCard.findMany({
-              where: { setId, number: { in: wanted } },
-              select: { number: true },
+              where: { setId, numberKey: { in: wanted } },
+              select: { numberKey: true },
             })
-          ).map((c) => c.number),
+          ).map((c) => c.numberKey),
         );
         const errors = rows
-          .filter((r) => r.number && clash.has(r.number))
+          .filter((r) => r.number && clash.has(numberKeyOf(r.number)))
           .map((r) => ({
             row: r.row,
             field: 'number',
@@ -278,6 +283,7 @@ export class ManualCardsService {
             name: r.name,
             rarityTier: r.rarityTier,
             number: r.number,
+            numberKey: numberKeyOrNull(r.number),
             imageUrl: r.imageUrl,
             marketPriceUsd:
               r.marketPriceUsd === null
@@ -352,7 +358,11 @@ export class ManualCardsService {
     exceptId?: string,
   ): Promise<void> {
     const clash = await tx.simulatorCard.findFirst({
-      where: { setId, number, ...(exceptId ? { NOT: { id: exceptId } } : {}) },
+      where: {
+        setId,
+        numberKey: numberKeyOf(number),
+        ...(exceptId ? { NOT: { id: exceptId } } : {}),
+      },
       select: { id: true },
     });
     if (clash) this.numberTaken();

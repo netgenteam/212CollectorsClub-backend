@@ -391,6 +391,81 @@ describe('Admin manual simulator cards (e2e, Story 22.5)', () => {
     });
   });
 
+  describe('22.10: case-insensitive number', () => {
+    it('A1 vs a1 and tg12 vs TG12: 409 on POST/PATCH; own number with other case 200; kept as written; other sets and NULLs fine; key not exposed', async () => {
+      const s = await mkSet();
+      const s2 = await mkSet();
+      const a = await mkCard(s, { number: 'a1' });
+      const t = await mkCard(s, { number: 'tg12' });
+      for (const n of ['A1', 'a1', 'TG12'])
+        expect(
+          (
+            (
+              await post(s, {
+                name: 'z',
+                rarityTier: 'COMMON',
+                number: n,
+              }).expect(409)
+            ).body as Body
+          ).errorCode,
+        ).toBe('SIMULATOR_CARD_NUMBER_TAKEN');
+      const b = await mkCard(s, { number: 'B2' });
+      expect(
+        (
+          (await patch(s, b.id as string, { number: 'A1' }).expect(409))
+            .body as Body
+        ).errorCode,
+      ).toBe('SIMULATOR_CARD_NUMBER_TAKEN');
+      expect(
+        (
+          (await patch(s, b.id as string, { number: 'tG12' }).expect(409))
+            .body as Body
+        ).errorCode,
+      ).toBe('SIMULATOR_CARD_NUMBER_TAKEN');
+      const up = await patch(s, a.id as string, { number: 'A1' }).expect(200);
+      expect((up.body as Body).number).toBe('A1');
+      expect(up.body).not.toHaveProperty('numberKey');
+      expect(
+        (
+          (await patch(s, t.id as string, { number: 'TG12' }).expect(200))
+            .body as Body
+        ).number,
+      ).toBe('TG12');
+      // the key follows the edit: 'a1' is still taken, 'b2' (b's old key) is free after b moves
+      await patch(s, b.id as string, { number: 'C3' }).expect(200);
+      await mkCard(s, { number: 'b2' });
+      await patch(s, a.id as string, { number: null }).expect(200);
+      await mkCard(s, { number: 'a1' });
+      await mkCard(s, { number: null });
+      await mkCard(s2, { number: 'A1' });
+      await mkCard(s2, { number: 'tg12' });
+      const row = await prisma.simulatorCard.findFirstOrThrow({
+        where: { id: t.id as string },
+      });
+      expect([row.number, row.numberKey]).toEqual(['TG12', 'tg12']);
+      const ev = await prisma.auditEvent.findMany({
+        where: { entityId: t.id as string },
+      });
+      expect(
+        JSON.stringify(ev, (_k, v: unknown) =>
+          typeof v === 'bigint' ? String(v) : v,
+        ),
+      ).not.toContain('numberKey');
+    });
+
+    it('simultaneous POSTs A1 || a1: one 201 and one 409, never 500', async () => {
+      for (let i = 0; i < 4; i++) {
+        const s = await mkSet();
+        const rs = await Promise.all(
+          ['A1', 'a1'].map((number) =>
+            post(s, { name: uniq('r'), rarityTier: 'COMMON', number }),
+          ),
+        );
+        expect(rs.map((r) => r.status).sort()).toEqual([201, 409]);
+      }
+    });
+  });
+
   describe('AC5: card cap', () => {
     it('422 at the cap with details; counted under the set lock (10 parallel => exactly 5 ok)', async () => {
       process.env.SIMULATOR_MAX_CARDS_PER_SET = '10';

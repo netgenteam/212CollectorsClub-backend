@@ -1715,12 +1715,14 @@ model SimulatorCard {
   name           String              @db.VarChar(120)
   rarityTier     SimulatorRarityTier
   number         String?             @db.VarChar(30)
+  /// lower(number), kept by the service (AD-106): case-insensitive uniqueness without a functional index. Never exposed.
+  numberKey      String?             @db.VarChar(64)
   imageUrl       String?             @db.VarChar(300)
   marketPriceUsd Decimal?            @db.Decimal(10, 2)
   createdAt      DateTime            @default(now()) @db.Timestamptz(3)
   updatedAt      DateTime            @updatedAt @db.Timestamptz(3)
 
-  @@unique([setId, number])
+  @@unique([setId, numberKey])
   @@index([setId, rarityTier])
   @@map("Simulator_Cards")
 }
