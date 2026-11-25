@@ -1654,3 +1654,58 @@ model RetentionRun {
   @@index([startedAt])
   @@map("Retention_Runs")
 }
+
+/// Story 22.3 (AD-106): the 8 rarity tiers of the pack simulator. Same names as
+/// `PACK_TIERS` / `PackTier` (src/simulator/pack-tiers.ts); a unit test compares them.
+enum SimulatorRarityTier {
+  COMMON
+  UNCOMMON
+  RARE
+  DOUBLE_RARE
+  ULTRA_RARE
+  ILLUSTRATION_RARE
+  SPECIAL_ILLUSTRATION_RARE
+  HYPER_RARE
+}
+
+/// Story 22.3 (AD-106): manually managed simulator set. `nameKey` (name trimmed,
+/// spaces collapsed, lower-cased) is kept by the service (22.4): case-insensitive
+/// uniqueness without a functional index (Prisma would see it as drift).
+/// `template` is always materialised. `version` bumps on every write of the set or
+/// its cards (cache key).
+model SimulatorSet {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @db.VarChar(120)
+  nameKey   String   @unique @db.VarChar(120)
+  imageUrl  String?  @db.VarChar(300)
+  template  Json
+  isActive  Boolean  @default(false)
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  cards SimulatorCard[]
+
+  @@index([isActive])
+  @@map("Simulator_Sets")
+}
+
+/// Story 22.3 (AD-106): card of a manual set. No FK to MasterCard/Product. The
+/// `CHECK ("marketPriceUsd" >= 0)` lives in the migration SQL. `(setId, number)` is
+/// unique; several NULL numbers are allowed.
+model SimulatorCard {
+  id             String              @id @default(uuid()) @db.Uuid
+  setId          String              @db.Uuid
+  set            SimulatorSet        @relation(fields: [setId], references: [id], onDelete: Cascade)
+  name           String              @db.VarChar(120)
+  rarityTier     SimulatorRarityTier
+  number         String?             @db.VarChar(30)
+  imageUrl       String?             @db.VarChar(300)
+  marketPriceUsd Decimal?            @db.Decimal(10, 2)
+  createdAt      DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime            @updatedAt @db.Timestamptz(3)
+
+  @@unique([setId, number])
+  @@index([setId, rarityTier])
+  @@map("Simulator_Cards")
+}

@@ -41,7 +41,7 @@ function intIn(v: unknown, min: number, max: number, path: string): number {
   return v;
 }
 
-function parseTemplate(v: unknown, path: string): Template {
+export function parseTemplate(v: unknown, path: string): Template {
   if (!isObj(v)) invalid(path, 'must be an object');
   onlyKeys(v, ['slots'], path);
   if (!Array.isArray(v.slots) || v.slots.length === 0)
@@ -94,7 +94,7 @@ function parseTemplate(v: unknown, path: string): Template {
   return { slots };
 }
 
-function checkOddsSum(t: Template, path: string): void {
+export function checkOddsSum(t: Template, path: string): void {
   t.slots.forEach((s, i) => {
     if (s.kind !== 'rare') return;
     const sum = Object.values(s.odds).reduce((a, b) => a + b, 0);
