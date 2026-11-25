@@ -1,0 +1,34 @@
+import { describe, expect, it } from 'vitest';
+import { normalizeSetName } from './set-name.js';
+
+describe('normalizeSetName (Story 22.4, AC3)', () => {
+  it('trims, collapses whitespace and lower-cases the key', () => {
+    expect(normalizeSetName('  Mi \t  Set ')).toEqual({
+      name: 'Mi Set',
+      nameKey: 'mi set',
+    });
+    expect(normalizeSetName('mi set').nameKey).toBe(
+      normalizeSetName('  Mi  Set ').nameKey,
+    );
+  });
+  it.each([
+    '',
+    '   ',
+    '\n\t',
+    'a\u0000b',
+    'x'.repeat(121),
+    42,
+    null,
+    undefined,
+  ])('rejects %j with a 400', (v) =>
+    expect(() => normalizeSetName(v)).toThrow(/name/),
+  );
+  it('accepts exactly 120 characters (code points)', () => {
+    expect(normalizeSetName('x'.repeat(120)).name).toHaveLength(120);
+    expect(() => normalizeSetName('😀'.repeat(120))).not.toThrow();
+    expect(() => normalizeSetName('😀'.repeat(121))).toThrow();
+  });
+  it('rejects a name whose lower-cased key would overflow the column', () => {
+    expect(() => normalizeSetName('İ'.repeat(120))).toThrow(/120/);
+  });
+});

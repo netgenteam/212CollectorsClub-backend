@@ -122,10 +122,15 @@ describe('AUDIT_ACTIONS (FR-139)', () => {
       'RETENTION_PURGE_RUN',
       'DATA_MIGRATION_RUN',
       'AUDIT_VERIFIED',
+      'SIMULATOR_SET_CREATED',
+      'SIMULATOR_SET_UPDATED',
+      'SIMULATOR_SET_ACTIVATED',
+      'SIMULATOR_SET_DEACTIVATED',
+      'SIMULATOR_SET_DELETED',
     ];
     expect(Object.keys(AUDIT_ACTIONS).sort()).toEqual([...expected].sort());
     for (const [name, v] of Object.entries(AUDIT_ACTIONS)) {
-      expect(v.emittedBy).toMatch(/^20\.\d+$/);
+      expect(v.emittedBy).toMatch(/^2[0-2]\.\d+$/);
       expect(name).toMatch(/^[A-Z0-9_]+$/);
       expect(name.length).toBeLessThanOrEqual(64);
     }

@@ -260,6 +260,28 @@ const SAMPLES: Record<AuditAction, AuditPayload[]> = {
   AUDIT_VERIFIED: [
     { mode: 'full', result: 'OK', rows: 121, fromSeq: 1, toSeq: 121 },
   ],
+  SIMULATOR_SET_CREATED: [
+    { name: 'Base Set 151', isActive: false, cardCount: 0 },
+    // a set name that merely looks like an id is public text, not personal data
+    { name: 'V12345678', isActive: false, cardCount: 0 },
+  ],
+  SIMULATOR_SET_UPDATED: [
+    {
+      name: 'Base Set 151',
+      imageUrl: null,
+      template: '{"slots":[{"kind":"fixed","tier":"COMMON","count":4}]}',
+    },
+    { name: 'J123456789', isActive: true, cardCount: 40 },
+  ],
+  SIMULATOR_SET_ACTIVATED: [
+    { name: 'Base Set 151', isActive: true, cardCount: 40 },
+  ],
+  SIMULATOR_SET_DEACTIVATED: [
+    { name: 'Base Set 151', isActive: false, cardCount: 40 },
+  ],
+  SIMULATOR_SET_DELETED: [
+    { name: 'Base Set 151', isActive: false, cardCount: 12 },
+  ],
 };
 
 describe('catalog: representative payloads of Stories 20.4-20.8 pass in BOTH modes', () => {
@@ -433,6 +455,11 @@ describe('public seller fields: explicit per action, never general', () => {
     'PAYMENT_PAGO_MOVIL_REJECTED',
     'SELLER_IDENTITY_UPDATED',
     'SHIPPING_AGENCY_CHANGED',
+    'SIMULATOR_SET_ACTIVATED',
+    'SIMULATOR_SET_CREATED',
+    'SIMULATOR_SET_DEACTIVATED',
+    'SIMULATOR_SET_DELETED',
+    'SIMULATOR_SET_UPDATED',
   ];
 
   it('only the allow-listed actions declare publicFields (guard rail on the catalog)', () => {
