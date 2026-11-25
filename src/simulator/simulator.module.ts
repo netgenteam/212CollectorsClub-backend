@@ -9,6 +9,8 @@ import { SimulatorController } from './simulator.controller.js';
 import { SimulatorSetsService } from './simulator-sets.service.js';
 import { ManualSetsController } from './manual/manual-sets.controller.js';
 import { ManualSetsService } from './manual/manual-sets.service.js';
+import { ManualCardsController } from './manual/manual-cards.controller.js';
+import { ManualCardsService } from './manual/manual-cards.service.js';
 import { SimulatorImagesController } from './manual/simulator-images.controller.js';
 import { SimulatorImagesService } from './manual/simulator-images.service.js';
 
@@ -22,6 +24,7 @@ import { SimulatorImagesService } from './manual/simulator-images.service.js';
   controllers: [
     AdminSimulatorController,
     ManualSetsController,
+    ManualCardsController,
     SimulatorImagesController,
     SimulatorController,
   ],
@@ -29,6 +32,7 @@ import { SimulatorImagesService } from './manual/simulator-images.service.js';
     SimulatorConfigService,
     SimulatorSetsService,
     ManualSetsService,
+    ManualCardsService,
     SimulatorImagesService,
     SimulatorPoolCache,
     PackGeneratorService,

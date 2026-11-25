@@ -279,6 +279,32 @@ const SAMPLES: Record<AuditAction, AuditPayload[]> = {
   SIMULATOR_SET_DELETED: [
     { name: 'Base Set 151', isActive: false, cardCount: 12 },
   ],
+  SIMULATOR_CARD_CREATED: [
+    {
+      setId: '3f2b8c1e-5d4a-4e7b-9c60-1a2b3c4d5e6f',
+      rarityTier: 'RARE',
+      number: '025/165',
+    },
+    {
+      setId: '3f2b8c1e-5d4a-4e7b-9c60-1a2b3c4d5e6f',
+      rarityTier: 'COMMON',
+      number: null,
+    },
+  ],
+  SIMULATOR_CARD_UPDATED: [
+    {
+      setId: '3f2b8c1e-5d4a-4e7b-9c60-1a2b3c4d5e6f',
+      rarityTier: 'RARE',
+      number: 'SV-P 001',
+    },
+  ],
+  SIMULATOR_CARD_DELETED: [
+    {
+      setId: '3f2b8c1e-5d4a-4e7b-9c60-1a2b3c4d5e6f',
+      rarityTier: 'COMMON',
+      number: 'TG12/TG30',
+    },
+  ],
 };
 
 describe('catalog: representative payloads of Stories 20.4-20.8 pass in BOTH modes', () => {

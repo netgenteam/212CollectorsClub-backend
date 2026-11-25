@@ -140,6 +140,11 @@ export const AUDIT_ACTIONS = {
   SIMULATOR_SET_ACTIVATED: { emittedBy: '22.4' },
   SIMULATOR_SET_DEACTIVATED: { emittedBy: '22.4' },
   SIMULATOR_SET_DELETED: { emittedBy: '22.4' },
+  // Manual simulator cards (Story 22.5). Payload = {setId, rarityTier, number}: the card NAME is
+  // deliberately not audited (a name such as `V-12345678` must never trip the PII guard).
+  SIMULATOR_CARD_CREATED: { emittedBy: '22.5' },
+  SIMULATOR_CARD_UPDATED: { emittedBy: '22.5' },
+  SIMULATOR_CARD_DELETED: { emittedBy: '22.5' },
 } as const satisfies Record<
   string,
   { emittedBy: `${20 | 21 | 22}.${number}`; publicFields?: PublicFields }
