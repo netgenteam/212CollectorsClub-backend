@@ -145,6 +145,8 @@ export const AUDIT_ACTIONS = {
   SIMULATOR_CARD_CREATED: { emittedBy: '22.5' },
   SIMULATOR_CARD_UPDATED: { emittedBy: '22.5' },
   SIMULATOR_CARD_DELETED: { emittedBy: '22.5' },
+  // Story 22.7: one event per CSV batch, payload {setId, imported}: no card names.
+  SIMULATOR_CARDS_IMPORTED: { emittedBy: '22.7' },
 } as const satisfies Record<
   string,
   { emittedBy: `${20 | 21 | 22}.${number}`; publicFields?: PublicFields }

@@ -305,6 +305,9 @@ const SAMPLES: Record<AuditAction, AuditPayload[]> = {
       number: 'TG12/TG30',
     },
   ],
+  SIMULATOR_CARDS_IMPORTED: [
+    { setId: '3f2b8c1e-5d4a-4e7b-9c60-1a2b3c4d5e6f', imported: 150 },
+  ],
 };
 
 describe('catalog: representative payloads of Stories 20.4-20.8 pass in BOTH modes', () => {

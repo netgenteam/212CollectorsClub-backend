@@ -130,6 +130,7 @@ describe('AUDIT_ACTIONS (FR-139)', () => {
       'SIMULATOR_CARD_CREATED',
       'SIMULATOR_CARD_UPDATED',
       'SIMULATOR_CARD_DELETED',
+      'SIMULATOR_CARDS_IMPORTED',
     ];
     expect(Object.keys(AUDIT_ACTIONS).sort()).toEqual([...expected].sort());
     for (const [name, v] of Object.entries(AUDIT_ACTIONS)) {

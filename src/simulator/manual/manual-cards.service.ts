@@ -14,6 +14,8 @@ import { adminActor, payload } from '../../audit/audit-events.js';
 import { SimulatorPoolCache } from '../pool-cache.js';
 import { assertReadyIfActive } from './assert-ready.js';
 import { assertAuditSafeText } from './set-name.js';
+import { csvInvalid } from './csv/csv-invalid.js';
+import type { CsvCardRow } from './csv/parse-csv.js';
 import { SET_LOCK_BUDGET_MS } from './manual-sets.service.js';
 import type {
   CardDto,
@@ -225,6 +227,91 @@ export class ManualCardsService {
       });
     });
     this.poolCache.clear();
+  }
+
+  /**
+   * Story 22.7: all-or-nothing batch insert (rows already validated by `parseCsv`). Row lock first,
+   * then card cap and number clashes are re-checked UNDER the lock; one `createMany`; no
+   * `assertReadyIfActive` (adding never shrinks a set); one audit event for the whole batch whose
+   * payload never carries card names.
+   */
+  async importRows(
+    setId: string,
+    rows: CsvCardRow[],
+    admin: Admin,
+  ): Promise<number> {
+    const max = maxCardsPerSet();
+    const imported = await this.run(async (tx, budget, audit) => {
+      await this.lockSet(tx, budget, setId);
+      const current = await tx.simulatorCard.count({ where: { setId } });
+      if (current + rows.length > max)
+        throw new ApiException(
+          HttpStatus.UNPROCESSABLE_ENTITY,
+          'SIMULATOR_SET_CARD_LIMIT',
+          `A set holds at most ${max} cards.`,
+          { max, current, incoming: rows.length },
+        );
+      const wanted = rows.flatMap((r) => (r.number ? [r.number] : []));
+      if (wanted.length > 0) {
+        const clash = new Set(
+          (
+            await tx.simulatorCard.findMany({
+              where: { setId, number: { in: wanted } },
+              select: { number: true },
+            })
+          ).map((c) => c.number),
+        );
+        const errors = rows
+          .filter((r) => r.number && clash.has(r.number))
+          .map((r) => ({
+            row: r.row,
+            field: 'number',
+            code: 'DUPLICATE_NUMBER',
+            message: 'number already exists in the set.',
+          }));
+        if (errors.length > 0) throw csvInvalid(errors);
+      }
+      try {
+        await tx.simulatorCard.createMany({
+          data: rows.map((r) => ({
+            setId,
+            name: r.name,
+            rarityTier: r.rarityTier,
+            number: r.number,
+            imageUrl: r.imageUrl,
+            marketPriceUsd:
+              r.marketPriceUsd === null
+                ? null
+                : new Prisma.Decimal(r.marketPriceUsd),
+          })),
+        });
+      } catch (e) {
+        if (
+          e instanceof Prisma.PrismaClientKnownRequestError &&
+          e.code === 'P2002'
+        )
+          throw csvInvalid([
+            {
+              row: 0,
+              field: 'number',
+              code: 'DUPLICATE_NUMBER',
+              message: 'A number clashed with an existing card of the set.',
+            },
+          ]);
+        throw e;
+      }
+      await this.bump(tx, setId);
+      audit.add({
+        ...adminActor(admin),
+        action: 'SIMULATOR_CARDS_IMPORTED',
+        entityType: 'SimulatorSet',
+        entityId: setId,
+        after: payload({ setId, imported: rows.length }),
+      });
+      return rows.length;
+    });
+    this.poolCache.clear();
+    return imported;
   }
 
   /** First statement of every write: `SELECT … FOR UPDATE` of the set row under the lock budget. */
