@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeSetName } from './set-name.js';
+import { assertAuditSafeText, normalizeSetName } from './set-name.js';
 
 describe('normalizeSetName (Story 22.4, AC3)', () => {
   it('trims, collapses whitespace and lower-cases the key', () => {
@@ -30,5 +30,21 @@ describe('normalizeSetName (Story 22.4, AC3)', () => {
   });
   it('rejects a name whose lower-cased key would overflow the column', () => {
     expect(() => normalizeSetName('İ'.repeat(120))).toThrow(/120/);
+  });
+
+  it.each([
+    'juan.perez@gmail.com',
+    'V-12345678 cedula',
+    '+58 414 1234567',
+    'password=hunter22',
+    '4111111111111111',
+  ])('rejects PII-looking name %j with a 400', (v) =>
+    expect(() => normalizeSetName(v)).toThrow(/must not contain/),
+  );
+  it('assertAuditSafeText flags a URL with an email, accepts plain text', () => {
+    expect(() =>
+      assertAuditSafeText('imageUrl', 'https://x.com/juan@gmail.com.png'),
+    ).toThrow(/imageUrl/);
+    expect(() => assertAuditSafeText('name', 'Base Set 151')).not.toThrow();
   });
 });

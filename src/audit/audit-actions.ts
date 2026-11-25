@@ -29,11 +29,6 @@ const PAGO_MOVIL_PUBLIC = {
   pagoMovilBank: [],
 } as const satisfies PublicFields;
 
-/** Story 22.4: the name of a manual simulator set is public text, not personal data. */
-const SET_NAME_PUBLIC = {
-  name: ['EMAIL', 'PHONE', 'CEDULA'],
-} as const satisfies PublicFields;
-
 /**
  * WHAT COUNTS AS A RISK ACTION (the written criterion for adding an action to this catalog;
  * `docs/deployment.md` 17.6 repeats it). An admin/system action is audited when it does AT LEAST ONE of:
@@ -49,10 +44,11 @@ const SET_NAME_PUBLIC = {
  * NOT audited here (reviewed on purpose): landing blocks and their images, the legacy pack
  * simulator configuration and category taxonomy (presentation or navigation content with its own
  * draft/publish or reversible edits, no money, no personal data, no change to what can be
- * bought). Story 22.4 (FR-156) does audit the manual simulator SETS (create/update/activate/
- * deactivate/delete): activating one changes what the public simulator offers, product image uploads and tag edits, cart/wishlist, and the customer's own profile and
+ * bought), product image uploads and tag edits, cart/wishlist, and the customer's own profile and
  * change-password (needs the current password). The 7-day admin usage log of Story 20.7 covers
- * everything else. A new action that meets one of R1-R5 must be added here with an emitter and a
+ * everything else. EXCEPTION (Story 22.4, FR-156): the manual simulator SETS (create/update/
+ * activate/deactivate/delete) ARE audited, because activating a set changes what the public
+ * simulator offers. A new action that meets one of R1-R5 must be added here with an emitter and a
  * payload sample (`audit-catalog-payloads.spec.ts`), or the coverage test fails.
  *
  * Story 20.1 (AD-99, FR-139): catalog of audit actions. A TypeScript `const`,
@@ -136,16 +132,14 @@ export const AUDIT_ACTIONS = {
   RETENTION_PURGE_RUN: { emittedBy: '20.8' },
   DATA_MIGRATION_RUN: { emittedBy: '20.3' },
   AUDIT_VERIFIED: { emittedBy: '20.1' },
-  // Manual simulator sets (Story 22.4, FR-156). The set name is public catalog text an admin
-  // types, so the value detectors must not reject a name that merely looks like an id.
-  SIMULATOR_SET_CREATED: { emittedBy: '22.4', publicFields: SET_NAME_PUBLIC },
-  SIMULATOR_SET_UPDATED: { emittedBy: '22.4', publicFields: SET_NAME_PUBLIC },
-  SIMULATOR_SET_ACTIVATED: { emittedBy: '22.4', publicFields: SET_NAME_PUBLIC },
-  SIMULATOR_SET_DEACTIVATED: {
-    emittedBy: '22.4',
-    publicFields: SET_NAME_PUBLIC,
-  },
-  SIMULATOR_SET_DELETED: { emittedBy: '22.4', publicFields: SET_NAME_PUBLIC },
+  // Manual simulator sets (Story 22.4, FR-156). No `publicFields`: the free text they audit
+  // (name, imageUrl) is checked with the audit detectors BEFORE the transaction (400 if it
+  // looks like PII), so nothing personal can reach the immutable chain.
+  SIMULATOR_SET_CREATED: { emittedBy: '22.4' },
+  SIMULATOR_SET_UPDATED: { emittedBy: '22.4' },
+  SIMULATOR_SET_ACTIVATED: { emittedBy: '22.4' },
+  SIMULATOR_SET_DEACTIVATED: { emittedBy: '22.4' },
+  SIMULATOR_SET_DELETED: { emittedBy: '22.4' },
 } as const satisfies Record<
   string,
   { emittedBy: `${20 | 21 | 22}.${number}`; publicFields?: PublicFields }

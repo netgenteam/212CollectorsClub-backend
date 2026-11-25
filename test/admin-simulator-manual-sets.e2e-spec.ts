@@ -442,12 +442,44 @@ describe('Admin manual simulator sets (e2e, Story 22.4)', () => {
       expect(evs[1].after).toEqual({ name: renamed });
     });
 
-    it('a set whose name looks like an id document is still audited (public text)', async () => {
-      const id = (
-        (await create({ name: 'V12345678' }).expect(201)).body as Body
-      ).id as string;
-      expect((await events(id))[0].after).toMatchObject({ name: 'V12345678' });
-      await del(id).expect(204);
+    it('PII-looking name or imageUrl => 400 (not 500), no set row and no audit event', async () => {
+      const setsBefore = await prisma.simulatorSet.count();
+      const evBefore = Number(
+        (
+          await prisma.$queryRaw<
+            { n: bigint }[]
+          >`SELECT count(*) AS n FROM "Audit_Events"`
+        )[0].n,
+      );
+      for (const name of [
+        'juan.perez@gmail.com',
+        'V-12345678 cedula',
+        '+58 414 1234567',
+        'password=hunter22',
+        '4111111111111111',
+      ]) {
+        const r = await create({ name }).expect(400);
+        expect(JSON.stringify(r.body)).toMatch(/must not contain/);
+      }
+      await create({ imageUrl: 'https://x.com/juan@gmail.com.png' }).expect(
+        400,
+      );
+      const ok = await mk();
+      await patch(ok, { name: 'juan.perez@gmail.com' }).expect(400);
+      await patch(ok, { imageUrl: 'https://x.com/juan@gmail.com.png' }).expect(
+        400,
+      );
+      expect(await prisma.simulatorSet.count()).toBe(setsBefore + 1);
+      expect(
+        Number(
+          (
+            await prisma.$queryRaw<
+              { n: bigint }[]
+            >`SELECT count(*) AS n FROM "Audit_Events"`
+          )[0].n,
+        ),
+      ).toBe(evBefore + 1); // only the CREATED of `ok`
+      expect((await getSet(ok)).name).toMatch(/^e2e224/);
     });
 
     it('a rejected write leaves no event and no version change', async () => {

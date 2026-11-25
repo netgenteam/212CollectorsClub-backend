@@ -17,7 +17,7 @@ import { defaultPokemonTemplate } from '../simulator-defaults.js';
 import { checkOddsSum, parseTemplate } from '../simulator-config.validation.js';
 import { assertReadyIfActive, countCardsByTier } from './assert-ready.js';
 import { evaluateReadiness, type TierCounts } from './readiness.js';
-import { normalizeSetName } from './set-name.js';
+import { assertAuditSafeText, normalizeSetName } from './set-name.js';
 import type {
   CreateManualSetDto,
   ManualSetsQueryDto,
@@ -153,6 +153,7 @@ export class ManualSetsService {
 
   async create(dto: CreateManualSetDto, admin: Admin): Promise<SetDto> {
     const { name, nameKey } = normalizeSetName(dto.name);
+    if (dto.imageUrl) assertAuditSafeText('imageUrl', dto.imageUrl);
     const template =
       dto.template === undefined
         ? defaultPokemonTemplate() // materialized copy: a future default change never alters this set
@@ -199,6 +200,7 @@ export class ManualSetsService {
   ): Promise<SetDto> {
     const nameN =
       dto.name !== undefined ? normalizeSetName(dto.name) : undefined;
+    if (dto.imageUrl) assertAuditSafeText('imageUrl', dto.imageUrl);
     const template =
       dto.template !== undefined ? parseValidTemplate(dto.template) : undefined;
     const out = await this.run<Outcome>(async (tx, budget, audit) => {
