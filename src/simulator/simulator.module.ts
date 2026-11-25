@@ -9,6 +9,8 @@ import { SimulatorController } from './simulator.controller.js';
 import { SimulatorSetsService } from './simulator-sets.service.js';
 import { ManualSetsController } from './manual/manual-sets.controller.js';
 import { ManualSetsService } from './manual/manual-sets.service.js';
+import { SimulatorImagesController } from './manual/simulator-images.controller.js';
+import { SimulatorImagesService } from './manual/simulator-images.service.js';
 
 // PassportModule.register: same reason as AdminLandingModule (AdminAuthGuard
 // needs a module-scoped AuthModuleOptions). TcgModule only for TCG_API_CLIENT.
@@ -20,12 +22,14 @@ import { ManualSetsService } from './manual/manual-sets.service.js';
   controllers: [
     AdminSimulatorController,
     ManualSetsController,
+    SimulatorImagesController,
     SimulatorController,
   ],
   providers: [
     SimulatorConfigService,
     SimulatorSetsService,
     ManualSetsService,
+    SimulatorImagesService,
     SimulatorPoolCache,
     PackGeneratorService,
   ],

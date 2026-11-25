@@ -81,3 +81,11 @@ export const LANDING_IMAGES_DIR = join(
   LANDING_IMAGES_SUBDIR,
 );
 export const LANDING_IMAGES_URL_PREFIX = `${PUBLIC_STATIC_PREFIX}${LANDING_IMAGES_SUBDIR}/`;
+
+/** Story 22.6 (AD-107): manual simulator set/card images (same static root as landing). */
+export const SIMULATOR_IMAGES_SUBDIR = 'simulator';
+export const SIMULATOR_IMAGES_DIR = join(
+  UPLOADS_PUBLIC_ROOT,
+  SIMULATOR_IMAGES_SUBDIR,
+);
+export const SIMULATOR_IMAGES_URL_PREFIX = `${PUBLIC_STATIC_PREFIX}${SIMULATOR_IMAGES_SUBDIR}/`;

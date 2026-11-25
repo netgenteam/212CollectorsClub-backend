@@ -1,10 +1,14 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { HttpStatus, Injectable } from '@nestjs/common';
-import { imageSize } from 'image-size';
 import { ApiException } from '../common/api-exception.js';
-import { detectImageMime } from '../common/image-mime.js';
+import {
+  CARD_RATIO,
+  CARD_RATIO_TOLERANCE,
+  ImageInspectError,
+  inspectImage,
+  storeImage,
+} from '../common/image-store.js';
 import {
   LANDING_IMAGES_DIR,
   LANDING_IMAGES_URL_PREFIX,
@@ -14,15 +18,8 @@ export type LandingImageKind = 'generic' | 'card';
 
 export const LANDING_IMAGE_MIN_WIDTH = 200;
 export const LANDING_IMAGE_MAX_SIDE = 4096;
-export const LANDING_CARD_RATIO = 63 / 88;
-export const LANDING_CARD_RATIO_TOLERANCE = 0.03;
-
-const EXTENSIONS: Readonly<Record<string, string>> = {
-  'image/jpeg': 'jpg',
-  'image/png': 'png',
-  'image/webp': 'webp',
-  'image/avif': 'avif',
-};
+export const LANDING_CARD_RATIO = CARD_RATIO;
+export const LANDING_CARD_RATIO_TOLERANCE = CARD_RATIO_TOLERANCE;
 
 export interface LandingImageResult {
   url: string;
@@ -50,14 +47,14 @@ export class LandingImagesService {
         'A "file" field with the image is required.',
       );
     }
-    const { mime, width, height } = this.inspect(file.buffer, kind);
-    await mkdir(LANDING_IMAGES_DIR, { recursive: true });
-    const filename = `${randomUUID()}.${EXTENSIONS[mime]}`;
-    await writeFile(join(LANDING_IMAGES_DIR, filename), file.buffer, {
-      flag: 'wx',
-    });
+    const { width, height } = this.inspect(file.buffer, kind);
+    const { url } = await storeImage(
+      file.buffer,
+      LANDING_IMAGES_DIR,
+      LANDING_IMAGES_URL_PREFIX,
+    );
     return {
-      url: `${LANDING_IMAGES_URL_PREFIX}${filename}`,
+      url,
       width,
       height,
       bytes: file.buffer.length,
@@ -89,58 +86,37 @@ export class LandingImagesService {
     buffer: Buffer,
     kind: LandingImageKind,
   ): { mime: string; width: number; height: number } {
-    const mime = detectImageMime(buffer);
-    if (mime === null) {
-      throw new ApiException(
-        HttpStatus.BAD_REQUEST,
-        'UNSUPPORTED_FILE_TYPE',
-        'The file is not a jpg, png, webp or avif image.',
-      );
-    }
-    let width: number | undefined;
-    let height: number | undefined;
     try {
-      ({ width, height } = imageSize(buffer));
-    } catch {
-      width = undefined;
-    }
-    if (!width || !height) {
-      throw new ApiException(
-        HttpStatus.BAD_REQUEST,
-        'UNSUPPORTED_FILE_TYPE',
-        'The image could not be decoded.',
-      );
-    }
-    if (
-      width < LANDING_IMAGE_MIN_WIDTH ||
-      width > LANDING_IMAGE_MAX_SIDE ||
-      height > LANDING_IMAGE_MAX_SIDE
-    ) {
-      throw new ApiException(
-        HttpStatus.UNPROCESSABLE_ENTITY,
-        'LANDING_IMAGE_DIMENSIONS',
-        `Width must be ${LANDING_IMAGE_MIN_WIDTH}-${LANDING_IMAGE_MAX_SIDE} px and height at most ${LANDING_IMAGE_MAX_SIDE} px (got ${width}x${height}).`,
-        { width, height },
-      );
-    }
-    if (kind === 'card') {
-      const deviation =
-        Math.abs(width / height - LANDING_CARD_RATIO) / LANDING_CARD_RATIO;
-      if (deviation > LANDING_CARD_RATIO_TOLERANCE) {
-        throw new ApiException(
-          HttpStatus.UNPROCESSABLE_ENTITY,
-          'LANDING_IMAGE_BAD_RATIO',
-          'A card image must have a 63:88 proportion (±3 %).',
-          {
-            width,
-            height,
-            expected: 0.7159,
-            tolerance: LANDING_CARD_RATIO_TOLERANCE,
-          },
-        );
+      return inspectImage(buffer, {
+        minWidth: LANDING_IMAGE_MIN_WIDTH,
+        maxSide: LANDING_IMAGE_MAX_SIDE,
+        cardRatio: kind === 'card',
+      });
+    } catch (e) {
+      if (!(e instanceof ImageInspectError)) throw e;
+      switch (e.reason) {
+        case 'DIMENSIONS':
+          throw new ApiException(
+            HttpStatus.UNPROCESSABLE_ENTITY,
+            'LANDING_IMAGE_DIMENSIONS',
+            e.message,
+            e.details,
+          );
+        case 'BAD_RATIO':
+          throw new ApiException(
+            HttpStatus.UNPROCESSABLE_ENTITY,
+            'LANDING_IMAGE_BAD_RATIO',
+            e.message,
+            e.details,
+          );
+        default:
+          throw new ApiException(
+            HttpStatus.BAD_REQUEST,
+            'UNSUPPORTED_FILE_TYPE',
+            e.message,
+          );
       }
     }
-    return { mime, width, height };
   }
 }
 
